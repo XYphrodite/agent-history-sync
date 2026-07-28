@@ -21,24 +21,44 @@ public sealed class DpapiKeyStore : IKeyStore
     private const int KeySize = 32;
     private const int MaximumRepositoryIdCharacters = 1_024;
     private const long MaximumProtectedKeyBytes = 65_536;
+    private static readonly UTF8Encoding StrictUtf8 = new(
+        encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
     private readonly string keyDirectory;
 
     public DpapiKeyStore(string? keyDirectory = null)
+        : this(
+            keyDirectory,
+            static () => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
+    {
+    }
+
+    internal DpapiKeyStore(string? keyDirectory, Func<string> localAppDataProvider)
     {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("The DPAPI key store requires Windows.");
         }
 
-        this.keyDirectory = keyDirectory ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexHistorySync",
-            "keys");
-
-        if (string.IsNullOrWhiteSpace(this.keyDirectory))
+        ArgumentNullException.ThrowIfNull(localAppDataProvider);
+        if (keyDirectory is not null)
         {
-            throw new InvalidOperationException("The local key directory is unavailable.");
+            if (string.IsNullOrWhiteSpace(keyDirectory))
+            {
+                throw new ArgumentException("The key directory must not be empty.", nameof(keyDirectory));
+            }
+
+            this.keyDirectory = keyDirectory;
+            return;
         }
+
+        var localAppData = localAppDataProvider();
+        if (string.IsNullOrWhiteSpace(localAppData))
+        {
+            throw new InvalidOperationException("The local application data directory is unavailable.");
+        }
+
+        this.keyDirectory = Path.Combine(localAppData, "CodexHistorySync", "keys");
     }
 
     public async Task SaveAsync(string repositoryId, ReadOnlyMemory<byte> key, CancellationToken ct)
@@ -195,7 +215,19 @@ public sealed class DpapiKeyStore : IKeyStore
             throw new ArgumentException("Repository ID is too long.", nameof(repositoryId));
         }
 
-        var entropy = Encoding.UTF8.GetBytes(repositoryId);
+        byte[] entropy;
+        try
+        {
+            entropy = StrictUtf8.GetBytes(repositoryId);
+        }
+        catch (EncoderFallbackException exception)
+        {
+            throw new ArgumentException(
+                "Repository ID must contain valid UTF-16 text.",
+                nameof(repositoryId),
+                exception);
+        }
+
         var fileId = SHA256.HashData(entropy);
         try
         {
