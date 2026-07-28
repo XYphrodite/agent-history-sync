@@ -9,6 +9,8 @@ public sealed class CodexCompatibilityProbeTests
     [InlineData("AUTH.JSON")]
     [InlineData("state.sqlite")]
     [InlineData("state.sqlite-shm")]
+    [InlineData("state.sqlite.jsonl")]
+    [InlineData("STATE.SQLITE.JSONL")]
     [InlineData("rollout.txt")]
     public async Task DisallowedSessionFileIsRejectedBeforeCopyOrChildLaunch(string sourceFileName)
     {
