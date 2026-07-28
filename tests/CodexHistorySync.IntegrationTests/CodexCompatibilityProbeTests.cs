@@ -4,6 +4,39 @@ namespace CodexHistorySync.IntegrationTests;
 
 public sealed class CodexCompatibilityProbeTests
 {
+    [Theory]
+    [InlineData("auth.json")]
+    [InlineData("AUTH.JSON")]
+    [InlineData("state.sqlite")]
+    [InlineData("state.sqlite-shm")]
+    [InlineData("rollout.txt")]
+    public async Task DisallowedSessionFileIsRejectedBeforeCopyOrChildLaunch(string sourceFileName)
+    {
+        // Removing the file-name gate must launch the child and fail this test.
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"codex-compat-fixture-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fixtureDirectory);
+        var sourceSession = Path.Combine(fixtureDirectory, sourceFileName);
+        const string sourceContent = "sensitive-session-content";
+        await File.WriteAllTextAsync(sourceSession, $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-for-test\",\"title\":\"{sourceContent}\"}}}}" + Environment.NewLine);
+        var launchMarker = Path.Combine(fixtureDirectory, "child-launched.txt");
+        var codex = await FakeCodexAppServer.CreateAsync(fixtureDirectory, launchMarker);
+
+        try
+        {
+            var result = await new CodexCompatibilityProbe().ProbeAsync(codex, sourceSession, CancellationToken.None);
+
+            Assert.False(result.IsCompatible);
+            Assert.Equal("The compatibility session file is not allowed.", result.Diagnostic);
+            Assert.DoesNotContain(sourceSession, result.Diagnostic, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(sourceContent, result.Diagnostic, StringComparison.Ordinal);
+            Assert.False(File.Exists(launchMarker));
+        }
+        finally
+        {
+            Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task MalformedJsonlReturnsAnIncompatibleDiagnostic()
     {
@@ -19,6 +52,30 @@ public sealed class CodexCompatibilityProbeTests
             Assert.False(result.IsCompatible);
             Assert.Equal("unknown", result.CodexVersion);
             Assert.Equal("The compatibility session could not be read.", result.Diagnostic);
+        }
+        finally
+        {
+            Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PersistentCleanupFailureReturnsAnIncompatibleDiagnostic()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"codex-compat-fixture-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fixtureDirectory);
+        var sourceSession = Path.Combine(fixtureDirectory, "rollout.jsonl");
+        await File.WriteAllTextAsync(sourceSession, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-for-test\"}}" + Environment.NewLine);
+
+        try
+        {
+            var codex = await FakeCodexAppServer.CreateAsync(fixtureDirectory);
+            var result = await new CodexCompatibilityProbe(_ => Task.FromResult(false))
+                .ProbeAsync(codex, sourceSession, CancellationToken.None);
+
+            Assert.False(result.IsCompatible);
+            Assert.Equal("The disposable Codex home could not be deleted.", result.Diagnostic);
+            Assert.DoesNotContain(sourceSession, result.Diagnostic, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -52,12 +109,36 @@ public sealed class CodexCompatibilityProbeTests
         }
     }
 
+    [Fact]
+    public async Task LargeChildStderrDoesNotBlockTheCompatibilityProbe()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"codex-compat-fixture-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fixtureDirectory);
+        var sourceSession = Path.Combine(fixtureDirectory, "rollout.jsonl");
+        await File.WriteAllTextAsync(sourceSession, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-for-test\"}}" + Environment.NewLine);
+
+        try
+        {
+            var codex = await FakeCodexAppServer.CreateAsync(fixtureDirectory, writeLargeStderr: true);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var result = await new CodexCompatibilityProbe().ProbeAsync(codex, sourceSession, timeout.Token);
+
+            Assert.True(result.IsCompatible, result.Diagnostic);
+        }
+        finally
+        {
+            Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
     private static class FakeCodexAppServer
     {
-        public static async Task<string> CreateAsync(string directory)
+        public static async Task<string> CreateAsync(string directory, string? launchMarker = null, bool writeLargeStderr = false)
         {
             var scriptPath = Path.Combine(directory, "fake-app-server.ps1");
-            await File.WriteAllTextAsync(scriptPath, """
+            var launchLine = launchMarker is null ? string.Empty : $"New-Item -ItemType File -Path '{launchMarker.Replace("'", "''")}' -Force | Out-Null";
+            var stderrLine = writeLargeStderr ? "[Console]::Error.Write('x' * 200000)" : string.Empty;
+            await File.WriteAllTextAsync(scriptPath, launchLine + Environment.NewLine + stderrLine + Environment.NewLine + """
                 $initialize = [Console]::In.ReadLine() | ConvertFrom-Json
                 if ($initialize.method -ne 'initialize') { exit 11 }
                 [Console]::Out.WriteLine('{"id":1,"result":{"userAgent":"codex-cli fake"}}')
