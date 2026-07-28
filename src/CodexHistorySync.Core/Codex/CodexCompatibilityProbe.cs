@@ -84,8 +84,7 @@ public sealed class CodexCompatibilityProbe
         var fileName = Path.GetFileName(sourceSession);
         return Path.GetExtension(fileName).Equals(".jsonl", StringComparison.OrdinalIgnoreCase) &&
             !fileName.Equals("auth.json", StringComparison.OrdinalIgnoreCase) &&
-            !fileName.EndsWith(".sqlite", StringComparison.OrdinalIgnoreCase) &&
-            !fileName.Contains(".sqlite-", StringComparison.OrdinalIgnoreCase);
+            !fileName.Contains(".sqlite", StringComparison.OrdinalIgnoreCase);
     }
     private static async Task<bool> DeleteDisposableHomeAsync(string disposableHome)
     {
