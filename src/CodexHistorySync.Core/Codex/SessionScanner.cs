@@ -7,6 +7,20 @@ namespace CodexHistorySync.Core.Codex;
 
 public sealed class SessionScanner
 {
+    private static readonly HashSet<string> DisallowedDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "logs",
+        "cache",
+        "tmp",
+        "temp",
+        ".sandbox",
+        ".sandbox-secrets",
+        "machine",
+        "machines",
+        "machine-id",
+        "machine-identity"
+    };
+
     private readonly Func<CancellationToken, Task> waitForStability;
 
     public SessionScanner() : this(TimeSpan.FromMilliseconds(50))
@@ -61,7 +75,7 @@ public sealed class SessionScanner
         foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!CodexPaths.IsPathWithin(candidate, directory) || IsDisallowedCandidate(candidate)) continue;
+            if (!CodexPaths.IsPathWithin(candidate, directory) || IsDisallowedCandidate(candidate, directory)) continue;
 
             var session = await ReadStableSessionAsync(candidate, kind, cancellationToken);
             if (session is not null && ids.Add(session.Id)) objects.Add(session);
@@ -109,8 +123,15 @@ public sealed class SessionScanner
         }
     }
 
-    private static bool IsDisallowedCandidate(string path) =>
-        Path.GetFileName(path).Contains(".sqlite", StringComparison.OrdinalIgnoreCase);
+    private static bool IsDisallowedCandidate(string path, string root)
+    {
+        if (Path.GetFileName(path).Contains(".sqlite", StringComparison.OrdinalIgnoreCase)) return true;
+
+        var relativeDirectory = Path.GetDirectoryName(Path.GetRelativePath(root, path));
+        return relativeDirectory is not null
+            && relativeDirectory.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries)
+                .Any(DisallowedDirectorySegments.Contains);
+    }
 
     private static FileObservation ReadObservation(string path)
     {
@@ -149,7 +170,9 @@ public sealed class SessionScanner
             using var document = JsonDocument.Parse(line);
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return null;
-            if (!root.TryGetProperty("type", out var type) || type.GetString() != "session_meta") continue;
+            if (!root.TryGetProperty("type", out var type)) continue;
+            if (type.ValueKind != JsonValueKind.String) return null;
+            if (type.GetString() != "session_meta") continue;
             if (!root.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object) return null;
             if (!payload.TryGetProperty("id", out var value) || value.ValueKind != JsonValueKind.String) return null;
 
