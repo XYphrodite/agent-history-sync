@@ -1,0 +1,9 @@
+.worktrees/
+.superpowers/sdd/
+artifacts/
+**/bin/
+**/obj/
+**/TestResults/
+*.user
+*.suo
+
