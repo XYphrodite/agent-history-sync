@@ -50,3 +50,11 @@ None remaining. Windows may briefly retain app-server SQLite log handles after p
 - `dotnet test tests/CodexHistorySync.IntegrationTests --filter LargeChildStderrDoesNotBlockTheCompatibilityProbe` — initial RED: cancellation after a stderr pipe block; GREEN: 1 passed after discard-only asynchronous stderr draining.
 - `dotnet test CodexHistorySync.sln --results-directory <temporary directory>` — PASS: 9 passed, 0 failed, 0 skipped.
 - Residual concern: cleanup is best-effort. If deletion remains impossible after retries, the probe reports incompatibility and does not claim deletion; it does not disclose the disposable path or copied session content.
+
+## Fix round 2
+
+- Commit: `0449af851696a0751751de24ea79aad0967bed98`.
+- Covering test file: `tests/CodexHistorySync.IntegrationTests/CodexCompatibilityProbeTests.cs`.
+- `dotnet test tests/CodexHistorySync.IntegrationTests --filter DisallowedSessionFileIsRejectedBeforeCopyOrChildLaunch` — RED: `state.sqlite.jsonl` and `STATE.SQLITE.JSONL` reached the disposable-home SQLite check; GREEN: 7 passed after rejecting `.sqlite` anywhere in the basename before reading or copying.
+- `dotnet test CodexHistorySync.sln --results-directory <temporary directory>` — PASS: 11 passed, 0 failed, 0 skipped.
+- Residual concern: none for this finding.
