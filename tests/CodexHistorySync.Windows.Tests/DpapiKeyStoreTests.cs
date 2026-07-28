@@ -76,6 +76,90 @@ public sealed class DpapiKeyStoreTests
     }
 
     [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task SaveAsync_RejectsDistinctMalformedUtf16RepositoryIdsBeforeCreatingFiles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var testRoot = Path.Combine(Path.GetTempPath(), $"CodexHistorySync-{Guid.NewGuid():N}");
+        var key = RandomNumberGenerator.GetBytes(32);
+        var malformedRepositoryIds = new[] { "\uD800", "\uD801" };
+
+        try
+        {
+            var store = new DpapiKeyStore(testRoot);
+
+            foreach (var repositoryId in malformedRepositoryIds)
+            {
+                await Assert.ThrowsAsync<ArgumentException>(() =>
+                    store.SaveAsync(repositoryId, key, CancellationToken.None));
+            }
+
+            Assert.False(Directory.Exists(testRoot));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task LoadAndDeleteAsync_RejectMalformedUtf16RepositoryIdBeforeFilesystemAccess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var testRoot = Path.Combine(Path.GetTempPath(), $"CodexHistorySync-{Guid.NewGuid():N}");
+        var store = new DpapiKeyStore(testRoot);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.LoadAsync("\uD800", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.DeleteAsync("\uD801", CancellationToken.None));
+        Assert.False(Directory.Exists(testRoot));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void Constructor_RejectsEmptyLocalAppDataBeforeBuildingRelativePath()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var originalWorkingDirectory = Environment.CurrentDirectory;
+        var testWorkingDirectory = Path.Combine(Path.GetTempPath(), $"CodexHistorySync-cwd-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testWorkingDirectory);
+
+        try
+        {
+            Environment.CurrentDirectory = testWorkingDirectory;
+
+            Assert.Throws<InvalidOperationException>(() =>
+                new DpapiKeyStore(
+                    keyDirectory: null,
+                    localAppDataProvider: static () => string.Empty));
+            Assert.False(Directory.Exists(Path.Combine(testWorkingDirectory, "CodexHistorySync")));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalWorkingDirectory;
+            Directory.Delete(testWorkingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SaveAsync_ProtectsDirectoryAndFileAclsForCurrentOwnerOnly()
     {
         if (!OperatingSystem.IsWindows())
