@@ -7,7 +7,7 @@ DONE
 ## Commits
 
 - `f45fe1dab9741d143eff570db5c8c828014a93c9` — solution scaffold, probe, CLI, deterministic protocol test, and sanitized compatibility evidence.
-- This report and the post-review hardening are committed with the follow-up Task 1 commit.
+- `79d247a` — post-review malformed-session and cleanup hardening, tests, and this report.
 
 ## Files changed
 
