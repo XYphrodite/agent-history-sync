@@ -40,3 +40,13 @@ DONE
 ## Concerns
 
 None remaining. Windows may briefly retain app-server SQLite log handles after process termination; the probe retries disposable-home deletion for five seconds and the verified real gate completed successfully.
+
+## Fix round 1
+
+- Commit: `87cca669dbac75dced0ae78aa24f86045f1d5c61`.
+- Covering test file: `tests/CodexHistorySync.IntegrationTests/CodexCompatibilityProbeTests.cs`.
+- `dotnet test tests/CodexHistorySync.IntegrationTests --filter DisallowedSessionFileIsRejectedBeforeCopyOrChildLaunch` — initial RED: five disallowed files reached later probe behavior; GREEN: 5 passed. The cases cover `auth.json`, case variation, `*.sqlite`, `*.sqlite-*`, and non-JSONL extension; each proves no child launch and no path/content in the diagnostic.
+- `dotnet test tests/CodexHistorySync.IntegrationTests --filter PersistentCleanupFailureReturnsAnIncompatibleDiagnostic` — initial RED: no injected cleanup seam; GREEN: 1 passed. Persistent cleanup failure is returned as a sanitized incompatible result, which the CLI maps to exit code 3.
+- `dotnet test tests/CodexHistorySync.IntegrationTests --filter LargeChildStderrDoesNotBlockTheCompatibilityProbe` — initial RED: cancellation after a stderr pipe block; GREEN: 1 passed after discard-only asynchronous stderr draining.
+- `dotnet test CodexHistorySync.sln --results-directory <temporary directory>` — PASS: 9 passed, 0 failed, 0 skipped.
+- Residual concern: cleanup is best-effort. If deletion remains impossible after retries, the probe reports incompatibility and does not claim deletion; it does not disclose the disposable path or copied session content.
