@@ -100,6 +100,45 @@ public sealed class SessionScannerTests
     }
 
     [Fact]
+    public async Task ScanAsyncSkipsNonStringRecordTypeAndContinuesToValidSession()
+    {
+        // Calling GetString on a non-string type must not prevent another session from being discovered.
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        await fixture.WriteFileAsync("sessions\\00-malformed.jsonl", "{\"type\":1}\n");
+        var valid = await fixture.WriteSessionAsync("sessions", "99-valid.jsonl", "valid-after-malformed");
+
+        var found = await new SessionScanner(TimeSpan.Zero).ScanAsync(CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+
+        var session = Assert.Single(found);
+        Assert.Equal(Path.GetFullPath(valid), session.SourcePath);
+    }
+
+    [Fact]
+    public async Task ScanAsyncSkipsFilesInDisallowedNestedDirectories()
+    {
+        // Scanning machine and temporary state directories would export data outside the session contract.
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        var disallowedDirectories = new[] { "LoGs", "CACHE", "tmp", "temp", ".sandbox", ".sandbox-secrets", "machine-id" };
+        var skippedPaths = new List<string>();
+
+        foreach (var directory in disallowedDirectories)
+        {
+            skippedPaths.Add(await fixture.WriteSessionAsync(Path.Combine("sessions", "2026", "07", "28", directory, "nested"), $"{directory}-active.jsonl", $"active-{directory}"));
+            skippedPaths.Add(await fixture.WriteSessionAsync(Path.Combine("archived_sessions", "2026", "07", "28", directory, "nested"), $"{directory}-archived.jsonl", $"archived-{directory}"));
+        }
+
+        var active = await fixture.WriteSessionAsync(Path.Combine("sessions", "2026", "07", "28"), "active.jsonl", "allowed-active");
+        var archived = await fixture.WriteSessionAsync(Path.Combine("archived_sessions", "2026", "07", "28"), "archived.jsonl", "allowed-archived");
+
+        var found = await new SessionScanner(TimeSpan.Zero).ScanAsync(CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+
+        Assert.Equal(2, found.Count);
+        Assert.Contains(found, item => item.SourcePath == Path.GetFullPath(active));
+        Assert.Contains(found, item => item.SourcePath == Path.GetFullPath(archived));
+        Assert.DoesNotContain(found, item => skippedPaths.Contains(item.SourcePath, StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ResolveUsesConfiguredHomeAndReturnsCanonicalChildPaths()
     {
         // Losing explicit-home precedence could scan the caller's real Codex profile.
