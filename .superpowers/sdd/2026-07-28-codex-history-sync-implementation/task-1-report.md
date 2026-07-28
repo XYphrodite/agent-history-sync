@@ -33,7 +33,7 @@ DONE
 
 ## Self-review
 
-- The deterministic fake app-server asserts initialization, `initialized`, `thread/list` with `useStateDbOnly: false`, no pre-existing SQLite in the disposable home, imported JSONL presence, and thread-ID matching.
+- The deterministic fake app-server asserts initialization, `initialized`, `thread/list` with `useStateDbOnly: false`, no pre-existing SQLite in the disposable home, imported JSONL presence in `sessions/YYYY/MM/DD`, and thread-ID matching.
 - External review found malformed-session and cleanup robustness issues. Malformed JSONL now returns an incompatible diagnostic; cleanup retries transient IO/access failures and treats an already-removed home as cleaned up.
 - `git diff --check` was clean before the initial implementation commit. No fixture file is tracked.
 

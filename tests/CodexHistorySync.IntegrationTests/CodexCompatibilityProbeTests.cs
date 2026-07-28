@@ -70,6 +70,8 @@ public sealed class CodexCompatibilityProbeTests
                 if (Get-ChildItem -Path $env:CODEX_HOME -Recurse -File -Filter '*.sqlite*') { exit 14 }
                 $importedSession = Get-ChildItem -Path (Join-Path $env:CODEX_HOME 'sessions') -Recurse -File -Filter '*.jsonl'
                 if ($importedSession.Count -ne 1 -or -not (Select-String -LiteralPath $importedSession.FullName -SimpleMatch -Quiet 'thread-for-test')) { exit 15 }
+                $relativeSessionPath = $importedSession.FullName.Substring((Join-Path $env:CODEX_HOME 'sessions').Length).TrimStart('\\')
+                if ($relativeSessionPath -notmatch '^\d{4}\\\d{2}\\\d{2}\\[^\\]+\.jsonl$') { exit 16 }
                 [Console]::Out.WriteLine('{"id":2,"result":{"data":[{"id":"thread-for-test"}]}}')
                 """);
 
