@@ -8,6 +8,7 @@ namespace CodexHistorySync.Core.Sync;
 
 public sealed record BackupRecord(string Id, string OriginalPath, ContentHash ContentHash, DateTimeOffset CreatedAtUtc, string OperationId, string DirectoryPath, string ContentPath, string ManifestPath);
 internal sealed record BackupManifest(int SchemaVersion, string OriginalPath, ContentHash ContentHash, DateTimeOffset CreatedAtUtc, string OperationId);
+internal interface IStagingDirectoryCleaner { void Delete(string path); }
 
 public sealed class BackupStore
 {
@@ -17,8 +18,12 @@ public sealed class BackupStore
     private readonly IAtomicFileSystem _fileSystem;
     private readonly TimeProvider _clock;
     private readonly TimeSpan _retention;
+    private readonly IStagingDirectoryCleaner _stagingCleaner;
 
     public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null)
+        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null) { }
+
+    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner)
     {
         ArgumentNullException.ThrowIfNull(codexPaths);
         PathSafety.ValidateFileComponent(repositoryId, nameof(repositoryId));
@@ -29,6 +34,7 @@ public sealed class BackupStore
         _fileSystem = fileSystem ?? new AtomicFileSystem();
         _clock = timeProvider ?? TimeProvider.System;
         _retention = retention ?? DefaultRetention;
+        _stagingCleaner = stagingCleaner ?? StagingDirectoryCleaner.Instance;
         if (_retention < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(retention));
     }
 
@@ -50,6 +56,7 @@ public sealed class BackupStore
         var manifestPath = Path.Combine(staging, "manifest.json");
         try
         {
+            ValidateConcretePaths(staging, contentPath, manifestPath);
             await using (var source = OpenRead(original)) await WriteDurableAsync(contentPath, source, ct).ConfigureAwait(false);
             var originalHash = await HashFileAsync(original, ct).ConfigureAwait(false);
             var backupHash = await HashFileAsync(contentPath, ct).ConfigureAwait(false);
@@ -57,12 +64,17 @@ public sealed class BackupStore
             var manifest = new BackupManifest(1, original, backupHash, created, operationId);
             var bytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
             await WriteDurableAsync(manifestPath, new MemoryStream(bytes, writable: false), ct).ConfigureAwait(false);
+            ValidateConcretePaths(staging, contentPath, manifestPath, directory);
             Directory.Move(staging, directory);
             return Record(id, directory, manifest);
         }
-        catch
+        catch (Exception primary)
         {
-            TryDeleteDirectory(staging);
+            try { if (Directory.Exists(staging)) _stagingCleaner.Delete(staging); }
+            catch (Exception cleanup)
+            {
+                throw new AtomicMutationException("Backup staging cleanup failed; evidence was preserved.", new AggregateException(primary, cleanup), Directory.Exists(staging) ? [staging] : []);
+            }
             throw;
         }
     }
@@ -82,10 +94,7 @@ public sealed class BackupStore
             await using var content = OpenRead(backup.ContentPath);
             await _fileSystem.WriteTemporaryAsync(temporary, content, ct).ConfigureAwait(false);
             if (!HashEquals(await HashFileAsync(temporary, ct).ConfigureAwait(false), backup.ContentHash)) throw new InvalidDataException("Staged restore content hash verification failed.");
-            if (displaced is null)
-                await _fileSystem.ReplaceAsync(temporary, backup.OriginalPath, ct).ConfigureAwait(false);
-            else if (!await _fileSystem.ReplaceIfUnchangedAsync(temporary, backup.OriginalPath, displaced.ContentHash, mutationAllowed: null, ct).ConfigureAwait(false))
-                throw new IOException("The restore destination changed after it was backed up; restore was not applied.");
+            await _fileSystem.PublishAsync(temporary, backup.OriginalPath, backup.ContentHash, displaced?.ContentHash, mutationAllowed: null, ct).ConfigureAwait(false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
@@ -125,6 +134,8 @@ public sealed class BackupStore
         var directory = Path.GetFullPath(Path.Combine(RootPath, id));
         if (!CodexPaths.IsPathWithin(directory, RootPath)) throw new ArgumentException("Backup ID escapes the backup root.", nameof(id));
         var manifestPath = Path.Combine(directory, "manifest.json");
+        var contentPath = Path.Combine(directory, "content.bin");
+        ValidateConcretePaths(directory, manifestPath, contentPath);
         await using var input = OpenRead(manifestPath);
         var manifest = await JsonSerializer.DeserializeAsync<BackupManifest>(input, JsonOptions, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Backup manifest is empty.");
         if (manifest.SchemaVersion != 1) throw new InvalidDataException("Backup manifest schema is unsupported.");
@@ -158,10 +169,13 @@ public sealed class BackupStore
     }
     internal static bool HashEquals(ContentHash left, ContentHash right) => StringComparer.OrdinalIgnoreCase.Equals(left.Hex, right.Hex);
     internal static string SiblingTemporaryPath(string destination) => Path.Combine(Path.GetDirectoryName(destination)!, $".{Path.GetFileName(destination)}.{Guid.NewGuid():N}.tmp");
-    private static void TryDeleteDirectory(string path)
+    private sealed class StagingDirectoryCleaner : IStagingDirectoryCleaner
     {
-        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        public static readonly StagingDirectoryCleaner Instance = new();
+        public void Delete(string path) => Directory.Delete(path, recursive: true);
+    }
+    private static void ValidateConcretePaths(params string[] paths)
+    {
+        foreach (var path in paths) PathSafety.RejectReparsePoints(path, nameof(paths));
     }
 }

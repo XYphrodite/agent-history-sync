@@ -12,19 +12,36 @@ public sealed record ConflictRecord(string Id, ConflictProvenance Provenance, st
 public enum ConflictResolution { KeepLocal, KeepRemote, ExportBoth }
 public sealed record ConflictResolutionResult(string? SelectedEncryptedPath, string? LocalPlaintextPath, string? RemotePlaintextPath);
 internal sealed record ConflictManifest(int SchemaVersion, ConflictProvenance Provenance, ContentHash LocalEnvelopeHash, ContentHash RemoteEnvelopeHash);
+internal interface IAtomicDirectoryPublisher { void Publish(string stagingPath, string destinationPath); }
+internal interface IConflictStoreHooks
+{
+    void OnAfterFirstEnvelope();
+    void OnAfterFirstPlaintext();
+    void OnBeforePreservePublication();
+    void OnBeforeExportPublication();
+}
 
 public sealed class ConflictStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly CodexPaths _paths;
+    private readonly IAtomicDirectoryPublisher _publisher;
+    private readonly IConflictStoreHooks _hooks;
+    private readonly IStagingDirectoryCleaner _stagingCleaner;
 
     public ConflictStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths)
+        : this(repositoryId, localAppDataDirectory, codexPaths, null, null, null) { }
+
+    internal ConflictStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicDirectoryPublisher? publisher, IConflictStoreHooks? hooks, IStagingDirectoryCleaner? stagingCleaner)
     {
         _paths = codexPaths ?? throw new ArgumentNullException(nameof(codexPaths));
         PathSafety.ValidateFileComponent(repositoryId, nameof(repositoryId));
         var local = PathSafety.Canonicalize(localAppDataDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), nameof(localAppDataDirectory));
         RootPath = Path.GetFullPath(Path.Combine(local, "CodexHistorySync", "repositories", repositoryId, "conflicts"));
         PathSafety.EnsureOutsideCodex(RootPath, codexPaths, nameof(localAppDataDirectory));
+        _publisher = publisher ?? DirectoryPublisher.Instance;
+        _hooks = hooks ?? NoopConflictStoreHooks.Instance;
+        _stagingCleaner = stagingCleaner ?? ConflictStagingDirectoryCleaner.Instance;
     }
 
     public string RootPath { get; }
@@ -45,18 +62,26 @@ public sealed class ConflictStore
         var manifestPath = Path.Combine(staging, "manifest.json");
         try
         {
+            ValidateConcretePaths(staging, localPath, remotePath, manifestPath);
             await WriteDurableAsync(localPath, localEncrypted, ct).ConfigureAwait(false);
+            _hooks.OnAfterFirstEnvelope();
+            ct.ThrowIfCancellationRequested();
             await WriteDurableAsync(remotePath, remoteEncrypted, ct).ConfigureAwait(false);
             var manifest = new ConflictManifest(1, provenance, await BackupStore.HashFileAsync(localPath, ct).ConfigureAwait(false), await BackupStore.HashFileAsync(remotePath, ct).ConfigureAwait(false));
             await WriteDurableAsync(manifestPath, new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions), writable: false), ct).ConfigureAwait(false);
-            Directory.Move(staging, directory);
+            ValidateConcretePaths(staging, localPath, remotePath, manifestPath, directory);
+            _hooks.OnBeforePreservePublication();
+            ct.ThrowIfCancellationRequested();
+            _publisher.Publish(staging, directory);
             return new ConflictRecord(id, provenance, directory, Path.Combine(directory, "local.encrypted"), Path.Combine(directory, "remote.encrypted"), Path.Combine(directory, "manifest.json"));
         }
-        catch
+        catch (Exception primary)
         {
-            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
+            try { if (Directory.Exists(staging)) _stagingCleaner.Delete(staging); }
+            catch (Exception cleanup)
+            {
+                throw new AtomicMutationException("Conflict staging cleanup failed; evidence was preserved.", new AggregateException(primary, cleanup), Directory.Exists(staging) ? [staging] : []);
+            }
             throw;
         }
     }
@@ -96,12 +121,26 @@ public sealed class ConflictStore
         var remoteOutput = Path.Combine(staging, $"{conflict.Id}.remote.jsonl");
         try
         {
+            ValidateConcretePaths(staging, localOutput, remoteOutput);
             await DecryptDurablyAsync(crypto, conflict.LocalEncryptedPath, localOutput, masterKey, conflict.Provenance.Metadata, ct).ConfigureAwait(false);
+            _hooks.OnAfterFirstPlaintext();
+            ct.ThrowIfCancellationRequested();
             await DecryptDurablyAsync(crypto, conflict.RemoteEncryptedPath, remoteOutput, masterKey, conflict.Provenance.Metadata, ct).ConfigureAwait(false);
-            Directory.Move(staging, target);
+            ValidateConcretePaths(staging, localOutput, remoteOutput, target);
+            _hooks.OnBeforeExportPublication();
+            ct.ThrowIfCancellationRequested();
+            _publisher.Publish(staging, target);
             return new(null, Path.Combine(target, Path.GetFileName(localOutput)), Path.Combine(target, Path.GetFileName(remoteOutput)));
         }
-        finally { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
+        catch (Exception primary)
+        {
+            try { if (Directory.Exists(staging)) _stagingCleaner.Delete(staging); }
+            catch (Exception cleanup)
+            {
+                throw new AtomicMutationException("Plaintext export staging cleanup failed; evidence was preserved.", new AggregateException(primary, cleanup), Directory.Exists(staging) ? [staging] : []);
+            }
+            throw;
+        }
     }
 
     private async Task<ConflictRecord> LoadAsync(string id, CancellationToken ct)
@@ -111,11 +150,14 @@ public sealed class ConflictStore
         var directory = Path.GetFullPath(Path.Combine(RootPath, id));
         if (!CodexPaths.IsPathWithin(directory, RootPath)) throw new ArgumentException("Conflict ID escapes the conflict root.", nameof(id));
         var manifestPath = Path.Combine(directory, "manifest.json");
+        var localPath = Path.Combine(directory, "local.encrypted");
+        var remotePath = Path.Combine(directory, "remote.encrypted");
+        ValidateConcretePaths(directory, manifestPath, localPath, remotePath);
         await using var input = new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
         var manifest = await JsonSerializer.DeserializeAsync<ConflictManifest>(input, JsonOptions, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Conflict manifest is empty.");
         if (manifest.SchemaVersion != 1) throw new InvalidDataException("Conflict manifest schema is unsupported.");
         ValidateProvenance(manifest.Provenance);
-        return new(id, manifest.Provenance, directory, Path.Combine(directory, "local.encrypted"), Path.Combine(directory, "remote.encrypted"), manifestPath);
+        return new(id, manifest.Provenance, directory, localPath, remotePath, manifestPath);
     }
 
     private static void ValidateProvenance(ConflictProvenance value)
@@ -150,5 +192,36 @@ public sealed class ConflictStore
         await using var input = new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
         var manifest = await JsonSerializer.DeserializeAsync<ConflictManifest>(input, JsonOptions, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Conflict manifest is empty.");
         return local ? manifest.LocalEnvelopeHash : manifest.RemoteEnvelopeHash;
+    }
+
+    private static void ValidateConcretePaths(params string[] paths)
+    {
+        foreach (var path in paths) PathSafety.RejectReparsePoints(path, nameof(paths));
+    }
+
+    private sealed class DirectoryPublisher : IAtomicDirectoryPublisher
+    {
+        public static readonly DirectoryPublisher Instance = new();
+        public void Publish(string stagingPath, string destinationPath)
+        {
+            PathSafety.RejectReparsePoints(stagingPath, nameof(stagingPath));
+            PathSafety.RejectReparsePoints(destinationPath, nameof(destinationPath));
+            Directory.Move(stagingPath, destinationPath);
+        }
+    }
+
+    private sealed class NoopConflictStoreHooks : IConflictStoreHooks
+    {
+        public static readonly NoopConflictStoreHooks Instance = new();
+        public void OnAfterFirstEnvelope() { }
+        public void OnAfterFirstPlaintext() { }
+        public void OnBeforePreservePublication() { }
+        public void OnBeforeExportPublication() { }
+    }
+
+    private sealed class ConflictStagingDirectoryCleaner : IStagingDirectoryCleaner
+    {
+        public static readonly ConflictStagingDirectoryCleaner Instance = new();
+        public void Delete(string path) => Directory.Delete(path, recursive: true);
     }
 }
