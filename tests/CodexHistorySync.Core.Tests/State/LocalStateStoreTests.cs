@@ -51,6 +51,36 @@ public sealed class LocalStateStoreTests : IDisposable
         await Assert.ThrowsAsync<InvalidDataException>(() => store.LoadAsync("repository-1", CancellationToken.None));
     }
 
+    [Fact]
+    public async Task SaveAsync_WhenReplacingStateFails_PreservesExistingStateAndCleansTemporaryFile()
+    {
+        var repositoryId = "repository-1";
+        var baseline = new DeviceState(1, repositoryId, [Version("session-1", "baseline")]);
+        var updated = new DeviceState(1, repositoryId, [Version("session-1", "updated")]);
+        var store = new LocalStateStore(_root);
+        await store.SaveAsync(baseline, CancellationToken.None);
+        var failingStore = new LocalStateStore(_root, new FailingStateFileReplacer());
+
+        await Assert.ThrowsAsync<IOException>(() => failingStore.SaveAsync(updated, CancellationToken.None));
+
+        var loaded = await store.LoadAsync(repositoryId, CancellationToken.None);
+        Assert.Equal(baseline.Objects, loaded.Objects);
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(store.GetStatePath(repositoryId))!, "*.tmp"));
+    }
+
+    [Fact]
+    public async Task SaveAsync_WhenCreatingStateFails_LeavesNoDestinationOrTemporaryFile()
+    {
+        var repositoryId = "repository-1";
+        var store = new LocalStateStore(_root, new FailingStateFileReplacer());
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            store.SaveAsync(new DeviceState(1, repositoryId, [Version("session-1", "new")]), CancellationToken.None));
+
+        Assert.False(File.Exists(store.GetStatePath(repositoryId)));
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(store.GetStatePath(repositoryId))!, "*.tmp"));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))
@@ -61,4 +91,10 @@ public sealed class LocalStateStoreTests : IDisposable
 
     private static ObjectVersion Version(string id, string hash) =>
         new(new LogicalObjectId(id), ObjectKind.ActiveSession, new ContentHash(hash), hash, false);
+
+    private sealed class FailingStateFileReplacer : IStateFileReplacer
+    {
+        public void Replace(string sourcePath, string destinationPath) =>
+            throw new IOException("Injected state-file replacement failure.");
+    }
 }

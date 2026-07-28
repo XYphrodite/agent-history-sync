@@ -8,11 +8,19 @@ public sealed class LocalStateStore
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _localAppDataDirectory;
+    private readonly IStateFileReplacer _stateFileReplacer;
 
     public LocalStateStore(string? localAppDataDirectory = null)
+        : this(localAppDataDirectory, new StateFileReplacer())
     {
+    }
+
+    internal LocalStateStore(string? localAppDataDirectory, IStateFileReplacer stateFileReplacer)
+    {
+        ArgumentNullException.ThrowIfNull(stateFileReplacer);
         _localAppDataDirectory = localAppDataDirectory
             ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        _stateFileReplacer = stateFileReplacer;
 
         if (string.IsNullOrWhiteSpace(_localAppDataDirectory))
         {
@@ -48,14 +56,7 @@ public sealed class LocalStateStore
                 temporary.Flush(flushToDisk: true);
             }
 
-            if (File.Exists(statePath))
-            {
-                File.Replace(temporaryPath, statePath, destinationBackupFileName: null);
-            }
-            else
-            {
-                File.Move(temporaryPath, statePath);
-            }
+            _stateFileReplacer.Replace(temporaryPath, statePath);
         }
         finally
         {
@@ -117,4 +118,24 @@ public sealed class LocalStateStore
 
         return repositoryId;
     }
+
+    private sealed class StateFileReplacer : IStateFileReplacer
+    {
+        public void Replace(string sourcePath, string destinationPath)
+        {
+            if (File.Exists(destinationPath))
+            {
+                File.Replace(sourcePath, destinationPath, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(sourcePath, destinationPath);
+            }
+        }
+    }
+}
+
+internal interface IStateFileReplacer
+{
+    void Replace(string sourcePath, string destinationPath);
 }
