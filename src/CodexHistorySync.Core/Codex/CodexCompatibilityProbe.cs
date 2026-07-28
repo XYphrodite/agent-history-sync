@@ -11,14 +11,14 @@ public sealed class CodexCompatibilityProbe
     {
         if (string.IsNullOrWhiteSpace(codexExe)) return Incompatible("unknown", "A Codex executable path is required.");
         if (!File.Exists(sourceSession)) return Incompatible("unknown", "The compatibility session was not found.");
-        var threadId = await ReadThreadIdAsync(sourceSession, cancellationToken);
-        if (threadId is null) return Incompatible("unknown", "The compatibility session has no session_meta thread ID.");
-
         var disposableHome = Path.Combine(Path.GetTempPath(), $"codex-history-sync-{Guid.NewGuid():N}");
         Process? process = null;
         var codexVersion = "unknown";
         try
         {
+            Directory.CreateDirectory(disposableHome);
+            var threadId = await ReadThreadIdAsync(sourceSession, cancellationToken);
+            if (threadId is null) return Incompatible("unknown", "The compatibility session has no session_meta thread ID.");
             var destination = Path.Combine(disposableHome, "sessions", DateTime.UtcNow.ToString("yyyy"), DateTime.UtcNow.ToString("MM"), DateTime.UtcNow.ToString("dd"));
             Directory.CreateDirectory(destination);
             File.Copy(sourceSession, Path.Combine(destination, Path.GetFileName(sourceSession)));
@@ -44,7 +44,8 @@ public sealed class CodexCompatibilityProbe
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return Incompatible(codexVersion, "The compatibility probe was cancelled."); }
         catch (OperationCanceledException) { return Incompatible(codexVersion, "The Codex app-server did not respond before the compatibility probe timed out."); }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException or JsonException or System.ComponentModel.Win32Exception) { return Incompatible(codexVersion, $"The Codex compatibility probe failed: {exception.GetType().Name}."); }
+        catch (JsonException) { return Incompatible(codexVersion, "The compatibility session could not be read."); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception) { return Incompatible(codexVersion, $"The Codex compatibility probe failed: {exception.GetType().Name}."); }
         finally
         {
             if (process is not null)
@@ -65,6 +66,14 @@ public sealed class CodexCompatibilityProbe
             {
                 Directory.Delete(disposableHome, recursive: true);
                 return;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return;
+            }
+            catch (UnauthorizedAccessException) when (attempt < 49)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100));
             }
             catch (IOException) when (attempt < 49)
             {

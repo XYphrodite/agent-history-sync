@@ -5,6 +5,28 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class CodexCompatibilityProbeTests
 {
     [Fact]
+    public async Task MalformedJsonlReturnsAnIncompatibleDiagnostic()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"codex-compat-fixture-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fixtureDirectory);
+        var sourceSession = Path.Combine(fixtureDirectory, "rollout.jsonl");
+        await File.WriteAllTextAsync(sourceSession, "not JSON" + Environment.NewLine);
+
+        try
+        {
+            var result = await new CodexCompatibilityProbe().ProbeAsync("unused", sourceSession, CancellationToken.None);
+
+            Assert.False(result.IsCompatible);
+            Assert.Equal("unknown", result.CodexVersion);
+            Assert.Equal("The compatibility session could not be read.", result.Diagnostic);
+        }
+        finally
+        {
+            Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ImportedJsonlIsListedWithoutCopyingSqlite()
     {
         // Removing the probe's JSON-RPC handshake, false state-db flag, JSONL import,
