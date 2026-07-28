@@ -3,6 +3,7 @@ using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
+using Xunit.Sdk;
 
 namespace CodexHistorySync.Core.Tests.Sync;
 
@@ -107,6 +108,48 @@ public sealed class BackupStoreTests : IDisposable
         Assert.StartsWith(Path.GetFullPath(safeLookalike), store.RootPath, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task ListAsync_RejectsSymbolicLinkRecordDirectory()
+    {
+        var fixture = CreateFixture();
+        var original = Path.Combine(fixture.Paths.Sessions, "linked-record.jsonl");
+        await WriteAsync(original, "linked\n");
+        var backup = await fixture.Store.CreateAsync(original, "linked-record", CancellationToken.None);
+        var outside = Path.Combine(_root, "outside-backup-record");
+        Directory.Move(backup.DirectoryPath, outside);
+        try { Directory.CreateSymbolicLink(backup.DirectoryPath, outside); }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            throw SkipException.ForSkip($"Symbolic-link creation is unavailable: {exception.GetType().Name}");
+        }
+
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Store.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CreateAsync_WhenPrimaryAndStagingCleanupFail_ExposesEncryptedBackupEvidence()
+    {
+        var home = Path.Combine(_root, "cleanup-codex");
+        Directory.CreateDirectory(home);
+        var paths = CodexPaths.Resolve(home);
+        var original = Path.Combine(paths.Sessions, "cleanup.jsonl");
+        await WriteAsync(original, "cleanup\n");
+        var store = new BackupStore(
+            "repo-cleanup", Path.Combine(_root, "cleanup-local"), paths,
+            new AtomicFileSystem(), new TestTimeProvider(DateTimeOffset.UtcNow), retention: null,
+            new FailingStagingDirectoryCleaner());
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var error = await Assert.ThrowsAsync<AtomicMutationException>(() =>
+            store.CreateAsync(original, "cleanup-failure", cancellation.Token));
+
+        var staging = Assert.Single(error.PreservedPaths);
+        Assert.True(Directory.Exists(staging));
+        Assert.EndsWith(".tmp", staging, StringComparison.Ordinal);
+        Assert.IsType<AggregateException>(error.InnerException);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
@@ -141,6 +184,11 @@ public sealed class BackupStoreTests : IDisposable
         private readonly AtomicFileSystem _inner = new();
         public string Destination { get; set; } = string.Empty;
         public Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct) => _inner.WriteTemporaryAsync(path, content, ct);
+        public async Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash, ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
+        {
+            await File.WriteAllTextAsync(Destination, "concurrent-writer", ct);
+            await _inner.PublishAsync(temporaryPath, destinationPath, expectedSourceHash, expectedDestinationHash, mutationAllowed, ct);
+        }
         public Task ReplaceAsync(string temporaryPath, string destinationPath, CancellationToken ct) => _inner.ReplaceAsync(temporaryPath, destinationPath, ct);
         public async Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
         {
@@ -149,5 +197,10 @@ public sealed class BackupStoreTests : IDisposable
         }
         public Task DeleteAsync(string path, CancellationToken ct) => _inner.DeleteAsync(path, ct);
         public Task<bool> DeleteIfUnchangedAsync(string path, ContentHash expectedHash, Func<bool>? mutationAllowed, CancellationToken ct) => _inner.DeleteIfUnchangedAsync(path, expectedHash, mutationAllowed, ct);
+    }
+
+    private sealed class FailingStagingDirectoryCleaner : IStagingDirectoryCleaner
+    {
+        public void Delete(string path) => throw new IOException("Injected staging cleanup failure.");
     }
 }

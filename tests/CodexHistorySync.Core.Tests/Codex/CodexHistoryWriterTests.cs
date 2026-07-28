@@ -128,6 +128,60 @@ public sealed class CodexHistoryWriterTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => fixture.Writer.ImportAsync(Object(lookalike, incoming), new MemoryStream(incoming), "lookalike", CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ImportAsync_WhenStagingChangesInsideAtomicBoundary_RejectsAndCleansTemporary(bool existingDestination)
+    {
+        var hooks = new ActionAtomicHooks { AfterSourceHash = path => File.WriteAllText(path, "tampered") };
+        var fixture = CreateFixture(new AtomicFileSystem(hooks));
+        var path = Path.Combine(fixture.Paths.Sessions, "staged-race.jsonl");
+        Directory.CreateDirectory(fixture.Paths.Sessions);
+        var original = Session("chat", "original");
+        if (existingDestination) await File.WriteAllBytesAsync(path, original);
+        var incoming = Session("chat", "incoming");
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Writer.ImportAsync(Object(path, incoming), new MemoryStream(incoming), "stage-race", CancellationToken.None));
+
+        if (existingDestination) Assert.Equal(original, await File.ReadAllBytesAsync(path));
+        else Assert.False(File.Exists(path));
+        Assert.Empty(Directory.EnumerateFiles(fixture.Paths.Sessions, "*.tmp"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ImportAsync_WhenCodexStartsAfterAtomicHash_DoesNotPublish(bool existingDestination)
+    {
+        var detector = new MutableProcessDetector();
+        var hooks = new ActionAtomicHooks { AfterSourceHash = _ => detector.Running = true };
+        var fixture = CreateFixture(new AtomicFileSystem(hooks), detector);
+        var path = Path.Combine(fixture.Paths.Sessions, "process-race.jsonl");
+        Directory.CreateDirectory(fixture.Paths.Sessions);
+        var original = Session("chat", "original");
+        if (existingDestination) await File.WriteAllBytesAsync(path, original);
+        var incoming = Session("chat", "incoming");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Writer.ImportAsync(Object(path, incoming), new MemoryStream(incoming), "process-race", CancellationToken.None));
+
+        if (existingDestination) Assert.Equal(original, await File.ReadAllBytesAsync(path));
+        else Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task ApplyTombstoneAsync_WhenCodexStartsAfterAtomicHash_DoesNotDelete()
+    {
+        var detector = new MutableProcessDetector();
+        var hooks = new ActionAtomicHooks { AfterDestinationHash = _ => detector.Running = true };
+        var fixture = CreateFixture(new AtomicFileSystem(hooks), detector);
+        var path = await WriteSessionAsync(fixture.Paths, "delete-process-race.jsonl", "chat", "original");
+        var original = await File.ReadAllBytesAsync(path);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Writer.ApplyTombstoneAsync(Object(path, original), new ContentHash(Hash(original)), "delete-process-race", CancellationToken.None));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(path));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
@@ -168,10 +222,30 @@ public sealed class CodexHistoryWriterTests : IDisposable
         public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
+    private sealed class MutableProcessDetector : ICodexProcessDetector
+    {
+        public bool Running { get; set; }
+        public bool IsRunning() => Running;
+        public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class ActionAtomicHooks : IAtomicFileSystemHooks
+    {
+        public Action<string>? AfterSourceHash { get; init; }
+        public Action<string>? AfterDestinationHash { get; init; }
+        void IAtomicFileSystemHooks.OnAfterSourceHash(string path) => AfterSourceHash?.Invoke(path);
+        void IAtomicFileSystemHooks.OnAfterDestinationHash(string path) => AfterDestinationHash?.Invoke(path);
+        void IAtomicFileSystemHooks.OnAfterDeleteCapture(string quarantinePath, string destinationPath) { }
+        void IAtomicFileSystemHooks.OnBeforeArtifactCleanup(string path) { }
+        void IAtomicFileSystemHooks.OnBeforeMutationPathValidation(string path) { }
+        void IAtomicFileSystemHooks.OnAfterPublishMutation(string destinationPath) { }
+    }
+
     private sealed class FailingReplaceFileSystem : IAtomicFileSystem
     {
         private readonly AtomicFileSystem _inner = new();
         public Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct) => _inner.WriteTemporaryAsync(path, content, ct);
+        public Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash, ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct) => throw new IOException("Injected replacement failure.");
         public Task ReplaceAsync(string temporaryPath, string destinationPath, CancellationToken ct) => throw new IOException("Injected replacement failure.");
         public Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct) => throw new IOException("Injected replacement failure.");
         public Task DeleteAsync(string path, CancellationToken ct) => _inner.DeleteAsync(path, ct);
@@ -183,6 +257,11 @@ public sealed class CodexHistoryWriterTests : IDisposable
         private readonly AtomicFileSystem _inner = new();
         public string Destination { get; set; } = string.Empty;
         public Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct) => _inner.WriteTemporaryAsync(path, content, ct);
+        public async Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash, ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
+        {
+            await File.WriteAllTextAsync(Destination, "concurrent-writer", ct);
+            await _inner.PublishAsync(temporaryPath, destinationPath, expectedSourceHash, expectedDestinationHash, mutationAllowed, ct);
+        }
         public async Task ReplaceAsync(string temporaryPath, string destinationPath, CancellationToken ct)
         {
             await File.WriteAllTextAsync(Destination, "concurrent-writer", ct);
@@ -202,6 +281,7 @@ public sealed class CodexHistoryWriterTests : IDisposable
         private readonly AtomicFileSystem _inner = new();
         public string Destination { get; set; } = string.Empty;
         public Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct) => _inner.WriteTemporaryAsync(path, content, ct);
+        public Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash, ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct) => _inner.PublishAsync(temporaryPath, destinationPath, expectedSourceHash, expectedDestinationHash, mutationAllowed, ct);
         public Task ReplaceAsync(string temporaryPath, string destinationPath, CancellationToken ct) => _inner.ReplaceAsync(temporaryPath, destinationPath, ct);
         public Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct) => _inner.ReplaceIfUnchangedAsync(temporaryPath, destinationPath, expectedDestinationHash, mutationAllowed, ct);
         public async Task DeleteAsync(string path, CancellationToken ct)

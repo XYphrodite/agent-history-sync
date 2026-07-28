@@ -43,13 +43,7 @@ public sealed class CodexHistoryWriter
             var displaced = File.Exists(destination)
                 ? await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false)
                 : null;
-            if (displaced is null)
-            {
-                if (_processDetector.IsRunning()) throw new InvalidOperationException("Codex became active before history replacement; import was deferred.");
-                await _fileSystem.ReplaceAsync(temporary, destination, ct).ConfigureAwait(false);
-            }
-            else if (!await _fileSystem.ReplaceIfUnchangedAsync(temporary, destination, displaced.ContentHash, () => !_processDetector.IsRunning(), ct).ConfigureAwait(false))
-                throw new IOException("The destination changed after it was backed up; import was not applied.");
+            await _fileSystem.PublishAsync(temporary, destination, incoming.Hash, displaced?.ContentHash, () => !_processDetector.IsRunning(), ct).ConfigureAwait(false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

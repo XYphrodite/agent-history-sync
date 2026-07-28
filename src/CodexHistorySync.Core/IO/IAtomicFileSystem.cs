@@ -6,14 +6,38 @@ namespace CodexHistorySync.Core.IO;
 public interface IAtomicFileSystem
 {
     Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct);
+    Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash, ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct);
     Task ReplaceAsync(string temporaryPath, string destinationPath, CancellationToken ct);
     Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct);
     Task DeleteAsync(string path, CancellationToken ct);
     Task<bool> DeleteIfUnchangedAsync(string path, ContentHash expectedHash, Func<bool>? mutationAllowed, CancellationToken ct);
 }
 
+public sealed class AtomicMutationException : IOException
+{
+    public AtomicMutationException(string message, Exception innerException, IReadOnlyList<string> preservedPaths)
+        : base(message, innerException) => PreservedPaths = preservedPaths;
+
+    public IReadOnlyList<string> PreservedPaths { get; }
+}
+
+internal interface IAtomicFileSystemHooks
+{
+    void OnAfterSourceHash(string path);
+    void OnAfterDestinationHash(string path);
+    void OnAfterDeleteCapture(string quarantinePath, string destinationPath);
+    void OnBeforeArtifactCleanup(string path);
+    void OnBeforeMutationPathValidation(string path);
+    void OnAfterPublishMutation(string destinationPath);
+}
+
 public sealed class AtomicFileSystem : IAtomicFileSystem
 {
+    private readonly IAtomicFileSystemHooks _hooks;
+
+    public AtomicFileSystem() : this(NoopAtomicFileSystemHooks.Instance) { }
+    internal AtomicFileSystem(IAtomicFileSystemHooks hooks) => _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
+
     public async Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -34,40 +58,83 @@ public sealed class AtomicFileSystem : IAtomicFileSystem
         return Task.CompletedTask;
     }
 
-    public async Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
+    public async Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash, ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
     {
         var temporary = Path.GetFullPath(temporaryPath);
         var destination = Path.GetFullPath(destinationPath);
-        if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetDirectoryName(temporary), Path.GetDirectoryName(destination)))
-            throw new ArgumentException("Atomic replacement requires a sibling temporary file.", nameof(temporaryPath));
-        await using (var existing = TryOpenForIdentity(destination))
-            if (existing is null || !BackupHashEquals(await HashAsync(existing, ct).ConfigureAwait(false), expectedDestinationHash)) return false;
+        EnsureSiblings(temporary, destination);
+        if (!BackupHashEquals(await HashPathAsync(temporary, ct).ConfigureAwait(false), expectedSourceHash)) throw new InvalidDataException("Staged content does not match its authenticated hash.");
+        _hooks.OnAfterSourceHash(temporary);
+        if (expectedDestinationHash is { } expectedDestination)
+        {
+            if (!File.Exists(destination) || !BackupHashEquals(await HashPathAsync(destination, ct).ConfigureAwait(false), expectedDestination))
+                throw new IOException("The destination changed after backup.");
+            _hooks.OnAfterDestinationHash(destination);
+        }
+
+        _hooks.OnBeforeMutationPathValidation(destination);
+        PathSafety.RejectReparsePoints(temporary, nameof(temporaryPath));
+        PathSafety.RejectReparsePoints(destination, nameof(destinationPath));
+        if (!BackupHashEquals(await HashPathAsync(temporary, ct).ConfigureAwait(false), expectedSourceHash)) throw new InvalidDataException("Staged content changed before publication.");
+        if (expectedDestinationHash is { } finalExpectedDestination && (!File.Exists(destination) || !BackupHashEquals(await HashPathAsync(destination, ct).ConfigureAwait(false), finalExpectedDestination)))
+            throw new IOException("The destination changed immediately before publication.");
+        PathSafety.RejectReparsePoints(temporary, nameof(temporaryPath));
+        PathSafety.RejectReparsePoints(destination, nameof(destinationPath));
         ct.ThrowIfCancellationRequested();
-        if (mutationAllowed is not null && !mutationAllowed()) throw new InvalidOperationException("The atomic mutation guard rejected replacement.");
-        var quarantine = SiblingArtifact(destination, "displaced");
-        var rejected = SiblingArtifact(destination, "rejected");
-        var incomingHash = await HashPathAsync(temporary, ct).ConfigureAwait(false);
+        if (mutationAllowed is not null && !mutationAllowed()) throw new InvalidOperationException("The atomic mutation guard rejected publication.");
+
+        if (expectedDestinationHash is null)
+        {
+            var published = false;
+            try
+            {
+                File.Move(temporary, destination);
+                published = true;
+                _hooks.OnAfterPublishMutation(destination);
+                if (!BackupHashEquals(await HashPathAsync(destination, CancellationToken.None).ConfigureAwait(false), expectedSourceHash))
+                    throw new InvalidDataException("Published content failed authenticated hash verification.");
+            }
+            catch (Exception exception)
+            {
+                if (!published) throw;
+                var evidence = SiblingArtifact(destination, "rejected");
+                try { if (File.Exists(destination)) File.Move(destination, evidence); }
+                catch { }
+                throw new AtomicMutationException("New-file publication failed verification.", exception, ExistingArtifacts(evidence, destination));
+            }
+            return;
+        }
+
+        var displaced = SiblingArtifact(destination, "displaced");
         var captured = false;
         try
         {
-            File.Replace(temporary, destination, quarantine);
+            File.Replace(temporary, destination, displaced);
             captured = true;
-            if (BackupHashEquals(await HashPathAsync(quarantine, CancellationToken.None).ConfigureAwait(false), expectedDestinationHash))
-            {
-                File.Delete(quarantine);
-                return true;
-            }
-            File.Replace(quarantine, destination, rejected);
+            _hooks.OnAfterPublishMutation(destination);
+            if (!BackupHashEquals(await HashPathAsync(displaced, CancellationToken.None).ConfigureAwait(false), expectedDestinationHash.Value) ||
+                !BackupHashEquals(await HashPathAsync(destination, CancellationToken.None).ConfigureAwait(false), expectedSourceHash))
+                throw new InvalidDataException("Atomic replacement failed authenticated hash verification.");
+            _hooks.OnBeforeArtifactCleanup(displaced);
+            File.Delete(displaced);
             captured = false;
-            if (BackupHashEquals(await HashPathAsync(rejected, CancellationToken.None).ConfigureAwait(false), incomingHash)) File.Delete(rejected);
-            return false;
         }
-        catch (FileNotFoundException) when (!captured) { return false; }
-        catch
+        catch (Exception exception)
         {
-            if (captured && File.Exists(quarantine)) RestoreCaptured(quarantine, destination);
-            throw;
+            var preserved = captured ? RecoverCaptured(displaced, destination) : ExistingArtifacts(displaced);
+            throw new AtomicMutationException("Atomic replacement failed and recovery was attempted.", exception, preserved);
         }
+    }
+
+    public async Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
+    {
+        try
+        {
+            var sourceHash = await HashPathAsync(temporaryPath, ct).ConfigureAwait(false);
+            await PublishAsync(temporaryPath, destinationPath, sourceHash, expectedDestinationHash, mutationAllowed, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (IOException exception) when (exception is not AtomicMutationException) { return false; }
     }
 
     public Task DeleteAsync(string path, CancellationToken ct)
@@ -82,23 +149,32 @@ public sealed class AtomicFileSystem : IAtomicFileSystem
         var destination = Path.GetFullPath(path);
         await using (var existing = TryOpenForIdentity(destination))
             if (existing is null || !BackupHashEquals(await HashAsync(existing, ct).ConfigureAwait(false), expectedHash)) return false;
+        _hooks.OnAfterDestinationHash(destination);
+        _hooks.OnBeforeMutationPathValidation(destination);
+        PathSafety.RejectReparsePoints(destination, nameof(path));
+        if (!BackupHashEquals(await HashPathAsync(destination, ct).ConfigureAwait(false), expectedHash)) return false;
+        PathSafety.RejectReparsePoints(destination, nameof(path));
         ct.ThrowIfCancellationRequested();
         if (mutationAllowed is not null && !mutationAllowed()) throw new InvalidOperationException("The atomic mutation guard rejected deletion.");
         var quarantine = SiblingArtifact(destination, "deleted");
-        File.Move(destination, quarantine);
-        var capturedMatches = BackupHashEquals(await HashPathAsync(quarantine, CancellationToken.None).ConfigureAwait(false), expectedHash);
-        if (capturedMatches)
+        var captured = false;
+        try
         {
+            File.Move(destination, quarantine);
+            captured = true;
+            _hooks.OnAfterDeleteCapture(quarantine, destination);
+            if (!BackupHashEquals(await HashPathAsync(quarantine, CancellationToken.None).ConfigureAwait(false), expectedHash))
+                throw new InvalidDataException("Captured deletion target failed hash verification.");
+            _hooks.OnBeforeArtifactCleanup(quarantine);
             File.Delete(quarantine);
+            captured = false;
             return !File.Exists(destination);
         }
-        if (!File.Exists(destination)) File.Move(quarantine, destination);
-        else
+        catch (Exception exception)
         {
-            var appeared = SiblingArtifact(destination, "appeared");
-            File.Replace(quarantine, destination, appeared);
+            var preserved = captured ? RecoverCaptured(quarantine, destination) : ExistingArtifacts(quarantine);
+            throw new AtomicMutationException("Atomic deletion failed and recovery was attempted.", exception, preserved);
         }
-        return false;
     }
 
     private static FileStream? TryOpenForIdentity(string path)
@@ -126,10 +202,44 @@ public sealed class AtomicFileSystem : IAtomicFileSystem
     private static string SiblingArtifact(string path, string kind) =>
         Path.Combine(Path.GetDirectoryName(path)!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.{kind}");
 
-    private static void RestoreCaptured(string captured, string destination)
+    private static IReadOnlyList<string> RecoverCaptured(string captured, string destination)
     {
-        if (!File.Exists(destination)) File.Move(captured, destination);
-        else File.Replace(captured, destination, SiblingArtifact(destination, "preserved-concurrent"));
+        var preserved = new List<string>();
+        try
+        {
+            if (!File.Exists(destination)) File.Move(captured, destination);
+            else
+            {
+                var concurrent = SiblingArtifact(destination, "preserved-concurrent");
+                File.Replace(captured, destination, concurrent);
+                if (File.Exists(concurrent)) preserved.Add(concurrent);
+            }
+        }
+        catch
+        {
+            if (File.Exists(captured)) preserved.Add(captured);
+            if (File.Exists(destination)) preserved.Add(destination);
+        }
+        return preserved;
+    }
+
+    private static IReadOnlyList<string> ExistingArtifacts(params string[] paths) => paths.Where(File.Exists).ToArray();
+
+    private static void EnsureSiblings(string temporary, string destination)
+    {
+        if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetDirectoryName(temporary), Path.GetDirectoryName(destination)))
+            throw new ArgumentException("Atomic publication requires a sibling temporary file.", nameof(temporary));
+    }
+
+    private sealed class NoopAtomicFileSystemHooks : IAtomicFileSystemHooks
+    {
+        public static readonly NoopAtomicFileSystemHooks Instance = new();
+        public void OnAfterSourceHash(string path) { }
+        public void OnAfterDestinationHash(string path) { }
+        public void OnAfterDeleteCapture(string quarantinePath, string destinationPath) { }
+        public void OnBeforeArtifactCleanup(string path) { }
+        public void OnBeforeMutationPathValidation(string path) { }
+        public void OnAfterPublishMutation(string destinationPath) { }
     }
 }
 
