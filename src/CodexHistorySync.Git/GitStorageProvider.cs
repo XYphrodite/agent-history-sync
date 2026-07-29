@@ -13,7 +13,20 @@ public enum GitRemoteKind
 
 public interface IGitPublicationHook
 {
+    Task AfterStagingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
     Task BeforePushAsync(CancellationToken cancellationToken);
+}
+
+public interface IGitPushTransport
+{
+    Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken);
+}
+
+public sealed class GitPushTransport : IGitPushTransport
+{
+    public Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken) =>
+        git.RunAsync(["push", "origin", "HEAD:main"], workingDirectory, cancellationToken);
 }
 
 public sealed class GitStorageProvider : IStorageProvider
@@ -28,6 +41,7 @@ public sealed class GitStorageProvider : IStorageProvider
     private readonly GitCommand _git;
     private readonly IGitHubVisibilityVerifier _visibilityVerifier;
     private readonly IGitPublicationHook? _publicationHook;
+    private readonly IGitPushTransport _pushTransport;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public GitStorageProvider(
@@ -38,7 +52,8 @@ public sealed class GitStorageProvider : IStorageProvider
         string gitExecutable = "git",
         TimeSpan? commandTimeout = null,
         IGitHubVisibilityVerifier? visibilityVerifier = null,
-        IGitPublicationHook? publicationHook = null)
+        IGitPublicationHook? publicationHook = null,
+        IGitPushTransport? pushTransport = null)
     {
         _repositoryId = repositoryId ?? throw new ArgumentNullException(nameof(repositoryId));
         if (!RepositoryIdPattern.IsMatch(_repositoryId))
@@ -59,6 +74,7 @@ public sealed class GitStorageProvider : IStorageProvider
         _git = new GitCommand(gitExecutable, commandTimeout);
         _visibilityVerifier = visibilityVerifier ?? new GitHubVisibilityVerifier();
         _publicationHook = publicationHook;
+        _pushTransport = pushTransport ?? new GitPushTransport();
     }
 
     public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
@@ -123,6 +139,7 @@ public sealed class GitStorageProvider : IStorageProvider
             await MaterializeRevisionAsync(remoteRevision, ct).ConfigureAwait(false);
             if (request.Index is not null) await ApplyIndexChangeAsync(request.Index, ct).ConfigureAwait(false);
             foreach (var change in request.Changes) await ApplyObjectChangeAsync(change, ct).ConfigureAwait(false);
+            if (_publicationHook is not null) await _publicationHook.AfterStagingAsync(ct).ConfigureAwait(false);
 
             var staged = await RunGitAsync(["diff", "--cached", "--quiet"], ct).ConfigureAwait(false);
             if (staged.ExitCode == 0)
@@ -140,18 +157,18 @@ public sealed class GitStorageProvider : IStorageProvider
 
             var commit = await RunGitAsync(["commit", "--no-gpg-sign", "-m", request.CommitMessage], ct).ConfigureAwait(false);
             if (commit.ExitCode != 0) ThrowGitFailure("Unable to commit encrypted objects in the dedicated clone.", commit);
+            var candidateRevision = await ResolveRevisionAsync("HEAD", ct).ConfigureAwait(false);
             if (_publicationHook is not null) await _publicationHook.BeforePushAsync(ct).ConfigureAwait(false);
 
-            var push = await RunGitAsync(["push", "origin", "HEAD:main"], ct).ConfigureAwait(false);
+            var push = await _pushTransport.PushAsync(_git, _clonePath, ct).ConfigureAwait(false);
             if (push.ExitCode == 0)
-                return new PublishResult(true, await ResolveRevisionAsync("HEAD", ct).ConfigureAwait(false));
+                return new PublishResult(true, candidateRevision);
 
             var current = await FetchRevisionAsync(ct).ConfigureAwait(false);
+            if (StringComparer.Ordinal.Equals(current, candidateRevision))
+                return new PublishResult(true, candidateRevision);
             await MaterializeRevisionAsync(current, ct).ConfigureAwait(false);
-            if (!StringComparer.Ordinal.Equals(current, request.ExpectedRevision) || IsNonFastForward(push))
-                return new PublishResult(false, current);
-            ThrowGitFailure("Unable to push encrypted objects.", push);
-            throw new InvalidOperationException("Unreachable.");
+            return new PublishResult(false, current);
         }
         finally
         {
@@ -227,7 +244,11 @@ public sealed class GitStorageProvider : IStorageProvider
         }
         else
         {
-            materialize = await RunGitAsync(["checkout", "-B", "main", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
+            materialize = await RunGitAsync(["reset", "--hard", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
+            if (materialize.ExitCode == 0)
+                materialize = await RunGitAsync(["checkout", "-B", "main", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
+            if (materialize.ExitCode == 0)
+                materialize = await RunGitAsync(["reset", "--hard", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
         }
         if (materialize.ExitCode != 0) ThrowGitFailure("Unable to materialize the fetched revision.", materialize);
         EnsureOwnedClone();
@@ -332,11 +353,6 @@ public sealed class GitStorageProvider : IStorageProvider
     private static bool LooksLikeEmptyRemote(GitCommandResult result) =>
         result.StandardError.Contains("couldn't find remote ref", StringComparison.OrdinalIgnoreCase) ||
         result.StandardError.Contains("could not find remote branch", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsNonFastForward(GitCommandResult result) =>
-        result.StandardError.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase) ||
-        result.StandardError.Contains("fetch first", StringComparison.OrdinalIgnoreCase) ||
-        result.StandardError.Contains("[rejected]", StringComparison.OrdinalIgnoreCase);
 
     private static void ThrowGitFailure(string message, GitCommandResult result) =>
         throw new InvalidOperationException($"{message} {GitCommand.Redact(result.StandardError)}".Trim());
