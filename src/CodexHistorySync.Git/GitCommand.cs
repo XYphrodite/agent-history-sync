@@ -18,8 +18,8 @@ public sealed class GitCommand
         @"(?<scheme>[a-z][a-z0-9+.-]*://)(?<credentials>[^\s/@]+@)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex CredentialQuery = new(
-        @"(?<name>(?:(?:access|oauth|private)_?token|api_?key|auth|client_?secret|credential|key|pass(?:word|wd)?|token))=(?<value>[^&\s]+)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        "(?<prefix>[?&][^=\\s&?#]+)=(?<value>[^&\\s\\\"']*)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex ScpCredential = new(
         @"(?<![\w.-])(?<credential>(?!git@)[^\s/@:]+)@(?<host>[^\s/:]+):",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -91,7 +91,7 @@ public sealed class GitCommand
     internal static string Redact(string value)
     {
         var redacted = CredentialUrl.Replace(value, "${scheme}***@");
-        redacted = CredentialQuery.Replace(redacted, "${name}=***");
+        redacted = CredentialQuery.Replace(redacted, "${prefix}=***");
         return ScpCredential.Replace(redacted, "***@${host}:");
     }
 

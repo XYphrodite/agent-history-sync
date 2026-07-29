@@ -144,6 +144,55 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task InterruptedStaging_IsRemovedBeforeReadAndNextPublication()
+    {
+        var baselineId = new LogicalObjectId(new string('c', 64));
+        var baselineIndex = "CHS1-index-baseline"u8.ToArray();
+        var baselineObject = "CHS1-object-baseline"u8.ToArray();
+        var initial = await SeedRemoteAsync(baselineIndex, baselineId, baselineObject, "interrupted-baseline");
+        var hook = new FailAfterFirstStagingHook();
+        var provider = CreateProvider("interrupted", publicationHook: hook);
+        Assert.Equal(initial, (await provider.ReadSnapshotAsync(CancellationToken.None)).Revision);
+        var abandoned = await RequestAsync(initial, 'a', "abandoned");
+
+        await Assert.ThrowsAsync<InjectedPublicationException>(() =>
+            provider.TryPublishAsync(abandoned, CancellationToken.None));
+
+        var afterFailure = await provider.ReadSnapshotAsync(CancellationToken.None);
+        Assert.Equal(initial, afterFailure.Revision);
+        Assert.Equal(baselineIndex, afterFailure.IndexCiphertext);
+        Assert.Equal(baselineObject, Assert.Single(afterFailure.Objects).Ciphertext);
+
+        var replacement = await RequestAsync(initial, 'b', "replacement");
+        replacement = replacement with
+        {
+            Changes = [.. replacement.Changes, new EncryptedObjectChange(baselineId, string.Empty, Delete: true)]
+        };
+        var published = await provider.TryPublishAsync(replacement, CancellationToken.None);
+        var final = await CreateProvider("interrupted-observer").ReadSnapshotAsync(CancellationToken.None);
+
+        Assert.True(published.Published);
+        Assert.Equal("CHS1-index-replacement"u8.ToArray(), final.IndexCiphertext);
+        var finalObject = Assert.Single(final.Objects);
+        Assert.Equal(new string('b', 64), finalObject.ObjectId.Value);
+        Assert.Equal("CHS1-object-replacement"u8.ToArray(), finalObject.Ciphertext);
+    }
+
+    [Fact]
+    public async Task PushAcceptedThenReportedAsError_ReturnsAuthoritativeSuccess()
+    {
+        var transport = new AcceptThenReportErrorPushTransport();
+        var provider = CreateProvider("ambiguous-push", pushTransport: transport);
+        var initial = (await provider.ReadSnapshotAsync(CancellationToken.None)).Revision;
+
+        var result = await provider.TryPublishAsync(await RequestAsync(initial, 'a', "accepted"), CancellationToken.None);
+
+        Assert.True(result.Published);
+        Assert.Equal(transport.AcceptedRevision, result.CurrentRevision);
+        Assert.Equal((await CreateProvider("ambiguous-observer").ReadSnapshotAsync(CancellationToken.None)).Revision, result.CurrentRevision);
+    }
+
+    [Fact]
     public async Task GitHubRemote_RequiresExactPrivateVisibilityBeforeClone()
     {
         var verifier = new FakeVisibilityVerifier(new GitHubVisibilityResult(false, "visibility is PUBLIC"));
@@ -182,6 +231,11 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
                 "https://alice:secret@example.invalid/repo?access_token=query-secret",
                 "https://example.invalid/repo?api_key=api-secret",
                 "https://example.invalid/repo?client_secret=client-secret",
+                "https://example.invalid/repo?secret=plain-secret",
+                "https://example.invalid/repo?sig=signature-secret",
+                "https://example.invalid/repo?X-Amz-Signature=aws-secret",
+                "https://example.invalid/repo?arbitraryName=arbitrary-secret",
+                "https://example.invalid/repo?encoded=value%2Fwith%2Bsecret",
                 "ghp_scp-secret@github.com:owner/repo.git"
             ],
             _root,
@@ -195,11 +249,41 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
             Assert.DoesNotContain("api-secret", output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("client-secret", output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("ghp_scp-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("plain-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("signature-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("aws-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("arbitrary-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("value%2Fwith%2Bsecret", output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("ghp_", output, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("access_token=***", output);
             Assert.Contains("api_key=***", output);
             Assert.Contains("client_secret=***", output);
+            Assert.Contains("secret=***", output);
+            Assert.Contains("sig=***", output);
+            Assert.Contains("X-Amz-Signature=***", output);
+            Assert.Contains("arbitraryName=***", output);
+            Assert.Contains("encoded=***", output);
         }
+    }
+
+    [Fact]
+    public async Task GitFailureException_RedactsEveryUrlQueryValue()
+    {
+        var script = Path.Combine(_root, "git-error.cmd");
+        await File.WriteAllTextAsync(script, "@echo fatal https://example.invalid/repo?secret=exception-secret^&anything=other-secret 1>&2 & @exit /b 7\r\n");
+        var provider = new GitStorageProvider(
+            "exception-redaction",
+            _remote,
+            GitRemoteKind.Local,
+            Path.Combine(_root, "exception-clones"),
+            gitExecutable: script);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => provider.ReadSnapshotAsync(CancellationToken.None));
+
+        Assert.DoesNotContain("exception-secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("other-secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("secret=***", exception.Message);
+        Assert.Contains("anything=***", exception.Message);
     }
 
     [Fact]
@@ -215,12 +299,16 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
         Assert.True(exact.IsPrivate);
     }
 
-    private GitStorageProvider CreateProvider(string name, IGitPublicationHook? publicationHook = null) => new(
+    private GitStorageProvider CreateProvider(
+        string name,
+        IGitPublicationHook? publicationHook = null,
+        IGitPushTransport? pushTransport = null) => new(
         repositoryId: $"repository-{name}",
         remoteUrl: _remote,
         remoteKind: GitRemoteKind.Local,
         storageRoot: Path.Combine(_root, "provider-clones"),
-        publicationHook: publicationHook);
+        publicationHook: publicationHook,
+        pushTransport: pushTransport);
 
     private async Task<PublishRequest> RequestAsync(string revision, char idCharacter, string marker)
     {
@@ -289,6 +377,35 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
         {
             if (Interlocked.Increment(ref _count) == 2) _bothReady.TrySetResult();
             await _bothReady.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    private sealed class FailAfterFirstStagingHook : IGitPublicationHook
+    {
+        private int _fail = 1;
+
+        public Task AfterStagingAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Exchange(ref _fail, 0) == 1) throw new InjectedPublicationException();
+            return Task.CompletedTask;
+        }
+
+        public Task BeforePushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class InjectedPublicationException : Exception;
+
+    private sealed class AcceptThenReportErrorPushTransport : IGitPushTransport
+    {
+        public string? AcceptedRevision { get; private set; }
+
+        public async Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken)
+        {
+            var accepted = await git.RunAsync(["push", "origin", "HEAD:main"], workingDirectory, cancellationToken);
+            Assert.Equal(0, accepted.ExitCode);
+            var revision = await git.RunAsync(["rev-parse", "HEAD"], workingDirectory, cancellationToken);
+            AcceptedRevision = revision.StandardOutput.Trim();
+            return new GitCommandResult(1, string.Empty, "simulated lost push response", TimedOut: false);
         }
     }
 }
