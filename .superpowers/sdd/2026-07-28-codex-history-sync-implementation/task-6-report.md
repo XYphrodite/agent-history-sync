@@ -84,3 +84,22 @@ Implemented in `9c2c9b2 fix: reconcile ambiguous Git publications`.
 ### Round 2 Remaining Concerns
 
 - None within Task 6.
+
+## Round 3 Review Correction
+
+Implemented in `f6ef443 fix: classify rejected Git publications`.
+
+### Round 3 Red-Green Evidence
+
+- RED focused: the new apostrophe/quote cases exposed surviving query-value suffixes, and the unchanged-remote rejected-push test showed the provider incorrectly returned `Published=false` instead of an actionable exception.
+- GREEN focused: `dotnet test tests\CodexHistorySync.Git.Tests\CodexHistorySync.Git.Tests.csproj --no-restore` passed 14/14, including accepted-candidate ambiguity, true non-fast-forward CAS loss, and unchanged-remote rejection classification.
+- GREEN full: `dotnet test` passed 128/128 across Core (97), Git (14), Windows (6), and Integration (11).
+
+### Round 3 Corrections
+
+- Generic URL-query redaction now consumes every value conservatively through `&`, whitespace, fragment, or end. Apostrophes and double quotes are treated as secret content rather than delimiters; percent-encoded values and multiple parameters remain covered in stdout, stderr, and provider exceptions.
+- A nonzero push now has three authoritative outcomes after fetch: candidate equality returns success; a remote differing from the expected revision returns CAS-stale false after exact cleanup; an unchanged expected remote is cleaned and throws the original redacted Git diagnostic as an operational failure.
+
+### Round 3 Remaining Concerns
+
+- None within Task 6.
