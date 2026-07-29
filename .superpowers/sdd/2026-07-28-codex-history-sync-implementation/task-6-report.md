@@ -63,3 +63,24 @@ Implemented in `23124e5 fix: harden Git snapshot publication contract`.
 ### Round 1 Remaining Concerns
 
 - None within Task 6. Task 7 must authenticate/decrypt `IndexCiphertext` before trusting any object version metadata, as required by the migrated contract.
+
+## Round 2 Review Correction
+
+Implemented in `9c2c9b2 fix: reconcile ambiguous Git publications`.
+
+### Round 2 Red-Green Evidence
+
+- RED seam: `dotnet test tests\CodexHistorySync.Git.Tests\CodexHistorySync.Git.Tests.csproj --no-restore` failed with CS0246 for the wished-for `IGitPushTransport` acceptance/error seam.
+- RED generic-query coverage: the expanded command-output test demonstrated that a name allowlist was insufficient for arbitrary query fields and percent-encoded values.
+- GREEN focused: `dotnet test tests\CodexHistorySync.Git.Tests\CodexHistorySync.Git.Tests.csproj --no-restore` passed 13/13.
+- GREEN full: `dotnet test` passed 127/127 across Core (97), Git (13), Windows (6), and Integration (11).
+
+### Round 2 Corrections
+
+- Non-empty revisions are now materialized with an ownership-verified `reset --hard` before branch setup, another exact reset, and `clean -fdx`. A deterministic injected failure after staging proves subsequent reads restore exact baseline bytes and the next publication contains only its requested index/object changes, with no abandoned staged content.
+- URL output redaction no longer relies on sensitive parameter names. Every query value after `?` or `&` is replaced generically while preserving parameter names, covering `secret`, `sig`, `X-Amz-Signature`, arbitrary names, and percent-encoded values in stdout, stderr, and provider exception surfaces. URL user-info and SCP-style credential redaction remain enabled.
+- The exact candidate commit is captured before push. After any nonzero push result (including a lost response), the provider fetches `origin/main`: candidate equality returns authoritative `Published=true`; any other remote revision triggers exact cleanup/materialization and returns `Published=false` with that revision.
+
+### Round 2 Remaining Concerns
+
+- None within Task 6.
