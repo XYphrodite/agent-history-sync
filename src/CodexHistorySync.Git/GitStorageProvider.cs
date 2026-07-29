@@ -1,11 +1,20 @@
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
-using CodexHistorySync.Core.Sync;
 
 namespace CodexHistorySync.Git;
+
+public enum GitRemoteKind
+{
+    Local,
+    GitHub
+}
+
+public interface IGitPublicationHook
+{
+    Task BeforePushAsync(CancellationToken cancellationToken);
+}
 
 public sealed class GitStorageProvider : IStorageProvider
 {
@@ -13,35 +22,43 @@ public sealed class GitStorageProvider : IStorageProvider
     private static readonly Regex ObjectIdPattern = new("^[a-f0-9]{64}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly string _repositoryId;
     private readonly string _remoteUrl;
+    private readonly GitRemoteKind _remoteKind;
     private readonly string _storageRoot;
     private readonly string _clonePath;
     private readonly GitCommand _git;
+    private readonly IGitHubVisibilityVerifier _visibilityVerifier;
+    private readonly IGitPublicationHook? _publicationHook;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public GitStorageProvider(
         string repositoryId,
         string remoteUrl,
+        GitRemoteKind remoteKind,
         string? storageRoot = null,
         string gitExecutable = "git",
-        TimeSpan? commandTimeout = null)
+        TimeSpan? commandTimeout = null,
+        IGitHubVisibilityVerifier? visibilityVerifier = null,
+        IGitPublicationHook? publicationHook = null)
     {
-        var safeRepositoryId = repositoryId ?? throw new ArgumentNullException(nameof(repositoryId));
-        if (!RepositoryIdPattern.IsMatch(safeRepositoryId))
+        _repositoryId = repositoryId ?? throw new ArgumentNullException(nameof(repositoryId));
+        if (!RepositoryIdPattern.IsMatch(_repositoryId))
             throw new ArgumentException("Repository ID contains unsupported characters.", nameof(repositoryId));
-        var safeRemoteUrl = remoteUrl ?? throw new ArgumentNullException(nameof(remoteUrl));
-        if (string.IsNullOrWhiteSpace(safeRemoteUrl)) throw new ArgumentException("Remote URL is required.", nameof(remoteUrl));
-
-        _repositoryId = safeRepositoryId;
-        _remoteUrl = safeRemoteUrl;
+        _remoteUrl = remoteUrl ?? throw new ArgumentNullException(nameof(remoteUrl));
+        if (string.IsNullOrWhiteSpace(_remoteUrl)) throw new ArgumentException("Remote URL is required.", nameof(remoteUrl));
+        if (!Enum.IsDefined(remoteKind)) throw new ArgumentOutOfRangeException(nameof(remoteKind));
+        _remoteKind = remoteKind;
+        if (_remoteKind == GitRemoteKind.Local && !IsLocalRemote(_remoteUrl))
+            throw new ArgumentException("Local remotes must be absolute filesystem paths or file URLs.", nameof(remoteUrl));
+        if (_remoteKind == GitRemoteKind.GitHub) _ = ParseGitHubRepository(_remoteUrl);
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) ??
             throw new InvalidOperationException("Local application data directory is unavailable.");
-        _storageRoot = Path.GetFullPath(storageRoot ?? Path.Combine(
-            localAppData,
-            "CodexHistorySync", "repositories"));
+        _storageRoot = Path.GetFullPath(storageRoot ?? Path.Combine(localAppData, "CodexHistorySync", "repositories"));
         _clonePath = Path.Combine(_storageRoot, _repositoryId, "git");
         AssertContained(_clonePath, _storageRoot);
         EnsureNotInsideGitWorktree(_storageRoot);
         _git = new GitCommand(gitExecutable, commandTimeout);
+        _visibilityVerifier = visibilityVerifier ?? new GitHubVisibilityVerifier();
+        _publicationHook = publicationHook;
     }
 
     public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
@@ -51,22 +68,37 @@ public sealed class GitStorageProvider : IStorageProvider
         {
             await EnsureCloneAsync(ct).ConfigureAwait(false);
             var revision = await FetchRevisionAsync(ct).ConfigureAwait(false);
-            EnsureSafeDirectory(_clonePath);
-            var objects = new Dictionary<LogicalObjectId, ObjectVersion>();
-            var objectsPath = Path.Combine(_clonePath, "objects");
-            if (!Directory.Exists(objectsPath)) return new RemoteSnapshot(revision, objects);
-            EnsureSafeDirectory(objectsPath);
-            foreach (var file in EnumerateSafeObjectFiles(objectsPath))
+            await MaterializeRevisionAsync(revision, ct).ConfigureAwait(false);
+
+            byte[]? indexCiphertext = null;
+            var indexPath = Path.Combine(_clonePath, "repository.chs");
+            if (File.Exists(indexPath))
             {
-                EnsureSafeFile(file);
-                var relative = Path.GetRelativePath(objectsPath, file).Replace(Path.DirectorySeparatorChar, '/');
-                var segments = relative.Split('/');
-                if (segments.Length != 2 || segments[0].Length != 2 || !ObjectIdPattern.IsMatch(segments[0] + Path.GetFileNameWithoutExtension(segments[1])))
-                    throw new InvalidDataException("Repository contains an invalid encrypted object path.");
-                var id = new LogicalObjectId(segments[0] + Path.GetFileNameWithoutExtension(segments[1]));
-                objects[id] = new ObjectVersion(id, ObjectKind.ActiveSession, new ContentHash(string.Empty), revision, IsDeleted: false);
+                EnsureSafeFile(indexPath);
+                indexCiphertext = await File.ReadAllBytesAsync(indexPath, ct).ConfigureAwait(false);
             }
-            return new RemoteSnapshot(revision, objects);
+
+            var objects = new List<EncryptedRemoteObject>();
+            var objectsPath = Path.Combine(_clonePath, "objects");
+            if (Directory.Exists(objectsPath))
+            {
+                EnsureSafeDirectory(objectsPath);
+                foreach (var file in EnumerateSafeObjectFiles(objectsPath))
+                {
+                    var relative = Path.GetRelativePath(objectsPath, file).Replace(Path.DirectorySeparatorChar, '/');
+                    var segments = relative.Split('/');
+                    var opaqueId = segments.Length == 2 && segments[0].Length == 2
+                        ? segments[0] + Path.GetFileNameWithoutExtension(segments[1])
+                        : string.Empty;
+                    if (!ObjectIdPattern.IsMatch(opaqueId))
+                        throw new InvalidDataException("Repository contains an invalid encrypted object path.");
+                    objects.Add(new EncryptedRemoteObject(
+                        new LogicalObjectId(opaqueId),
+                        await File.ReadAllBytesAsync(file, ct).ConfigureAwait(false)));
+                }
+            }
+
+            return new RemoteSnapshot(revision, indexCiphertext, objects);
         }
         finally
         {
@@ -88,30 +120,36 @@ public sealed class GitStorageProvider : IStorageProvider
             if (!StringComparer.Ordinal.Equals(request.ExpectedRevision, remoteRevision))
                 return new PublishResult(false, remoteRevision);
 
-            await ResetDedicatedCloneAsync(remoteRevision, ct).ConfigureAwait(false);
-            foreach (var change in request.Changes)
-            {
-                await ApplyChangeAsync(change, ct).ConfigureAwait(false);
-            }
+            await MaterializeRevisionAsync(remoteRevision, ct).ConfigureAwait(false);
+            if (request.Index is not null) await ApplyIndexChangeAsync(request.Index, ct).ConfigureAwait(false);
+            foreach (var change in request.Changes) await ApplyObjectChangeAsync(change, ct).ConfigureAwait(false);
 
             var staged = await RunGitAsync(["diff", "--cached", "--quiet"], ct).ConfigureAwait(false);
-            if (staged.ExitCode == 0) return new PublishResult(true, remoteRevision);
+            if (staged.ExitCode == 0)
+            {
+                if (_publicationHook is not null) await _publicationHook.BeforePushAsync(ct).ConfigureAwait(false);
+                var refreshed = await FetchRevisionAsync(ct).ConfigureAwait(false);
+                if (!StringComparer.Ordinal.Equals(refreshed, request.ExpectedRevision))
+                {
+                    await MaterializeRevisionAsync(refreshed, ct).ConfigureAwait(false);
+                    return new PublishResult(false, refreshed);
+                }
+                return new PublishResult(true, refreshed);
+            }
             if (staged.ExitCode != 1) ThrowGitFailure("Unable to inspect staged encrypted objects.", staged);
 
             var commit = await RunGitAsync(["commit", "--no-gpg-sign", "-m", request.CommitMessage], ct).ConfigureAwait(false);
             if (commit.ExitCode != 0) ThrowGitFailure("Unable to commit encrypted objects in the dedicated clone.", commit);
+            if (_publicationHook is not null) await _publicationHook.BeforePushAsync(ct).ConfigureAwait(false);
 
             var push = await RunGitAsync(["push", "origin", "HEAD:main"], ct).ConfigureAwait(false);
             if (push.ExitCode == 0)
-            {
-                var revision = await ResolveRevisionAsync("HEAD", ct).ConfigureAwait(false);
-                return new PublishResult(true, revision);
-            }
+                return new PublishResult(true, await ResolveRevisionAsync("HEAD", ct).ConfigureAwait(false));
 
-            var refreshed = await FetchRevisionAsync(ct).ConfigureAwait(false);
-            await ResetDedicatedCloneAsync(refreshed, ct).ConfigureAwait(false);
-            if (!StringComparer.Ordinal.Equals(refreshed, request.ExpectedRevision) || IsNonFastForward(push))
-                return new PublishResult(false, refreshed);
+            var current = await FetchRevisionAsync(ct).ConfigureAwait(false);
+            await MaterializeRevisionAsync(current, ct).ConfigureAwait(false);
+            if (!StringComparer.Ordinal.Equals(current, request.ExpectedRevision) || IsNonFastForward(push))
+                return new PublishResult(false, current);
             ThrowGitFailure("Unable to push encrypted objects.", push);
             throw new InvalidOperationException("Unreachable.");
         }
@@ -131,14 +169,27 @@ public sealed class GitStorageProvider : IStorageProvider
             return;
         }
 
+        if (_remoteKind == GitRemoteKind.GitHub)
+        {
+            var repository = ParseGitHubRepository(_remoteUrl);
+            var visibility = await _visibilityVerifier.VerifyPrivateAsync(repository, ct).ConfigureAwait(false);
+            if (!visibility.IsPrivate) throw new InvalidOperationException(visibility.Diagnostic);
+        }
+
         var repositoryDirectory = Path.GetDirectoryName(_clonePath)!;
         Directory.CreateDirectory(repositoryDirectory);
         EnsureSafeDirectory(repositoryDirectory);
         var clone = await _git.RunAsync(["clone", "--no-checkout", "--origin", "origin", _remoteUrl, _clonePath], _storageRoot, ct).ConfigureAwait(false);
         if (clone.ExitCode != 0) ThrowGitFailure("Unable to create the dedicated encrypted-history clone.", clone);
         EnsureSafeDirectory(_clonePath);
-        await File.WriteAllTextAsync(Path.Combine(_clonePath, ".codex-history-sync-repository-id"), _repositoryId, Encoding.UTF8, ct).ConfigureAwait(false);
         await ConfigureIdentityAsync(ct).ConfigureAwait(false);
+        var metadataDirectory = Path.Combine(_clonePath, ".git", "codex-history-sync");
+        EnsureSafePathComponents(metadataDirectory);
+        Directory.CreateDirectory(metadataDirectory);
+        EnsureSafeDirectory(metadataDirectory);
+        var marker = Path.Combine(metadataDirectory, "repository-id");
+        await File.WriteAllTextAsync(marker, _repositoryId, Encoding.UTF8, ct).ConfigureAwait(false);
+        EnsureSafeFile(marker);
     }
 
     private async Task ConfigureIdentityAsync(CancellationToken ct)
@@ -151,31 +202,54 @@ public sealed class GitStorageProvider : IStorageProvider
 
     private async Task<string> FetchRevisionAsync(CancellationToken ct)
     {
-        var fetch = await RunGitAsync(["fetch", "--no-tags", "origin", "main"], ct).ConfigureAwait(false);
+        EnsureOwnedClone();
+        var clear = await RunGitAsync(["update-ref", "-d", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
+        if (clear.ExitCode != 0) ThrowGitFailure("Unable to clear the remote-tracking revision.", clear);
+        var fetch = await RunGitAsync(
+            ["fetch", "--prune", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+            ct).ConfigureAwait(false);
         if (fetch.ExitCode != 0 && !LooksLikeEmptyRemote(fetch)) ThrowGitFailure("Unable to fetch origin/main.", fetch);
         return await ResolveRevisionAsync("refs/remotes/origin/main", ct, allowMissing: true).ConfigureAwait(false);
     }
 
-    private async Task ResetDedicatedCloneAsync(string remoteRevision, CancellationToken ct)
+    private async Task MaterializeRevisionAsync(string revision, CancellationToken ct)
     {
         EnsureSafeDirectory(_clonePath);
         EnsureOwnedClone();
-        if (remoteRevision.Length == 0)
+        GitCommandResult materialize;
+        if (revision.Length == 0)
         {
-            var checkout = await RunGitAsync(["checkout", "--orphan", "main"], ct).ConfigureAwait(false);
-            if (checkout.ExitCode != 0 && !checkout.StandardError.Contains("already exists", StringComparison.OrdinalIgnoreCase))
-                ThrowGitFailure("Unable to initialize the dedicated clone branch.", checkout);
+            materialize = await RunGitAsync(["symbolic-ref", "HEAD", "refs/heads/main"], ct).ConfigureAwait(false);
+            if (materialize.ExitCode == 0)
+                materialize = await RunGitAsync(["update-ref", "-d", "refs/heads/main"], ct).ConfigureAwait(false);
+            if (materialize.ExitCode == 0)
+                materialize = await RunGitAsync(["rm", "-rf", "--ignore-unmatch", "--", "."], ct).ConfigureAwait(false);
         }
         else
         {
-            var reset = await RunGitAsync(["reset", "--hard", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
-            if (reset.ExitCode != 0) ThrowGitFailure("Unable to reset the dedicated clone.", reset);
+            materialize = await RunGitAsync(["checkout", "-B", "main", "refs/remotes/origin/main"], ct).ConfigureAwait(false);
         }
+        if (materialize.ExitCode != 0) ThrowGitFailure("Unable to materialize the fetched revision.", materialize);
+        EnsureOwnedClone();
         var clean = await RunGitAsync(["clean", "-fdx"], ct).ConfigureAwait(false);
         if (clean.ExitCode != 0) ThrowGitFailure("Unable to clean the dedicated clone.", clean);
+        EnsureOwnedClone();
     }
 
-    private async Task ApplyChangeAsync(EncryptedObjectChange change, CancellationToken ct)
+    private async Task ApplyIndexChangeAsync(EncryptedIndexChange change, CancellationToken ct)
+    {
+        var destination = Path.Combine(_clonePath, "repository.chs");
+        if (change.Delete)
+        {
+            if (File.Exists(destination)) EnsureSafeFile(destination);
+            var remove = await RunGitAsync(["rm", "--ignore-unmatch", "--", "repository.chs"], ct).ConfigureAwait(false);
+            if (remove.ExitCode != 0) ThrowGitFailure("Unable to remove encrypted repository index.", remove);
+            return;
+        }
+        await CopyAndStageAsync(change.CiphertextPath, destination, "repository.chs", ct).ConfigureAwait(false);
+    }
+
+    private async Task ApplyObjectChangeAsync(EncryptedObjectChange change, CancellationToken ct)
     {
         var objectId = change.ObjectId.Value ?? string.Empty;
         if (!ObjectIdPattern.IsMatch(objectId))
@@ -187,16 +261,20 @@ public sealed class GitStorageProvider : IStorageProvider
         {
             if (File.Exists(destination)) EnsureSafeFile(destination);
             var remove = await RunGitAsync(["rm", "--ignore-unmatch", "--", relative.Replace('\\', '/')], ct).ConfigureAwait(false);
-            if (remove.ExitCode != 0) ThrowGitFailure("Unable to remove encrypted object from the dedicated clone.", remove);
+            if (remove.ExitCode != 0) ThrowGitFailure("Unable to remove encrypted object.", remove);
             return;
         }
+        await CopyAndStageAsync(change.CiphertextPath, destination, relative.Replace('\\', '/'), ct).ConfigureAwait(false);
+    }
 
-        if (string.IsNullOrWhiteSpace(change.CiphertextPath)) throw new ArgumentException("Ciphertext path is required for additions.", nameof(change));
-        var source = Path.GetFullPath(change.CiphertextPath);
+    private async Task CopyAndStageAsync(string sourcePath, string destination, string gitPath, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath)) throw new ArgumentException("Ciphertext path is required.", nameof(sourcePath));
+        var source = Path.GetFullPath(sourcePath);
         EnsureSafeFile(source);
         var destinationDirectory = Path.GetDirectoryName(destination)!;
-        if (Directory.Exists(destinationDirectory)) EnsureSafeDirectory(destinationDirectory);
-        else Directory.CreateDirectory(destinationDirectory);
+        EnsureSafePathComponents(destinationDirectory);
+        Directory.CreateDirectory(destinationDirectory);
         EnsureSafeDirectory(destinationDirectory);
         if (File.Exists(destination)) EnsureSafeFile(destination);
         await using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -206,8 +284,8 @@ public sealed class GitStorageProvider : IStorageProvider
             await output.FlushAsync(ct).ConfigureAwait(false);
         }
         EnsureSafeFile(destination);
-        var add = await RunGitAsync(["add", "--", relative.Replace('\\', '/')], ct).ConfigureAwait(false);
-        if (add.ExitCode != 0) ThrowGitFailure("Unable to stage encrypted object in the dedicated clone.", add);
+        var add = await RunGitAsync(["add", "--", gitPath], ct).ConfigureAwait(false);
+        if (add.ExitCode != 0) ThrowGitFailure("Unable to stage encrypted content.", add);
     }
 
     private async Task<GitCommandResult> RunGitAsync(IReadOnlyList<string> arguments, CancellationToken ct) =>
@@ -223,16 +301,37 @@ public sealed class GitStorageProvider : IStorageProvider
 
     private void EnsureOwnedClone()
     {
-        var marker = Path.Combine(_clonePath, ".codex-history-sync-repository-id");
+        var marker = Path.Combine(_clonePath, ".git", "codex-history-sync", "repository-id");
         EnsureSafeFile(marker);
-        var identity = File.ReadAllText(marker, Encoding.UTF8).Trim();
-        if (!StringComparer.Ordinal.Equals(identity, _repositoryId))
-            throw new InvalidOperationException("Refusing to reset a clone not owned by this Codex History Sync repository.");
+        if (!StringComparer.Ordinal.Equals(File.ReadAllText(marker, Encoding.UTF8).Trim(), _repositoryId))
+            throw new InvalidOperationException("Refusing to modify a clone not owned by this repository.");
     }
 
+    private static string ParseGitHubRepository(string remoteUrl)
+    {
+        string path;
+        if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out var uri) &&
+            uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+            path = uri.AbsolutePath;
+        else
+        {
+            var match = Regex.Match(remoteUrl, @"^(?:git@)?github\.com:(?<path>[^?#]+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!match.Success) throw new ArgumentException("GitHub remote must identify github.com/owner/repository.", nameof(remoteUrl));
+            path = match.Groups["path"].Value;
+        }
+        var repository = path.Trim('/');
+        if (repository.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) repository = repository[..^4];
+        if (repository.Split('/').Length != 2) throw new ArgumentException("GitHub remote must identify owner/repository.", nameof(remoteUrl));
+        return repository;
+    }
+
+    private static bool IsLocalRemote(string remoteUrl) =>
+        Path.IsPathFullyQualified(remoteUrl) ||
+        (Uri.TryCreate(remoteUrl, UriKind.Absolute, out var uri) && uri.IsFile);
+
     private static bool LooksLikeEmptyRemote(GitCommandResult result) =>
-        result.StandardError.Contains("couldn't find remote ref main", StringComparison.OrdinalIgnoreCase) ||
-        result.StandardError.Contains("could not find remote branch main", StringComparison.OrdinalIgnoreCase);
+        result.StandardError.Contains("couldn't find remote ref", StringComparison.OrdinalIgnoreCase) ||
+        result.StandardError.Contains("could not find remote branch", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsNonFastForward(GitCommandResult result) =>
         result.StandardError.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase) ||
@@ -265,10 +364,10 @@ public sealed class GitStorageProvider : IStorageProvider
     private static IEnumerable<string> EnumerateSafeObjectFiles(string directory)
     {
         EnsureSafeDirectory(directory);
-        foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+        foreach (var child in Directory.EnumerateDirectories(directory))
         {
-            EnsureSafeDirectory(childDirectory);
-            foreach (var file in EnumerateSafeObjectFiles(childDirectory)) yield return file;
+            EnsureSafeDirectory(child);
+            foreach (var file in EnumerateSafeObjectFiles(child)) yield return file;
         }
         foreach (var file in Directory.EnumerateFiles(directory, "*.chs", SearchOption.TopDirectoryOnly))
         {
@@ -292,20 +391,17 @@ public sealed class GitStorageProvider : IStorageProvider
 
     private static void EnsureSafePathComponents(string path)
     {
-        var current = Path.GetFullPath(path);
-        while (true)
+        for (var current = Path.GetFullPath(path); ;)
         {
-            if (File.Exists(current) || Directory.Exists(current)) AssertNoReparsePoint(current);
+            if (File.Exists(current) || Directory.Exists(current))
+            {
+                var attributes = File.GetAttributes(current);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Symbolic links and reparse points are not permitted at Git storage boundaries.");
+            }
             var parent = Directory.GetParent(current)?.FullName;
             if (parent is null || StringComparer.OrdinalIgnoreCase.Equals(parent, current)) return;
             current = parent;
         }
-    }
-
-    private static void AssertNoReparsePoint(string path)
-    {
-        var attributes = File.GetAttributes(path);
-        if ((attributes & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException("Symbolic links and reparse points are not permitted at Git storage boundaries.");
     }
 }

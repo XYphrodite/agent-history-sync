@@ -17,6 +17,12 @@ public sealed class GitCommand
     private static readonly Regex CredentialUrl = new(
         @"(?<scheme>[a-z][a-z0-9+.-]*://)(?<credentials>[^\s/@]+@)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex CredentialQuery = new(
+        @"(?<name>(?:(?:access|oauth|private)_?token|api_?key|auth|client_?secret|credential|key|pass(?:word|wd)?|token))=(?<value>[^&\s]+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex ScpCredential = new(
+        @"(?<![\w.-])(?<credential>(?!git@)[^\s/@:]+)@(?<host>[^\s/:]+):",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private readonly string _executable;
     private readonly TimeSpan _timeout;
@@ -78,11 +84,16 @@ public sealed class GitCommand
         }
         catch (Win32Exception exception)
         {
-            throw new InvalidOperationException($"Unable to start Git: {Redact(exception.Message)}", exception);
+            throw new InvalidOperationException($"Unable to start Git: {Redact(exception.Message)}");
         }
     }
 
-    internal static string Redact(string value) => CredentialUrl.Replace(value, "${scheme}***@");
+    internal static string Redact(string value)
+    {
+        var redacted = CredentialUrl.Replace(value, "${scheme}***@");
+        redacted = CredentialQuery.Replace(redacted, "${name}=***");
+        return ScpCredential.Replace(redacted, "***@${host}:");
+    }
 
     private static async Task<string> CaptureAsync(StreamReader reader, CancellationToken cancellationToken)
     {

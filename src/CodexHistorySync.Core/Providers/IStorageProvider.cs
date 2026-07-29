@@ -1,5 +1,4 @@
 using CodexHistorySync.Core.Model;
-using CodexHistorySync.Core.Sync;
 
 namespace CodexHistorySync.Core.Providers;
 
@@ -14,12 +13,22 @@ public sealed record PublishResult(bool Published, string CurrentRevision);
 
 public sealed record RemoteSnapshot(
     string Revision,
-    IReadOnlyDictionary<LogicalObjectId, ObjectVersion> Objects);
+    byte[]? IndexCiphertext,
+    IReadOnlyList<EncryptedRemoteObject> Objects);
+
+public sealed record EncryptedRemoteObject(
+    LogicalObjectId ObjectId,
+    byte[] Ciphertext);
 
 public sealed record PublishRequest(
     string ExpectedRevision,
+    EncryptedIndexChange? Index,
     IReadOnlyList<EncryptedObjectChange> Changes,
     string CommitMessage);
+
+public sealed record EncryptedIndexChange(
+    string CiphertextPath,
+    bool Delete);
 
 public sealed record EncryptedObjectChange(
     LogicalObjectId ObjectId,
