@@ -168,7 +168,10 @@ public sealed class GitStorageProvider : IStorageProvider
             if (StringComparer.Ordinal.Equals(current, candidateRevision))
                 return new PublishResult(true, candidateRevision);
             await MaterializeRevisionAsync(current, ct).ConfigureAwait(false);
-            return new PublishResult(false, current);
+            if (!StringComparer.Ordinal.Equals(current, request.ExpectedRevision))
+                return new PublishResult(false, current);
+            ThrowGitFailure("Unable to push encrypted objects.", push);
+            throw new InvalidOperationException("Unreachable.");
         }
         finally
         {

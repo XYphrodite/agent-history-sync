@@ -18,7 +18,7 @@ public sealed class GitCommand
         @"(?<scheme>[a-z][a-z0-9+.-]*://)(?<credentials>[^\s/@]+@)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex CredentialQuery = new(
-        "(?<prefix>[?&][^=\\s&?#]+)=(?<value>[^&\\s\\\"']*)",
+        "(?<prefix>[?&][^=\\s&?#]+)=(?<value>[^&\\s#]*)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex ScpCredential = new(
         @"(?<![\w.-])(?<credential>(?!git@)[^\s/@:]+)@(?<host>[^\s/:]+):",

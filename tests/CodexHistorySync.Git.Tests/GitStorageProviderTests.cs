@@ -193,6 +193,22 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PushRejectedWithUnchangedRemote_ThrowsRedactedActionableFailure()
+    {
+        var provider = CreateProvider("rejected-push", pushTransport: new RejectWithoutRemoteChangePushTransport());
+        var initial = (await provider.ReadSnapshotAsync(CancellationToken.None)).Revision;
+        var request = await RequestAsync(initial, 'a', "rejected");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.TryPublishAsync(request, CancellationToken.None));
+
+        Assert.Contains("branch policy denied", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("token=***", exception.Message);
+        Assert.DoesNotContain("push-secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Empty((await CreateProvider("rejected-observer").ReadSnapshotAsync(CancellationToken.None)).Revision);
+    }
+
+    [Fact]
     public async Task GitHubRemote_RequiresExactPrivateVisibilityBeforeClone()
     {
         var verifier = new FakeVisibilityVerifier(new GitHubVisibilityResult(false, "visibility is PUBLIC"));
@@ -224,10 +240,14 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     [Fact]
     public async Task GitCommand_RedactsUrlQueryAndScpCredentialsFromAllOutput()
     {
-        var script = Path.Combine(_root, "echo-secrets.cmd");
-        await File.WriteAllTextAsync(script, "@echo %* & @echo %* 1>&2 & @exit /b 7\r\n");
-        var result = await new GitCommand(script, TimeSpan.FromSeconds(10)).RunAsync(
+        var script = Path.Combine(_root, "echo-secrets.ps1");
+        await File.WriteAllTextAsync(script,
+            "$text = $args -join ' '; [Console]::Out.WriteLine($text); [Console]::Error.WriteLine($text); exit 7\r\n");
+        var result = await new GitCommand("powershell.exe", TimeSpan.FromSeconds(10)).RunAsync(
             [
+                "-NoProfile",
+                "-File",
+                script,
                 "https://alice:secret@example.invalid/repo?access_token=query-secret",
                 "https://example.invalid/repo?api_key=api-secret",
                 "https://example.invalid/repo?client_secret=client-secret",
@@ -236,6 +256,10 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
                 "https://example.invalid/repo?X-Amz-Signature=aws-secret",
                 "https://example.invalid/repo?arbitraryName=arbitrary-secret",
                 "https://example.invalid/repo?encoded=value%2Fwith%2Bsecret",
+                "https://example.invalid/repo?token=prefix'apostrophe-suffix",
+                "https://example.invalid/repo?token=prefix\"quote-suffix",
+                "https://example.invalid/repo?token=fragment-secret#public-fragment",
+                "https://example.invalid/repo?first=one-secret&second=two-secret",
                 "ghp_scp-secret@github.com:owner/repo.git"
             ],
             _root,
@@ -254,6 +278,11 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
             Assert.DoesNotContain("aws-secret", output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("arbitrary-secret", output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("value%2Fwith%2Bsecret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("apostrophe-suffix", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("quote-suffix", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("fragment-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("one-secret", output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("two-secret", output, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("ghp_", output, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("access_token=***", output);
             Assert.Contains("api_key=***", output);
@@ -263,6 +292,9 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
             Assert.Contains("X-Amz-Signature=***", output);
             Assert.Contains("arbitraryName=***", output);
             Assert.Contains("encoded=***", output);
+            Assert.Contains("#public-fragment", output);
+            Assert.Contains("first=***", output);
+            Assert.Contains("second=***", output);
         }
     }
 
@@ -270,7 +302,11 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     public async Task GitFailureException_RedactsEveryUrlQueryValue()
     {
         var script = Path.Combine(_root, "git-error.cmd");
-        await File.WriteAllTextAsync(script, "@echo fatal https://example.invalid/repo?secret=exception-secret^&anything=other-secret 1>&2 & @exit /b 7\r\n");
+        await File.WriteAllTextAsync(script,
+            "@echo fatal https://example.invalid/repo?secret=exception-secret^&anything=other-secret 1>&2\r\n" +
+            "@echo fatal https://example.invalid/repo?token=prefix'apostrophe-suffix 1>&2\r\n" +
+            "@echo fatal https://example.invalid/repo?token=prefix^\"quote-suffix 1>&2\r\n" +
+            "@exit /b 7\r\n");
         var provider = new GitStorageProvider(
             "exception-redaction",
             _remote,
@@ -282,6 +318,8 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
 
         Assert.DoesNotContain("exception-secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("other-secret", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("apostrophe-suffix", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("quote-suffix", exception.ToString(), StringComparison.OrdinalIgnoreCase);
         Assert.Contains("secret=***", exception.Message);
         Assert.Contains("anything=***", exception.Message);
     }
@@ -407,5 +445,15 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
             AcceptedRevision = revision.StandardOutput.Trim();
             return new GitCommandResult(1, string.Empty, "simulated lost push response", TimedOut: false);
         }
+    }
+
+    private sealed class RejectWithoutRemoteChangePushTransport : IGitPushTransport
+    {
+        public Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken) =>
+            Task.FromResult(new GitCommandResult(
+                1,
+                string.Empty,
+                "branch policy denied https://example.invalid/repository?token=push-secret",
+                TimedOut: false));
     }
 }
