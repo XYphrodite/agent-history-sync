@@ -4,7 +4,12 @@ namespace CodexHistorySync.Git;
 
 public sealed record GitHubVisibilityResult(bool IsPrivate, string Diagnostic);
 
-public sealed class GitHubVisibilityVerifier
+public interface IGitHubVisibilityVerifier
+{
+    Task<GitHubVisibilityResult> VerifyPrivateAsync(string repository, CancellationToken cancellationToken);
+}
+
+public sealed class GitHubVisibilityVerifier : IGitHubVisibilityVerifier
 {
     private readonly string _ghExecutable;
 
