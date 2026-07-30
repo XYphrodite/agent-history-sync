@@ -846,6 +846,72 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task StartupEvidencePathCreatedAfterDirectorySnapshot_AbortsBeforeProviderRead()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var target = CreateDevice("late-evidence-path", key, provider);
+        Directory.CreateDirectory(target.StagingRoot);
+        var operation = Path.Combine(target.StagingRoot, "late-operation");
+        await File.WriteAllBytesAsync(HistoryMutationBatch.CleanupEvidencePath(operation), []);
+        var decoy = Path.Combine(target.StagingRoot, "a-decoy");
+        Directory.CreateDirectory(decoy);
+        var restarted = CreateDevice("late-evidence-path", key, provider,
+            cleaner: new LateCreatingOperationCleaner(decoy, operation));
+
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(0, provider.ReadCalls);
+        Assert.True(File.Exists(operation));
+        Assert.True(File.Exists(HistoryMutationBatch.CleanupEvidencePath(operation)));
+    }
+
+    [Fact]
+    public async Task StartupMarkerWithUncertainType_AbortsBeforeProviderRead()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var target = CreateDevice("uncertain-marker", key, provider);
+        var operation = Path.Combine(target.StagingRoot, "uncertain-marker-operation");
+        Directory.CreateDirectory(Path.Combine(operation, HistoryMutationBatch.MarkerFileName));
+        await File.WriteAllBytesAsync(HistoryMutationBatch.CleanupEvidencePath(operation), []);
+
+        await Assert.ThrowsAsync<IOException>(() => target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(0, provider.ReadCalls);
+        Assert.True(Directory.Exists(Path.Combine(operation, HistoryMutationBatch.MarkerFileName)));
+    }
+
+    [Fact]
+    public async Task CasRetryAfterDownloadStaging_PreservesEarlyEvidenceUntilRestartCleanup()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("early-evidence-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "remote-for-staging");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        provider.RejectionsRemaining = 5;
+        var target = CreateDevice("early-evidence-target", key, provider,
+            cleaner: new FailingOperationDirectoryCleaner(failAtMarker: false));
+        await WriteSessionAsync(target.Paths.Sessions, "local-for-publication");
+
+        await Assert.ThrowsAsync<SyncConcurrencyException>(() =>
+            target.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None));
+
+        var operations = Directory.EnumerateDirectories(target.StagingRoot).ToArray();
+        Assert.Equal(5, operations.Length);
+        Assert.All(operations, operation =>
+        {
+            Assert.Single(Directory.EnumerateFiles(Path.Combine(operation, "downloads"), "*.jsonl"));
+            Assert.True(File.Exists(HistoryMutationBatch.CleanupEvidencePath(operation)));
+        });
+
+        var restarted = CreateDevice("early-evidence-target", key, new OfflineProvider());
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(restarted.StagingRoot));
+    }
+
+    [Fact]
     public async Task PostCommitSafetyRejection_DoesNotTurnCommittedSyncIntoFailure()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -1060,6 +1126,18 @@ public sealed class SyncFailureTests : IDisposable
     {
         public void Delete(string operationDirectory, string markerFileName) =>
             throw new ArgumentException("cleanup path safety rejected the operation directory");
+    }
+
+    private sealed class LateCreatingOperationCleaner(string decoy, string latePath) : IOperationDirectoryCleaner
+    {
+        private readonly OperationDirectoryCleaner _inner = new();
+
+        public void Delete(string operationDirectory, string markerFileName)
+        {
+            _inner.Delete(operationDirectory, markerFileName);
+            if (StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(operationDirectory), Path.GetFullPath(decoy)))
+                File.WriteAllText(latePath, "stranded plaintext");
+        }
     }
     private sealed class StoppedDetector : ICodexProcessDetector
     {

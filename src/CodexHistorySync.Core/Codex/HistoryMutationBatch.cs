@@ -32,9 +32,8 @@ internal sealed class HistoryMutationBatch
         if (string.IsNullOrWhiteSpace(operationDirectory)) throw new ArgumentException("An operation directory is required.", nameof(operationDirectory));
         Directory.CreateDirectory(operationDirectory);
         var markerPath = Path.Combine(Path.GetFullPath(operationDirectory), MarkerFileName);
-        var cleanupEvidencePath = CleanupEvidencePath(operationDirectory);
-        if (File.Exists(markerPath)) throw new IOException("A local mutation marker already exists for this operation.");
-        await WriteCleanupEvidenceAsync(cleanupEvidencePath, ct).ConfigureAwait(false);
+        if (!IsPathConfirmedAbsent(markerPath)) throw new IOException("A local mutation marker already exists for this operation.");
+        await EnsureCleanupEvidenceAsync(operationDirectory, ct).ConfigureAwait(false);
         var ids = new HashSet<LogicalObjectId>();
         var entries = new List<MutationEntry>(plans.Count);
         foreach (var plan in plans)
@@ -55,8 +54,10 @@ internal sealed class HistoryMutationBatch
         IReadOnlyDictionary<LogicalObjectId, ObjectVersion> baseline, CancellationToken ct)
     {
         var markerPath = Path.Combine(Path.GetFullPath(operationDirectory), MarkerFileName);
-        if (!File.Exists(markerPath)) return false;
-        var journal = await ReadAsync(markerPath, ct).ConfigureAwait(false);
+        MutationJournal journal;
+        try { journal = await ReadAsync(markerPath, ct).ConfigureAwait(false); }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
         var batch = new HistoryMutationBatch(writer, markerPath, journal);
         batch.ValidateJournal();
         if (batch.IsCommitted(baseline))
@@ -69,6 +70,29 @@ internal sealed class HistoryMutationBatch
     {
         var directory = Path.GetFullPath(operationDirectory);
         return Path.Combine(Path.GetDirectoryName(directory)!, "." + Path.GetFileName(directory) + CleanupEvidenceExtension);
+    }
+
+    internal static async Task EnsureCleanupEvidenceAsync(string operationDirectory, CancellationToken ct)
+    {
+        var path = CleanupEvidencePath(operationDirectory);
+        try
+        {
+            await WriteCleanupEvidenceAsync(path, ct).ConfigureAwait(false);
+        }
+        catch (IOException creationFailure)
+        {
+            try
+            {
+                var attributes = File.GetAttributes(path);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                    throw new IOException("The cleanup evidence path is not a regular file.");
+                await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                if (input.Length != 0) throw new IOException("The cleanup evidence file is invalid.");
+            }
+            catch (FileNotFoundException) { throw creationFailure; }
+            catch (DirectoryNotFoundException) { throw creationFailure; }
+        }
     }
 
     internal Task BeginApplyAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Applying, ct);
@@ -84,7 +108,7 @@ internal sealed class HistoryMutationBatch
             await _writer.RollbackAsync(entry.Path, entry.Kind, State(entry.BeforeExists, entry.BeforeHash),
                 State(entry.AfterExists, entry.AfterHash), entry.BackupId, _journal.OperationId, ct).ConfigureAwait(false);
         }
-        if (File.Exists(_markerPath)) File.Delete(_markerPath);
+        File.Delete(_markerPath);
     }
 
     private async Task SetStatusAsync(LogicalObjectId id, MutationStatus status, CancellationToken ct)
@@ -160,7 +184,7 @@ internal sealed class HistoryMutationBatch
                 await output.FlushAsync(ct).ConfigureAwait(false);
                 output.Flush(true);
             }
-            if (File.Exists(path)) File.Replace(temporary, path, null);
+            if (!IsPathConfirmedAbsent(path)) File.Replace(temporary, path, null);
             else File.Move(temporary, path);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -172,6 +196,17 @@ internal sealed class HistoryMutationBatch
             FileOptions.Asynchronous | FileOptions.WriteThrough);
         await output.FlushAsync(ct).ConfigureAwait(false);
         output.Flush(true);
+    }
+
+    private static bool IsPathConfirmedAbsent(string path)
+    {
+        try
+        {
+            _ = File.GetAttributes(path);
+            return false;
+        }
+        catch (FileNotFoundException) { return true; }
+        catch (DirectoryNotFoundException) { return true; }
     }
 
     private sealed record MutationJournal(int SchemaVersion, string OperationId, List<MutationEntry> Entries);
