@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
 using CodexHistorySync.Git;
@@ -73,6 +74,16 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
         return new CliGateResult(result.IsPrivate, "private-visibility");
     }
 
+    public async Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken)
+    {
+        var visibility = await VerifyPrivateAsync(remoteUrl, cancellationToken).ConfigureAwait(false);
+        if (!visibility.Passed) return visibility;
+        var refs = await git.RunAsync(["ls-remote", remoteUrl],
+            Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
+        await RequireSuccessAsync(refs, "Unable to inspect the initialization repository.").ConfigureAwait(false);
+        return new CliGateResult(string.IsNullOrWhiteSpace(refs.StandardOutput), "empty-private-repository");
+    }
+
     public async Task<CliPublishedInitialization> PublishInitializationAsync(string remoteUrl, string repositoryId,
         byte[] manifest, byte[] encryptedIndex, CancellationToken cancellationToken)
     {
@@ -86,9 +97,9 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
         {
             await RequireSuccessAsync(await git.RunAsync(["clone", "--no-checkout", "--origin", "origin", remoteUrl, clone], temporaryRoot, cancellationToken),
                 "Unable to clone the private initialization repository.").ConfigureAwait(false);
-            var heads = await git.RunAsync(["ls-remote", "--heads", "origin"], clone, cancellationToken).ConfigureAwait(false);
-            await RequireSuccessAsync(heads, "Unable to inspect the initialization repository.").ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(heads.StandardOutput)) throw new InvalidOperationException("Initialization requires an empty private repository.");
+            var refs = await git.RunAsync(["ls-remote", "origin"], clone, cancellationToken).ConfigureAwait(false);
+            await RequireSuccessAsync(refs, "Unable to inspect the initialization repository.").ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(refs.StandardOutput)) throw new InvalidOperationException("Initialization requires an empty private repository.");
             await RequireSuccessAsync(await git.RunAsync(["checkout", "--orphan", "main"], clone, cancellationToken), "Unable to create the initialization branch.").ConfigureAwait(false);
             await File.WriteAllBytesAsync(Path.Combine(clone, ManifestFileName), manifest, cancellationToken).ConfigureAwait(false);
             await File.WriteAllBytesAsync(Path.Combine(clone, "repository.chs"), encryptedIndex, cancellationToken).ConfigureAwait(false);
@@ -116,16 +127,29 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
     public async Task<CliRemoteSetup> ReadSetupAsync(string remoteUrl, CancellationToken cancellationToken)
     {
         var repository = ParseRepository(remoteUrl);
-        var manifest = await ReadGitHubFileAsync(repository, ManifestFileName, cancellationToken).ConfigureAwait(false);
-        var index = await ReadGitHubFileAsync(repository, "repository.chs", cancellationToken).ConfigureAwait(false);
-        var revision = await gh.RunAsync(["api", $"repos/{repository}/git/ref/heads/main", "--jq", ".object.sha"], Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
-        await RequireSuccessAsync(revision, "Unable to read the repository revision.").ConfigureAwait(false);
-        return new CliRemoteSetup(manifest, index, revision.StandardOutput.Trim());
+        var revision = await ReadCurrentRevisionAsync(remoteUrl, cancellationToken).ConfigureAwait(false);
+        var manifest = await ReadGitHubFileAsync(repository, ManifestFileName, revision, cancellationToken).ConfigureAwait(false);
+        var index = await ReadGitHubFileAsync(repository, "repository.chs", revision, cancellationToken).ConfigureAwait(false);
+        return new CliRemoteSetup(manifest, index, revision);
     }
 
-    private async Task<byte[]> ReadGitHubFileAsync(string repository, string fileName, CancellationToken cancellationToken)
+    public async Task<string> ReadCurrentRevisionAsync(string remoteUrl, CancellationToken cancellationToken)
     {
-        var result = await gh.RunAsync(["api", $"repos/{repository}/contents/{fileName}?ref=main", "--jq", ".content"], Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
+        var repository = ParseRepository(remoteUrl);
+        var revision = await gh.RunAsync(["api", $"repos/{repository}/git/ref/heads/main", "--jq", ".object.sha"],
+            Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
+        await RequireSuccessAsync(revision, "Unable to read the repository revision.").ConfigureAwait(false);
+        var value = revision.StandardOutput.Trim();
+        if (value.Length is not (40 or 64) || value.Any(character => character is not (>= '0' and <= '9') and
+                not (>= 'a' and <= 'f')))
+            throw new InvalidDataException("GitHub returned an invalid repository revision.");
+        return value;
+    }
+
+    private async Task<byte[]> ReadGitHubFileAsync(string repository, string fileName, string revision,
+        CancellationToken cancellationToken)
+    {
+        var result = await gh.RunAsync(["api", $"repos/{repository}/contents/{fileName}?ref={revision}", "--jq", ".content"], Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
         await RequireSuccessAsync(result, "Unable to read encrypted repository setup metadata.").ConfigureAwait(false);
         try { return Convert.FromBase64String(string.Concat(result.StandardOutput.Where(character => !char.IsWhiteSpace(character)))); }
         catch (FormatException exception) { throw new InvalidDataException("GitHub returned malformed setup metadata.", exception); }
@@ -228,41 +252,54 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly string localAppData;
     private readonly ICliRepositoryGateway gateway;
     private readonly ICodexProcessDetector processDetector;
+    private readonly Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
+        : this(localAppData, gateway, processDetector,
+            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken))
+    {
+    }
+
+    public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
+        Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         this.processDetector = processDetector ?? throw new ArgumentNullException(nameof(processDetector));
+        this.compatibilityProbe = compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe));
     }
 
     public async Task<CliGateResult> ProbeCompatibilityAsync(CancellationToken cancellationToken)
     {
+        var fixtureRoot = Path.Combine(Path.GetTempPath(), "codex-history-sync-compatibility-" + Guid.NewGuid().ToString("N"));
         try
         {
-            var paths = CodexPaths.Resolve(null);
-            var fixture = new[] { paths.ArchivedSessions, paths.Sessions }
-                .Where(Directory.Exists)
-                .SelectMany(path => Directory.EnumerateFiles(path, "*.jsonl", SearchOption.AllDirectories))
-                .FirstOrDefault();
-            if (fixture is null) return new CliGateResult(false, "codex-compatibility");
-            var result = await new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken).ConfigureAwait(false);
+            Directory.CreateDirectory(fixtureRoot);
+            var fixture = Path.Combine(fixtureRoot, "compatibility-fixture.jsonl");
+            await File.WriteAllTextAsync(fixture,
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"compatibility-fixture\"}}\n",
+                new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+            var result = await compatibilityProbe(fixture, cancellationToken).ConfigureAwait(false);
             return new CliGateResult(result.IsCompatible, "codex-compatibility");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             return new CliGateResult(false, "codex-compatibility");
         }
+        finally
+        {
+            try { if (Directory.Exists(fixtureRoot)) Directory.Delete(fixtureRoot, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     public async Task<CliJoinPlan> PreviewJoinAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
         CliRemoteSetup setup, CancellationToken cancellationToken)
     {
-        var paths = CodexPaths.Resolve(null);
-        var locals = await new SessionScanner().ScanAsync(paths, cancellationToken).ConfigureAwait(false);
-        var remote = await RepositoryManifestAuthenticator.AuthenticateIndexAsync(setup.Index, configuration.RepositoryId,
-            key, new RepositoryCrypto(), cancellationToken).ConfigureAwait(false);
-        return new CliJoinPlan(locals.Count, remote, Math.Max(0, remote - locals.Count), 0);
+        var preview = await Build(configuration, key, pinnedRevision: setup.Revision).Engine
+            .PreviewAsync(SyncMode.Pull, cancellationToken).ConfigureAwait(false);
+        return new CliJoinPlan(preview.LocalObjects, preview.RemoteObjects, preview.PendingChanges, preview.Conflicts);
     }
 
     public Task<SyncResult> SynchronizeAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
@@ -272,12 +309,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         CancellationToken cancellationToken)
     {
         var components = Build(configuration, key);
-        var localCount = (await components.Scanner.ScanAsync(components.Paths, cancellationToken).ConfigureAwait(false)).Count;
-        var setup = await gateway.ReadSetupAsync(configuration.RemoteUrl, cancellationToken).ConfigureAwait(false);
-        var remoteCount = await RepositoryManifestAuthenticator.AuthenticateIndexAsync(setup.Index, configuration.RepositoryId,
-            key, new RepositoryCrypto(), cancellationToken).ConfigureAwait(false);
+        var preview = await components.Engine.PreviewAsync(SyncMode.Bidirectional, cancellationToken).ConfigureAwait(false);
         var conflictCount = (await components.Conflicts.ListAsync(cancellationToken).ConfigureAwait(false)).Count;
-        return new CliStatusReport(localCount, remoteCount, Math.Abs(remoteCount - localCount), conflictCount, configuration.LastSuccessfulRevision);
+        return new CliStatusReport(preview.LocalObjects, preview.RemoteObjects, preview.PendingChanges,
+            Math.Max(preview.Conflicts, conflictCount), preview.RemoteRevision);
     }
 
     public async Task<CliDoctorReport> RunDoctorAsync(CliLocalConfiguration? configuration, ReadOnlyMemory<byte> key,
@@ -311,7 +346,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             record.Provenance.LocalTimestampUtc, record.Provenance.RemoteTimestampUtc)).ToArray();
     }
 
-    public async Task ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
+    public async Task<CliResolutionResult> ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
         CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken)
     {
         var components = Build(configuration, key);
@@ -322,10 +357,12 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             CliResolution.ExportBoth => ConflictResolution.ExportBoth,
             _ => throw new ArgumentOutOfRangeException(nameof(resolution))
         };
-        _ = await components.Conflicts.ResolveAsync(conflictId, mapped, exportDirectory, new RepositoryCrypto(), key, cancellationToken).ConfigureAwait(false);
+        var result = await components.Engine.ResolveConflictAsync(conflictId, mapped, exportDirectory, cancellationToken).ConfigureAwait(false);
+        return new CliResolutionResult(result.RemainingConflicts, result.Exported);
     }
 
-    private Components Build(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, bool requireKey = true)
+    private Components Build(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, bool requireKey = true,
+        string? pinnedRevision = null)
     {
         if (requireKey && key.Length != RepositoryCrypto.MasterKeySize) throw new CliGateException("The repository key is unavailable.");
         var paths = CodexPaths.Resolve(null);
@@ -335,8 +372,9 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
         var writer = new CodexHistoryWriter(paths, backups, processDetector);
-        var provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
+        IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
             Path.Combine(localAppData, "CodexHistorySync", "repositories"));
+        if (pinnedRevision is not null) provider = new RevisionPinnedProvider(provider, pinnedRevision);
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = new SyncEngine(configuration.RepositoryId, configuration.DeviceId, paths, key, scanner,
             new RepositoryCrypto(), state, writer, conflicts, provider, staging);
@@ -370,6 +408,20 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     }
 
     private sealed record Components(CodexPaths Paths, SessionScanner Scanner, ConflictStore Conflicts, SyncEngine Engine);
+
+    private sealed class RevisionPinnedProvider(IStorageProvider inner, string expectedRevision) : IStorageProvider
+    {
+        public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
+        {
+            var snapshot = await inner.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            if (!StringComparer.Ordinal.Equals(snapshot.Revision, expectedRevision))
+                throw new CliGateException("The repository changed after join authentication; retry the join.");
+            return snapshot;
+        }
+
+        public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("A pinned preview provider cannot publish.");
+    }
 }
 
 public sealed class ConservativeCodexProcessDetector : ICodexProcessDetector

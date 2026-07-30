@@ -14,7 +14,7 @@ Initialize an empty private repository:
 codex-sync init https://github.com/OWNER/REPOSITORY.git
 ```
 
-`init` checks private visibility before prompting twice. It creates a random repository ID, device ID, and Argon2id salt; derives the repository key; and publishes the authenticated manifest and encrypted empty index in one initialization commit. Only after that commit succeeds does it cache the key with DPAPI and write local configuration and state.
+`init` checks both private visibility and repository emptiness before prompting twice. It creates a random repository ID, device ID, and Argon2id salt; derives the repository key; and publishes the authenticated manifest and encrypted empty index in one initialization commit. It checks emptiness again immediately before publication to reject a concurrent initializer. Only after that commit succeeds does it cache the key with DPAPI and write local configuration and state.
 
 If the remote commit succeeds but local caching fails, do not initialize again. The remote is valid and can be recovered with `join`.
 
@@ -24,7 +24,7 @@ On another Windows profile, first preview the import:
 codex-sync join https://github.com/OWNER/REPOSITORY.git
 ```
 
-The join command verifies private visibility before prompting once. It authenticates the manifest and encrypted index, runs the disposable Codex compatibility probe, and prints local, remote, pending, and conflict counts. It makes no persistent key, configuration, state, or Codex-history change during this dry run.
+The join command verifies private visibility before prompting once. It pins the current branch SHA, reads and authenticates the manifest and encrypted index at that exact SHA, runs the disposable Codex compatibility probe with a controlled synthetic session, and prints authenticated planner-derived local, remote, pending, and conflict counts. It makes no persistent key, configuration, state, conflict-evidence, or Codex-history change during this dry run, and the pending in-memory key is zeroed when the command ends.
 
 Apply the first import only after reviewing the counts:
 
@@ -32,7 +32,7 @@ Apply the first import only after reviewing the counts:
 codex-sync join https://github.com/OWNER/REPOSITORY.git --apply
 ```
 
-Wrong passphrases, tampered metadata, unsupported schema, failed visibility checks, or failed compatibility probes stop before persistent join state or history imports.
+Wrong passphrases, tampered metadata, unsupported schema, failed visibility checks, failed compatibility probes, or a branch update after authentication stop before persistent join state or history imports. The applied join reports and returns exit code 4 from the actual pull result if conflicts are discovered after the preview.
 
 ## Manual synchronization
 
@@ -51,7 +51,7 @@ codex-sync status
 codex-sync doctor
 ```
 
-`status` reports local, remote, pending, and conflict counts plus the last successful revision.
+`status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus the current authenticated remote revision; equal counts do not hide divergent objects.
 
 `doctor` reports PASS or FAIL for these checks without printing paths, child-process output, URLs, credentials, keys, prompts, or exception text:
 
@@ -84,7 +84,9 @@ codex-sync resolve CONFLICT_ID --keep-remote
 codex-sync resolve CONFLICT_ID --export-both C:\existing-parent\new-export-directory
 ```
 
-`--export-both` decrypts both retained envelopes into a newly created directory. The destination must be absolute, must not already exist, must have an existing parent, must be outside Codex history and conflict storage, and must pass the existing reparse-point/path-boundary checks. The keep actions select only one authenticated encrypted side; no plaintext is printed.
+`--export-both` decrypts both retained envelopes into a newly created directory. The destination must be absolute, must not already exist, must have an existing parent, must be outside Codex history and conflict storage, and must pass the existing reparse-point/path-boundary checks. Export does not resolve the conflict, retains its encrypted evidence, and returns exit code 4 while any conflict remains.
+
+The keep actions authenticate the stored evidence and current remote snapshot while holding the repository lock. The chosen side is published with compare-and-swap before any local mutation, then applied through the guarded history writer and recorded as the new baseline. Evidence is removed only after remote, local, and state work all succeed. A failure retains evidence for diagnosis or an idempotent retry; no plaintext is printed.
 
 ## Exit codes
 

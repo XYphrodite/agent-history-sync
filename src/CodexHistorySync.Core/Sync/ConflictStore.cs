@@ -166,6 +166,20 @@ public sealed class ConflictStore
         return new(id, manifest.Provenance, directory, localPath, remotePath, manifestPath);
     }
 
+    public async Task RemoveAsync(string conflictId, CancellationToken ct)
+    {
+        PathSafety.RejectReparsePoints(RootPath, nameof(RootPath));
+        var conflict = await LoadAsync(conflictId, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        ValidateConcretePaths(conflict.DirectoryPath, conflict.LocalEncryptedPath, conflict.RemoteEncryptedPath,
+            conflict.ManifestPath);
+        if (Directory.EnumerateDirectories(conflict.DirectoryPath).Any() ||
+            Directory.EnumerateFiles(conflict.DirectoryPath).Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal)
+                .SetEquals(["local.encrypted", "remote.encrypted", "manifest.json"]) is false)
+            throw new IOException("The conflict evidence directory contains unexpected entries.");
+        Directory.Delete(conflict.DirectoryPath, recursive: true);
+    }
+
     private async Task<ConflictRecord?> FindByFingerprintAsync(string fingerprint, CancellationToken ct)
     {
         if (!Directory.Exists(RootPath)) return null;
