@@ -52,6 +52,77 @@ public sealed class ConflictStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task PreserveAsync_LegacyStoredFingerprint_DeduplicatesAcrossUpgradeAndRetiresOnlyRecord()
+    {
+        var fixture = CreateFixture();
+        var provenance = Provenance();
+        var local = await EncryptAsync(fixture, "local\n");
+        var remote = await EncryptAsync(fixture, "remote\n");
+        var existing = await fixture.Store.PreserveAsync(provenance, new MemoryStream(local),
+            new MemoryStream(remote), CancellationToken.None);
+        var legacyManifest = new ConflictManifest(1, provenance, Hash(local), Hash(remote),
+            LegacyFingerprint(provenance));
+        await File.WriteAllBytesAsync(existing.ManifestPath,
+            JsonSerializer.SerializeToUtf8Bytes(legacyManifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        var preserved = await fixture.Store.PreserveAsync(provenance, new MemoryStream(local),
+            new MemoryStream(remote), CancellationToken.None);
+
+        Assert.Equal(existing.Id, preserved.Id);
+        Assert.Single(await fixture.Store.ListAsync(CancellationToken.None));
+        await fixture.Store.RetireAsync(existing.Id, CancellationToken.None);
+        Assert.Empty(await fixture.Store.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PreserveAsync_LegacyStoredFingerprint_DoesNotConflateCrossKindConflict()
+    {
+        var fixture = CreateFixture();
+        var provenance = Provenance();
+        var local = await EncryptAsync(fixture, "local\n");
+        var remote = await EncryptAsync(fixture, "remote\n");
+        var existing = await fixture.Store.PreserveAsync(provenance, new MemoryStream(local),
+            new MemoryStream(remote), CancellationToken.None);
+        var legacyManifest = new ConflictManifest(1, provenance, Hash(local), Hash(remote),
+            LegacyFingerprint(provenance));
+        await File.WriteAllBytesAsync(existing.ManifestPath,
+            JsonSerializer.SerializeToUtf8Bytes(legacyManifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var crossKind = provenance with
+        {
+            LocalMetadata = provenance.Metadata,
+            RemoteMetadata = provenance.Metadata with { Kind = ObjectKind.ArchivedSession }
+        };
+
+        var preserved = await fixture.Store.PreserveAsync(crossKind, new MemoryStream(local),
+            new MemoryStream(remote), CancellationToken.None);
+
+        Assert.NotEqual(existing.Id, preserved.Id);
+        Assert.Equal(2, (await fixture.Store.ListAsync(CancellationToken.None)).Count);
+    }
+
+    [Theory]
+    [InlineData("not-a-fingerprint")]
+    [InlineData("0000000000000000000000000000000000000000000000000000000000000000")]
+    public async Task PreserveAsync_UntrustedStoredFingerprint_DeduplicatesFromRecomputedProvenance(string storedFingerprint)
+    {
+        var fixture = CreateFixture();
+        var provenance = Provenance();
+        var local = await EncryptAsync(fixture, "local\n");
+        var remote = await EncryptAsync(fixture, "remote\n");
+        var existing = await fixture.Store.PreserveAsync(provenance, new MemoryStream(local),
+            new MemoryStream(remote), CancellationToken.None);
+        var manifest = new ConflictManifest(1, provenance, Hash(local), Hash(remote), storedFingerprint);
+        await File.WriteAllBytesAsync(existing.ManifestPath,
+            JsonSerializer.SerializeToUtf8Bytes(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        var preserved = await fixture.Store.PreserveAsync(provenance, new MemoryStream(local),
+            new MemoryStream(remote), CancellationToken.None);
+
+        Assert.Equal(existing.Id, preserved.Id);
+        Assert.Single(await fixture.Store.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ResolveExportBothAsync_ExportsExactPlaintextWithoutRewritingIds()
     {
         var fixture = CreateFixture();
@@ -315,6 +386,27 @@ public sealed class ConflictStoreTests : IDisposable
         await using var output = new MemoryStream();
         await fixture.Crypto.EncryptAsync(new MemoryStream(Encoding.UTF8.GetBytes(text)), output, fixture.Key, fixture.Metadata, CancellationToken.None);
         return output.ToArray();
+    }
+
+    private static ContentHash Hash(byte[] bytes) =>
+        new(Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+
+    private static string LegacyFingerprint(ConflictProvenance provenance)
+    {
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = provenance.Metadata.SchemaVersion,
+            objectId = provenance.Metadata.ObjectId.Value,
+            kind = (int)provenance.Metadata.Kind,
+            localHash = provenance.LocalHash.Hex,
+            remoteHash = provenance.RemoteHash.Hex,
+            baselineHash = provenance.BaselineHash.Hex,
+            provenance.LocalDeviceId,
+            provenance.RemoteDeviceId,
+            provenance.LocalDeleted,
+            provenance.RemoteDeleted
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
     }
 
     private sealed record Fixture(CodexPaths Paths, RepositoryCrypto Crypto, byte[] Key, EnvelopeMetadata Metadata, ConflictStore Store);
