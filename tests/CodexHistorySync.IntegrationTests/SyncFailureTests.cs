@@ -598,6 +598,128 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task Preview_DetectsEqualCountDivergenceWithoutMutatingLocalOrRemoteState()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("preview-source", key, provider);
+        var target = CreateDevice("preview-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "shared-preview");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "shared-preview.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote-preview-change\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(target.Paths.Sessions, "shared-preview.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local-preview-change\"}}\n");
+        var statePath = target.State.GetStatePath("repository");
+        var stateBefore = await File.ReadAllBytesAsync(statePath);
+        var publishCallsBefore = provider.PublishCalls;
+
+        var preview = await target.Engine.PreviewAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, preview.LocalObjects);
+        Assert.Equal(1, preview.RemoteObjects);
+        Assert.Equal(0, preview.PendingChanges);
+        Assert.Equal(1, preview.Conflicts);
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(statePath));
+        Assert.Equal(publishCallsBefore, provider.PublishCalls);
+        Assert.Empty(await target.Conflicts.ListAsync(CancellationToken.None));
+        Assert.False(Directory.Exists(target.StagingRoot) && Directory.EnumerateFileSystemEntries(target.StagingRoot).Any());
+    }
+
+    [Fact]
+    public async Task KeepLocalResolution_PublishesChosenVersionAndRemovesEvidenceOnlyAfterCompletion()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("resolution-source", key, provider);
+        var target = CreateDevice("resolution-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "shared-resolution");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "shared-resolution.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote-choice\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var targetPath = Path.Combine(target.Paths.Sessions, "shared-resolution.jsonl");
+        await File.AppendAllTextAsync(targetPath,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local-choice\"}}\n");
+        var localChoice = await File.ReadAllTextAsync(targetPath);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var conflict = Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+
+        var resolution = await target.Engine.ResolveConflictAsync(conflict.Id, ConflictResolution.KeepLocal, null,
+            CancellationToken.None);
+
+        Assert.False(resolution.Exported);
+        Assert.Equal(0, resolution.RemainingConflicts);
+        Assert.Empty(await target.Conflicts.ListAsync(CancellationToken.None));
+        Assert.Equal(localChoice, await File.ReadAllTextAsync(targetPath));
+        var verifier = CreateDevice("resolution-verifier", key, provider);
+        await verifier.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Assert.Equal(localChoice, await File.ReadAllTextAsync(Path.Combine(verifier.Paths.Sessions, "shared-resolution.jsonl")));
+        Assert.Equal(0, (await target.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None)).Conflicts);
+    }
+
+    [Fact]
+    public async Task ExportBoth_LeavesConflictUnresolved()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("export-source", key, provider);
+        var target = CreateDevice("export-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "shared-export");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "shared-export.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote-export\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(target.Paths.Sessions, "shared-export.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local-export\"}}\n");
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var conflict = Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+        var destination = Path.Combine(_root, "conflict-export");
+
+        var resolution = await target.Engine.ResolveConflictAsync(conflict.Id, ConflictResolution.ExportBoth,
+            destination, CancellationToken.None);
+
+        Assert.True(resolution.Exported);
+        Assert.Equal(1, resolution.RemainingConflicts);
+        Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+        Assert.Equal(2, Directory.EnumerateFiles(destination, "*.jsonl").Count());
+    }
+
+    [Fact]
+    public async Task ResolutionStateFailure_RetainsEvidenceAndCanBeRetriedAfterRemoteCas()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("resolution-retry-source", key, provider);
+        var target = CreateDevice("resolution-retry-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "shared-resolution-retry");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "shared-resolution-retry.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote-retry\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(target.Paths.Sessions, "shared-resolution-retry.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local-retry\"}}\n");
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var conflict = Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+        var failing = CreateDevice("resolution-retry-target", key, provider,
+            stateReplacer: new FailingStateFileReplacer());
+
+        await Assert.ThrowsAsync<IOException>(() => failing.Engine.ResolveConflictAsync(conflict.Id,
+            ConflictResolution.KeepLocal, null, CancellationToken.None));
+
+        Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+        var retried = await target.Engine.ResolveConflictAsync(conflict.Id, ConflictResolution.KeepLocal, null,
+            CancellationToken.None);
+        Assert.Equal(0, retried.RemainingConflicts);
+        Assert.Empty(await target.Conflicts.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task PublicationRetry_PreservesOneRecordForTheSameConflict()
     {
         var key = RandomNumberGenerator.GetBytes(32);

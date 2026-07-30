@@ -114,9 +114,92 @@ public sealed class CliServiceTests
 
         Assert.True(gate.Passed);
         Assert.Empty(log);
-        await service.ApplyJoinAsync(authenticated, plan, CancellationToken.None);
+        var applied = await service.ApplyJoinAsync(authenticated, plan, CancellationToken.None);
+        Assert.Equal(0, applied.Conflicts);
         Assert.Equal(["local.key", "local.config", "local.state", "runtime.pull", "local.config"], log);
+        Assert.Equal("remote.revision", setupLog.Last());
         Assert.Equal("revision-1", local.Configurations.Last().LastSuccessfulRevision);
+    }
+
+    [Fact]
+    public async Task Join_abort_zeroes_pending_master_key_and_is_idempotent()
+    {
+        var setupLog = new List<string>();
+        var gateway = new FakeGateway(setupLog);
+        var source = new DefaultCliServices(gateway, new FakeLocalRepository(setupLog), new FakeRuntime(setupLog), new RepositoryCrypto());
+        await source.InitializeAsync(Remote, "right-passphrase".ToCharArray(), CancellationToken.None);
+        gateway.Setup = new CliRemoteSetup(gateway.Published!.Manifest, gateway.Published.Index, "revision-1");
+        var runtime = new FakeRuntime([]);
+        var service = new DefaultCliServices(gateway, new FakeLocalRepository([]), runtime, new RepositoryCrypto());
+        var repository = await service.AuthenticateRepositoryAsync(Remote, "right-passphrase".ToCharArray(), CancellationToken.None);
+        await service.PlanJoinAsync(repository, CancellationToken.None);
+        Assert.Contains(runtime.ObservedJoinKey.Span.ToArray(), value => value != 0);
+
+        await service.AbortJoinAsync(repository, CancellationToken.None);
+        await service.AbortJoinAsync(repository, CancellationToken.None);
+
+        Assert.All(runtime.ObservedJoinKey.Span.ToArray(), value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public async Task Join_apply_rechecks_pinned_revision_before_any_local_write()
+    {
+        var setupLog = new List<string>();
+        var gateway = new FakeGateway(setupLog);
+        var source = new DefaultCliServices(gateway, new FakeLocalRepository(setupLog), new FakeRuntime(setupLog), new RepositoryCrypto());
+        await source.InitializeAsync(Remote, "right-passphrase".ToCharArray(), CancellationToken.None);
+        gateway.Setup = new CliRemoteSetup(gateway.Published!.Manifest, gateway.Published.Index, "revision-1");
+        var log = new List<string>();
+        var local = new FakeLocalRepository(log);
+        var service = new DefaultCliServices(gateway, local, new FakeRuntime(log), new RepositoryCrypto());
+        var repository = await service.AuthenticateRepositoryAsync(Remote, "right-passphrase".ToCharArray(), CancellationToken.None);
+        gateway.CurrentRevision = "revision-2";
+
+        await Assert.ThrowsAsync<CliGateException>(() => service.ApplyJoinAsync(repository,
+            new CliJoinPlan(0, 0, 0, 0), CancellationToken.None));
+
+        Assert.Empty(local.Configurations);
+        Assert.Empty(local.Keys);
+    }
+
+    [Fact]
+    public async Task Join_apply_failure_zeroes_pending_master_key()
+    {
+        var setupLog = new List<string>();
+        var gateway = new FakeGateway(setupLog);
+        var source = new DefaultCliServices(gateway, new FakeLocalRepository(setupLog), new FakeRuntime(setupLog), new RepositoryCrypto());
+        await source.InitializeAsync(Remote, "right-passphrase".ToCharArray(), CancellationToken.None);
+        gateway.Setup = new CliRemoteSetup(gateway.Published!.Manifest, gateway.Published.Index, "revision-1");
+        var runtime = new FakeRuntime([]) { SyncFailure = new OperationCanceledException() };
+        var service = new DefaultCliServices(gateway, new FakeLocalRepository([]), runtime, new RepositoryCrypto());
+        var repository = await service.AuthenticateRepositoryAsync(Remote, "right-passphrase".ToCharArray(), CancellationToken.None);
+        await service.PlanJoinAsync(repository, CancellationToken.None);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ApplyJoinAsync(repository,
+            new CliJoinPlan(0, 0, 0, 0), CancellationToken.None));
+
+        Assert.All(runtime.ObservedJoinKey.Span.ToArray(), value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public async Task Compatibility_probe_uses_disposable_fixture_when_live_history_is_empty()
+    {
+        string? observedFixture = null;
+        var runtime = new CoreCliSyncRuntime(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+            new FakeGateway([]), new RecordingProcessDetector(), async (fixture, cancellationToken) =>
+            {
+                observedFixture = fixture;
+                var text = await File.ReadAllTextAsync(fixture, cancellationToken);
+                Assert.Contains("session_meta", text);
+                Assert.Contains("compatibility-fixture", text);
+                return new CompatibilityResult(true, "test", "compatible");
+            });
+
+        var result = await runtime.ProbeCompatibilityAsync(CancellationToken.None);
+
+        Assert.True(result.Passed);
+        Assert.NotNull(observedFixture);
+        Assert.False(File.Exists(observedFixture));
     }
 
     [Fact]
@@ -151,9 +234,13 @@ public sealed class CliServiceTests
         public CliRemoteSetup? Setup { get; set; }
         public Exception? PublishFailure { get; set; }
         public string? ObservedRemoteUrl { get; private set; }
+        public string CurrentRevision { get; set; } = "revision-1";
 
         public Task<CliGateResult> VerifyPrivateAsync(string remoteUrl, CancellationToken cancellationToken) =>
             Task.FromResult(new CliGateResult(true, "private-visibility"));
+
+        public Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken) =>
+            Task.FromResult(new CliGateResult(true, "empty-private-repository"));
 
         public Task<CliPublishedInitialization> PublishInitializationAsync(string remoteUrl, string repositoryId,
             byte[] manifest, byte[] encryptedIndex, CancellationToken cancellationToken)
@@ -168,6 +255,12 @@ public sealed class CliServiceTests
 
         public Task<CliRemoteSetup> ReadSetupAsync(string remoteUrl, CancellationToken cancellationToken) =>
             Task.FromResult(Setup ?? throw new InvalidOperationException("No setup snapshot."));
+
+        public Task<string> ReadCurrentRevisionAsync(string remoteUrl, CancellationToken cancellationToken)
+        {
+            log.Add("remote.revision");
+            return Task.FromResult(CurrentRevision);
+        }
     }
 
     private sealed class FakeLocalRepository(List<string> log) : ICliLocalRepository
@@ -204,17 +297,25 @@ public sealed class CliServiceTests
 
     private sealed class FakeRuntime(List<string> log) : ICliSyncRuntime
     {
+        public ReadOnlyMemory<byte> ObservedJoinKey { get; private set; }
+        public Exception? SyncFailure { get; set; }
         public Task<CliGateResult> ProbeCompatibilityAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new CliGateResult(true, "codex-compatibility"));
 
         public Task<CliJoinPlan> PreviewJoinAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
-            CliRemoteSetup setup, CancellationToken cancellationToken) => Task.FromResult(new CliJoinPlan(0, 0, 0, 0));
+            CliRemoteSetup setup, CancellationToken cancellationToken)
+        {
+            ObservedJoinKey = key;
+            return Task.FromResult(new CliJoinPlan(0, 0, 0, 0));
+        }
 
         public Task<SyncResult> SynchronizeAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
             SyncMode mode, CancellationToken cancellationToken)
         {
             log.Add(mode == SyncMode.Pull ? "runtime.pull" : "runtime.sync");
-            return Task.FromResult(new SyncResult("revision-1", 0, 0, 0, 0, false));
+            return SyncFailure is null
+                ? Task.FromResult(new SyncResult("revision-1", 0, 0, 0, 0, false))
+                : Task.FromException<SyncResult>(SyncFailure);
         }
 
         public Task<CliStatusReport> GetStatusAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
@@ -226,8 +327,9 @@ public sealed class CliServiceTests
         public Task<IReadOnlyList<CliConflictInfo>> ListConflictsAsync(CliLocalConfiguration configuration,
             CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CliConflictInfo>>([]);
 
-        public Task ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
-            CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<CliResolutionResult> ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
+            CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken) =>
+            Task.FromResult(new CliResolutionResult(0, resolution == CliResolution.ExportBoth));
     }
 
     private sealed class RecordingProcessDetector : ICodexProcessDetector

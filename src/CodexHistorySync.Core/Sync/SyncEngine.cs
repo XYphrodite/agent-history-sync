@@ -15,6 +15,8 @@ namespace CodexHistorySync.Core.Sync;
 public enum SyncMode { Pull, Push, Bidirectional }
 
 public sealed record SyncResult(string RemoteRevision, int Uploaded, int Downloaded, int Deleted, int Conflicts, bool RemoteChangedDuringAttempt);
+public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges, int Conflicts);
+public sealed record SyncConflictResolutionResult(int RemainingConflicts, bool Exported);
 
 public sealed class SyncConcurrencyException : InvalidOperationException
 {
@@ -315,6 +317,256 @@ public sealed class SyncEngine
             throw new SyncConcurrencyException();
         }
         finally { _mutex.Release(); }
+    }
+
+    public async Task<SyncPreview> PreviewAsync(SyncMode mode, CancellationToken ct)
+    {
+        if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
+        await _mutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+            var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
+            var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
+            var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
+            var remote = await AuthenticateSnapshotAsync(snapshot, stateInitialized, baseline.Count, ct).ConfigureAwait(false);
+            var plan = ThreeWayPlanner.CreatePlan(CreateLocalVersions(scan, baseline),
+                CreateRemoteVersions(remote.Versions, baseline), baseline);
+            var conflicts = plan.Actions.Count(action => action.Kind == SyncActionKind.Conflict);
+            var pending = plan.Actions.Count(action => IsApplicablePreviewChange(action.Kind, mode));
+            return new SyncPreview(snapshot.Revision, scan.Objects.Count,
+                remote.Versions.Values.Count(value => !value.IsDeleted), pending, conflicts);
+        }
+        finally { _mutex.Release(); }
+    }
+
+    public async Task<SyncConflictResolutionResult> ResolveConflictAsync(string conflictId,
+        ConflictResolution resolution, string? exportDirectory, CancellationToken ct)
+    {
+        if (!Enum.IsDefined(resolution)) throw new ArgumentOutOfRangeException(nameof(resolution));
+        await _mutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var repositoryLock = await RepositorySyncLock.AcquireAsync(
+                _stateStore.GetStatePath(_repositoryId), ct).ConfigureAwait(false);
+            await RecoverInterruptedMutationsAsync(ct).ConfigureAwait(false);
+            var conflict = (await _conflictStore.ListAsync(ct).ConfigureAwait(false))
+                .SingleOrDefault(item => StringComparer.Ordinal.Equals(item.Id, conflictId))
+                ?? throw new FileNotFoundException("The requested conflict does not exist.", conflictId);
+            var selected = await _conflictStore.ResolveAsync(conflictId, resolution, exportDirectory, _crypto,
+                _masterKey, ct).ConfigureAwait(false);
+            if (resolution == ConflictResolution.ExportBoth)
+                return new SyncConflictResolutionResult((await _conflictStore.ListAsync(ct).ConfigureAwait(false)).Count, true);
+
+            var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+            ValidateConflictLocal(conflict, scan, resolution);
+            var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
+            var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
+            var remote = await AuthenticateSnapshotAsync(snapshot,
+                File.Exists(_stateStore.GetStatePath(_repositoryId)), baseline.Count, ct).ConfigureAwait(false);
+            ValidateConflictRemote(conflict, remote, resolution);
+
+            var chooseLocal = resolution == ConflictResolution.KeepLocal;
+            var deleted = chooseLocal ? conflict.Provenance.LocalDeleted : conflict.Provenance.RemoteDeleted;
+            var hash = chooseLocal ? conflict.Provenance.LocalHash : conflict.Provenance.RemoteHash;
+            var selectedPath = selected.SelectedEncryptedPath
+                ?? throw new InvalidDataException("The selected conflict envelope is missing.");
+            var plaintext = await AuthenticateConflictSelectionAsync(selectedPath, conflict.Provenance.Metadata,
+                hash, deleted, ct).ConfigureAwait(false);
+            var id = conflict.Provenance.Metadata.ObjectId;
+            var kind = conflict.Provenance.Metadata.Kind;
+            var operationId = Guid.NewGuid().ToString("N");
+            var directory = Path.Combine(_stagingRoot, operationId);
+            Directory.CreateDirectory(directory);
+            await HistoryMutationBatch.EnsureCleanupEvidenceAsync(directory, ct).ConfigureAwait(false);
+            var operationCommitted = false;
+            try
+            {
+                var currentRemote = remote.Versions.GetValueOrDefault(id);
+                var remoteAlreadySelected = currentRemote is not null && currentRemote.IsDeleted == deleted &&
+                    BackupStore.HashEquals(currentRemote.PlaintextHash, hash);
+                var selectedVersion = remoteAlreadySelected
+                    ? currentRemote!
+                    : await PublishResolvedRemoteAsync(snapshot, remote, conflict, selectedPath, hash, deleted,
+                        directory, ct).ConfigureAwait(false);
+
+                var currentLocal = scan.Objects.SingleOrDefault(item => item.Id == id);
+                var localAlreadySelected = deleted
+                    ? currentLocal is null && scan.IsAbsenceConfirmed(kind)
+                    : currentLocal is not null && BackupStore.HashEquals(currentLocal.Hash, hash);
+                HistoryMutationBatch? batch = null;
+                if (!localAlreadySelected)
+                {
+                    var destination = currentLocal?.SourcePath ?? Path.Combine(kind switch
+                    {
+                        ObjectKind.ActiveSession => _paths.Sessions,
+                        ObjectKind.ArchivedSession => _paths.ArchivedSessions,
+                        _ => throw new InvalidDataException("Only session conflicts can be resolved.")
+                    }, id.Value + ".jsonl");
+                    var target = new LocalObject(id, kind, destination, hash, plaintext.LongLength, DateTimeOffset.UtcNow);
+                    var before = currentLocal is null
+                        ? ExpectedHistoryState.Absent
+                        : ExpectedHistoryState.Present(currentLocal.Hash);
+                    var after = deleted ? ExpectedHistoryState.Absent : ExpectedHistoryState.Present(hash);
+                    batch = await HistoryMutationBatch.PrepareAsync(_historyWriter, directory, operationId,
+                        [new HistoryMutationPlan(target, before, after)], ct).ConfigureAwait(false);
+                    try
+                    {
+                        await batch.BeginApplyAsync(id, ct).ConfigureAwait(false);
+                        if (deleted)
+                        {
+                            if (currentLocal is not null && await _historyWriter.ApplyTombstoneAsync(currentLocal,
+                                    currentLocal.Hash, operationId, ct).ConfigureAwait(false) == TombstoneApplyResult.Conflict)
+                                throw new IOException("Local history changed during conflict resolution.");
+                        }
+                        else
+                        {
+                            await using var input = new MemoryStream(plaintext, false);
+                            if (await _historyWriter.ImportAsync(target, input, operationId, before, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
+                                throw new IOException("Local history changed during conflict resolution.");
+                        }
+                        await batch.MarkAppliedAsync(id, ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        await batch.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                        throw;
+                    }
+                }
+
+                try
+                {
+                    var finalScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                    ValidateSelectedLocal(conflict, finalScan, deleted, hash);
+                    var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
+                    next[id] = selectedVersion;
+                    await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
+                        next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    if (batch is not null) await batch.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                    throw;
+                }
+                operationCommitted = true;
+                await _conflictStore.RemoveAsync(conflictId, ct).ConfigureAwait(false);
+                return new SyncConflictResolutionResult(
+                    (await _conflictStore.ListAsync(ct).ConfigureAwait(false)).Count, false);
+            }
+            finally
+            {
+                if (operationCommitted || IsPathConfirmedAbsent(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
+                    TryCleanupOperationBestEffort(directory);
+            }
+        }
+        finally { _mutex.Release(); }
+    }
+
+    private static bool IsApplicablePreviewChange(SyncActionKind kind, SyncMode mode) => kind switch
+    {
+        SyncActionKind.Upload or SyncActionKind.PublishTombstone => mode != SyncMode.Pull,
+        SyncActionKind.Download or SyncActionKind.ApplyTombstone => mode != SyncMode.Push,
+        _ => false
+    };
+
+    private static void ValidateConflictLocal(ConflictRecord conflict, SessionScanResult scan,
+        ConflictResolution resolution)
+    {
+        var provenance = conflict.Provenance;
+        var current = scan.Objects.SingleOrDefault(item => item.Id == provenance.Metadata.ObjectId);
+        var matches = provenance.LocalDeleted
+            ? current is null && scan.IsAbsenceConfirmed(provenance.Metadata.Kind)
+            : current is not null && current.Kind == provenance.Metadata.Kind &&
+              BackupStore.HashEquals(current.Hash, provenance.LocalHash);
+        if (!matches && resolution == ConflictResolution.KeepRemote)
+            matches = provenance.RemoteDeleted
+                ? current is null && scan.IsAbsenceConfirmed(provenance.Metadata.Kind)
+                : current is not null && current.Kind == provenance.Metadata.Kind &&
+                  BackupStore.HashEquals(current.Hash, provenance.RemoteHash);
+        if (!matches) throw new InvalidOperationException("Local history changed after the conflict was recorded.");
+    }
+
+    private static void ValidateConflictRemote(ConflictRecord conflict, AuthenticatedSnapshot remote,
+        ConflictResolution resolution)
+    {
+        var provenance = conflict.Provenance;
+        var current = remote.Versions.GetValueOrDefault(provenance.Metadata.ObjectId);
+        var matches = provenance.RemoteDeleted
+            ? current is null || current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+              BackupStore.HashEquals(current.PlaintextHash, provenance.RemoteHash)
+            : current is not null && !current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+              BackupStore.HashEquals(current.PlaintextHash, provenance.RemoteHash);
+        if (!matches && resolution == ConflictResolution.KeepLocal)
+            matches = provenance.LocalDeleted
+                ? current is null || current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+                  BackupStore.HashEquals(current.PlaintextHash, provenance.LocalHash)
+                : current is not null && !current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+                  BackupStore.HashEquals(current.PlaintextHash, provenance.LocalHash);
+        if (!matches) throw new InvalidOperationException("Remote history changed after the conflict was recorded.");
+    }
+
+    private static void ValidateSelectedLocal(ConflictRecord conflict, SessionScanResult scan, bool deleted,
+        ContentHash hash)
+    {
+        var current = scan.Objects.SingleOrDefault(item => item.Id == conflict.Provenance.Metadata.ObjectId);
+        var matches = deleted
+            ? current is null && scan.IsAbsenceConfirmed(conflict.Provenance.Metadata.Kind)
+            : current is not null && current.Kind == conflict.Provenance.Metadata.Kind &&
+              BackupStore.HashEquals(current.Hash, hash);
+        if (!matches) throw new IOException("Local history changed before conflict resolution could be committed.");
+    }
+
+    private async Task<byte[]> AuthenticateConflictSelectionAsync(string path, EnvelopeMetadata metadata,
+        ContentHash expectedHash, bool deleted, CancellationToken ct)
+    {
+        byte[] plaintext;
+        try
+        {
+            await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81_920,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await using var output = new MemoryStream();
+            await _crypto.DecryptAsync(input, output, _masterKey, metadata, ct).ConfigureAwait(false);
+            plaintext = output.ToArray();
+        }
+        catch (CryptographicException exception)
+        {
+            throw new InvalidDataException("The selected conflict envelope could not be authenticated.", exception);
+        }
+        if (!BackupStore.HashEquals(Sha256(plaintext), expectedHash))
+            throw new InvalidDataException("The selected conflict plaintext does not match its recorded hash.");
+        if (deleted)
+        {
+            if (plaintext.Length != 0) throw new InvalidDataException("A deleted conflict side contains plaintext.");
+        }
+        else ValidateSessionJsonl(plaintext, metadata.ObjectId, ct);
+        return plaintext;
+    }
+
+    private async Task<ObjectVersion> PublishResolvedRemoteAsync(RemoteSnapshot snapshot,
+        AuthenticatedSnapshot remote, ConflictRecord conflict, string selectedPath, ContentHash hash, bool deleted,
+        string directory, CancellationToken ct)
+    {
+        var id = conflict.Provenance.Metadata.ObjectId;
+        var ciphertext = await File.ReadAllBytesAsync(selectedPath, ct).ConfigureAwait(false);
+        var opaque = Sha256(ciphertext).Hex;
+        var resolved = new IndexEntry(id, conflict.Provenance.Metadata.Kind, hash, deleted, opaque,
+            _deviceId + ":resolved:" + Guid.NewGuid().ToString("N"), selectedPath);
+        var entries = remote.Entries.ToDictionary(entry => entry.Id);
+        entries[id] = resolved;
+        var changes = new List<EncryptedObjectChange>
+        {
+            new(new LogicalObjectId(opaque), selectedPath, false)
+        };
+        var referenced = entries.Values.Select(entry => entry.OpaqueObjectId).ToHashSet(StringComparer.Ordinal);
+        foreach (var old in remote.Entries.Where(entry => !referenced.Contains(entry.OpaqueObjectId)))
+            changes.Add(new EncryptedObjectChange(new LogicalObjectId(old.OpaqueObjectId), string.Empty, true));
+        var indexPath = await StageIndexAsync(entries.Values, directory, ct).ConfigureAwait(false);
+        var published = await _provider.TryPublishAsync(new PublishRequest(snapshot.Revision,
+            new EncryptedIndexChange(indexPath, false), changes, "Resolve encrypted Codex history conflict"),
+            ct).ConfigureAwait(false);
+        if (!published.Published)
+            throw new InvalidOperationException("Remote history changed during conflict resolution.");
+        return Version(resolved);
     }
 
     private async Task<Dictionary<LogicalObjectId, ObjectVersion>> LoadBaselineAsync(CancellationToken ct)

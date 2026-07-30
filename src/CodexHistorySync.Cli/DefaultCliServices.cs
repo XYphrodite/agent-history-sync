@@ -19,10 +19,12 @@ public sealed record CliRemoteSetup(byte[] Manifest, byte[] Index, string Revisi
 
 public interface ICliRepositoryGateway
 {
+    Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken);
     Task<CliGateResult> VerifyPrivateAsync(string remoteUrl, CancellationToken cancellationToken);
     Task<CliPublishedInitialization> PublishInitializationAsync(string remoteUrl, string repositoryId,
         byte[] manifest, byte[] encryptedIndex, CancellationToken cancellationToken);
     Task<CliRemoteSetup> ReadSetupAsync(string remoteUrl, CancellationToken cancellationToken);
+    Task<string> ReadCurrentRevisionAsync(string remoteUrl, CancellationToken cancellationToken);
 }
 
 public interface ICliLocalRepository
@@ -47,7 +49,7 @@ public interface ICliSyncRuntime
         CancellationToken cancellationToken);
     Task<IReadOnlyList<CliConflictInfo>> ListConflictsAsync(CliLocalConfiguration configuration,
         CancellationToken cancellationToken);
-    Task ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
+    Task<CliResolutionResult> ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
         CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken);
 }
 
@@ -212,6 +214,9 @@ public sealed class DefaultCliServices : ICliServices
     public Task<CliGateResult> VerifyPrivateRepositoryAsync(string remoteUrl, CancellationToken cancellationToken) =>
         gateway.VerifyPrivateAsync(remoteUrl, cancellationToken);
 
+    public Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken) =>
+        gateway.VerifyInitializationTargetAsync(CanonicalRemoteUrl(remoteUrl), cancellationToken);
+
     public async Task<CliInitializationResult> InitializeAsync(string remoteUrl, ReadOnlyMemory<char> passphrase,
         CancellationToken cancellationToken)
     {
@@ -246,10 +251,13 @@ public sealed class DefaultCliServices : ICliServices
             await RepositoryManifestAuthenticator.AuthenticateIndexAsync(setup.Index, authentication.Manifest.RepositoryId,
                 authentication.MasterKey, crypto, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is CryptographicException or InvalidDataException)
+        catch (Exception exception)
         {
             if (authentication is not null) CryptographicOperations.ZeroMemory(authentication.MasterKey);
-            throw new CliGateException("Repository authentication failed.", exception);
+            if (exception is OperationCanceledException) throw;
+            if (exception is CryptographicException or InvalidDataException)
+                throw new CliGateException("Repository authentication failed.", exception);
+            throw;
         }
         var repository = new CliAuthenticatedRepository(authentication.Manifest.RepositoryId, setup.Revision);
         if (pendingJoins.Remove(repository.RepositoryId, out var previous)) CryptographicOperations.ZeroMemory(previous.MasterKey);
@@ -264,22 +272,39 @@ public sealed class DefaultCliServices : ICliServices
         return runtime.ProbeCompatibilityAsync(cancellationToken);
     }
 
-    public Task<CliJoinPlan> PlanJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken)
+    public async Task<CliJoinPlan> PlanJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken)
     {
         var pending = GetPending(repository);
-        return runtime.PreviewJoinAsync(pending.Configuration, pending.MasterKey, pending.Setup, cancellationToken);
+        var currentRevision = await gateway.ReadCurrentRevisionAsync(pending.RemoteUrl, cancellationToken).ConfigureAwait(false);
+        if (!StringComparer.Ordinal.Equals(currentRevision, pending.Setup.Revision))
+            throw new CliGateException("The repository changed after join authentication; retry the join.");
+        return await runtime.PreviewJoinAsync(pending.Configuration, pending.MasterKey, pending.Setup,
+            cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken)
+    public async Task<SyncResult> ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken)
     {
         var pending = GetPending(repository);
-        await local.SaveKeyAsync(repository.RepositoryId, pending.MasterKey, cancellationToken).ConfigureAwait(false);
-        await local.SaveConfigurationAsync(pending.Configuration, cancellationToken).ConfigureAwait(false);
-        await local.SaveInitialStateAsync(repository.RepositoryId, cancellationToken).ConfigureAwait(false);
-        var result = await runtime.SynchronizeAsync(pending.Configuration, pending.MasterKey, SyncMode.Pull, cancellationToken).ConfigureAwait(false);
-        await local.SaveConfigurationAsync(pending.Configuration with { LastSuccessfulRevision = result.RemoteRevision }, cancellationToken).ConfigureAwait(false);
-        pendingJoins.Remove(repository.RepositoryId);
-        CryptographicOperations.ZeroMemory(pending.MasterKey);
+        try
+        {
+            var currentRevision = await gateway.ReadCurrentRevisionAsync(pending.RemoteUrl, cancellationToken).ConfigureAwait(false);
+            if (!StringComparer.Ordinal.Equals(currentRevision, pending.Setup.Revision))
+                throw new CliGateException("The repository changed after join authentication; retry the join.");
+            await local.SaveKeyAsync(repository.RepositoryId, pending.MasterKey, cancellationToken).ConfigureAwait(false);
+            await local.SaveConfigurationAsync(pending.Configuration, cancellationToken).ConfigureAwait(false);
+            await local.SaveInitialStateAsync(repository.RepositoryId, cancellationToken).ConfigureAwait(false);
+            var result = await runtime.SynchronizeAsync(pending.Configuration, pending.MasterKey, SyncMode.Pull, cancellationToken).ConfigureAwait(false);
+            await local.SaveConfigurationAsync(pending.Configuration with { LastSuccessfulRevision = result.RemoteRevision }, cancellationToken).ConfigureAwait(false);
+            return result;
+        }
+        finally { AbortPending(repository.RepositoryId); }
+    }
+
+    public Task AbortJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        AbortPending(repository.RepositoryId);
+        return Task.CompletedTask;
     }
 
     public async Task<SyncResult> SynchronizeAsync(SyncMode mode, CancellationToken cancellationToken)
@@ -321,12 +346,17 @@ public sealed class DefaultCliServices : ICliServices
         return await runtime.ListConflictsAsync(configuration, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task ResolveAsync(string conflictId, CliResolution resolution, string? exportDirectory,
+    public async Task<CliResolutionResult> ResolveAsync(string conflictId, CliResolution resolution, string? exportDirectory,
         CancellationToken cancellationToken)
     {
         var (configuration, key) = await LoadAsync(cancellationToken).ConfigureAwait(false);
-        try { await runtime.ResolveAsync(configuration, key, conflictId, resolution, exportDirectory, cancellationToken).ConfigureAwait(false); }
+        try { return await runtime.ResolveAsync(configuration, key, conflictId, resolution, exportDirectory, cancellationToken).ConfigureAwait(false); }
         finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private void AbortPending(string repositoryId)
+    {
+        if (pendingJoins.Remove(repositoryId, out var pending)) CryptographicOperations.ZeroMemory(pending.MasterKey);
     }
 
     private PendingJoin GetPending(CliAuthenticatedRepository repository) =>

@@ -74,7 +74,7 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync(["init", Remote], CancellationToken.None);
 
         Assert.Equal(3, exitCode);
-        Assert.Equal(["verify-private"], fixture.Services.Calls);
+        Assert.Equal(["verify-initialization"], fixture.Services.Calls);
         Assert.Equal(0, fixture.Console.SecretReadCount);
         Assert.DoesNotContain("credential", fixture.Console.AllText, StringComparison.OrdinalIgnoreCase);
     }
@@ -90,7 +90,7 @@ public sealed class CliTests
 
         Assert.Equal(2, exitCode);
         Assert.Equal(2, fixture.Console.SecretReadCount);
-        Assert.Equal(["verify-private"], fixture.Services.Calls);
+        Assert.Equal(["verify-initialization"], fixture.Services.Calls);
         Assert.DoesNotContain(Passphrase, fixture.Console.AllText);
     }
 
@@ -104,7 +104,7 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync(["init", Remote], CancellationToken.None);
 
         Assert.Equal(0, exitCode);
-        Assert.Equal(["verify-private", "initialize"], fixture.Services.Calls);
+        Assert.Equal(["verify-initialization", "initialize"], fixture.Services.Calls);
         Assert.Equal(Passphrase, fixture.Services.ObservedPassphrase);
         Assert.Contains("repository-123", fixture.Console.OutputText);
         Assert.DoesNotContain(Passphrase, fixture.Console.AllText);
@@ -120,7 +120,7 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync(["join", Remote], CancellationToken.None);
 
         Assert.Equal(0, exitCode);
-        Assert.Equal(["verify-private", "authenticate", "compatibility", "plan"], fixture.Services.Calls);
+        Assert.Equal(["verify-private", "authenticate", "compatibility", "plan", "abort"], fixture.Services.Calls);
         Assert.Contains("local=1", fixture.Console.OutputText);
         Assert.Contains("remote=4", fixture.Console.OutputText);
         Assert.Contains("pending=3", fixture.Console.OutputText);
@@ -137,7 +137,7 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync(["join", Remote, "--apply"], CancellationToken.None);
 
         Assert.Equal(0, exitCode);
-        Assert.Equal(["verify-private", "authenticate", "compatibility", "plan", "apply"], fixture.Services.Calls);
+        Assert.Equal(["verify-private", "authenticate", "compatibility", "plan", "apply", "abort"], fixture.Services.Calls);
         Assert.True(fixture.Services.JoinApplied);
     }
 
@@ -151,7 +151,7 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync(["join", Remote, "--apply"], CancellationToken.None);
 
         Assert.Equal(3, exitCode);
-        Assert.Equal(["verify-private", "authenticate", "compatibility"], fixture.Services.Calls);
+        Assert.Equal(["verify-private", "authenticate", "compatibility", "abort"], fixture.Services.Calls);
         Assert.False(fixture.Services.JoinApplied);
     }
 
@@ -246,9 +246,35 @@ public sealed class CliTests
 
         var exitCode = await fixture.Application.RunAsync(["resolve", "conflict-1", "--export-both", destination], CancellationToken.None);
 
-        Assert.Equal(0, exitCode);
+        Assert.Equal(4, exitCode);
         Assert.Equal(CliResolution.ExportBoth, fixture.Services.Resolution);
         Assert.Equal(destination, fixture.Services.ExportDirectory);
+    }
+
+    [Fact]
+    public async Task Init_nonempty_repository_fails_before_reading_any_passphrase()
+    {
+        var fixture = new Fixture();
+        fixture.Services.SetupGate = new CliGateResult(false, "empty-repository");
+
+        var exitCode = await fixture.Application.RunAsync(["init", Remote], CancellationToken.None);
+
+        Assert.Equal(3, exitCode);
+        Assert.Equal(["verify-initialization"], fixture.Services.Calls);
+        Assert.Equal(0, fixture.Console.SecretReadCount);
+    }
+
+    [Fact]
+    public async Task Join_apply_uses_actual_sync_conflicts_for_exit_code()
+    {
+        var fixture = new Fixture();
+        fixture.Console.Secrets.Enqueue(Passphrase.ToCharArray());
+        fixture.Services.JoinResult = new SyncResult("revision-9", 0, 0, 0, 2, false);
+
+        var exitCode = await fixture.Application.RunAsync(["join", Remote, "--apply"], CancellationToken.None);
+
+        Assert.Equal(4, exitCode);
+        Assert.Contains("conflicts=2", fixture.Console.OutputText);
     }
 
     private sealed class Fixture
@@ -288,6 +314,7 @@ public sealed class CliTests
         public CliGateResult SetupGate { get; set; } = new(true, "private-visibility");
         public CliGateResult CompatibilityGate { get; set; } = new(true, "codex-compatibility");
         public SyncResult SyncResult { get; set; } = new("revision-1", 0, 0, 0, 0, false);
+        public SyncResult JoinResult { get; set; } = new("revision-1", 0, 0, 0, 0, false);
         public CliStatusReport Status { get; set; } = new(0, 0, 0, 0, "none");
         public CliDoctorReport Doctor { get; set; } = new([]);
         public IReadOnlyList<CliConflictInfo> Conflicts { get; set; } = [];
@@ -302,6 +329,12 @@ public sealed class CliTests
         {
             Calls.Add("verify-private");
             Assert.Equal(Remote, remoteUrl);
+            return Task.FromResult(SetupGate);
+        }
+
+        public Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken)
+        {
+            Calls.Add("verify-initialization");
             return Task.FromResult(SetupGate);
         }
 
@@ -331,10 +364,16 @@ public sealed class CliTests
             return Task.FromResult(new CliJoinPlan(1, 4, 3, 0));
         }
 
-        public Task ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken)
+        public Task<SyncResult> ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken)
         {
             Calls.Add("apply");
             JoinApplied = true;
+            return Task.FromResult(JoinResult);
+        }
+
+        public Task AbortJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken)
+        {
+            Calls.Add("abort");
             return Task.CompletedTask;
         }
 
@@ -363,12 +402,13 @@ public sealed class CliTests
             return Task.FromResult(Conflicts);
         }
 
-        public Task ResolveAsync(string conflictId, CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken)
+        public Task<CliResolutionResult> ResolveAsync(string conflictId, CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken)
         {
             Calls.Add("resolve");
             Resolution = resolution;
             ExportDirectory = exportDirectory;
-            return Task.CompletedTask;
+            return Task.FromResult(new CliResolutionResult(resolution == CliResolution.ExportBoth ? 1 : 0,
+                resolution == CliResolution.ExportBoth));
         }
     }
 }
