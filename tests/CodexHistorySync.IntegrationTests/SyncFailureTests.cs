@@ -822,6 +822,48 @@ public sealed class SyncFailureTests : IDisposable
         Assert.Empty(Directory.EnumerateFileSystemEntries(restarted.StagingRoot));
     }
 
+    [Fact]
+    public async Task StartupCleanupDenial_AbortsBeforeProviderReadAndPreservesEvidence()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("strict-cleanup-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "strict-cleanup-session");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var cleaner = new FailingOperationDirectoryCleaner(failAtMarker: false);
+        var target = CreateDevice("strict-cleanup-target", key, provider, cleaner: cleaner);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var operation = Assert.Single(Directory.EnumerateDirectories(target.StagingRoot));
+        var readsBeforeRestart = provider.ReadCalls;
+        var restarted = CreateDevice("strict-cleanup-target", key, provider, cleaner: cleaner);
+
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(readsBeforeRestart, provider.ReadCalls);
+        Assert.True(Directory.Exists(operation));
+        Assert.True(File.Exists(Path.Combine(operation, HistoryMutationBatch.MarkerFileName)));
+        Assert.True(File.Exists(HistoryMutationBatch.CleanupEvidencePath(operation)));
+    }
+
+    [Fact]
+    public async Task PostCommitSafetyRejection_DoesNotTurnCommittedSyncIntoFailure()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("safety-cleanup-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "safety-cleanup-session");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var target = CreateDevice("safety-cleanup-target", key, provider, cleaner: new SafetyRejectingCleaner());
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(1, result.Downloaded);
+        Assert.Single((await target.State.LoadAsync("repository", CancellationToken.None)).Objects);
+        var operation = Assert.Single(Directory.EnumerateDirectories(target.StagingRoot));
+        Assert.True(File.Exists(Path.Combine(operation, HistoryMutationBatch.MarkerFileName)));
+        Assert.True(File.Exists(HistoryMutationBatch.CleanupEvidencePath(operation)));
+    }
+
     private Device CreateDevice(string name, byte[] key, IStorageProvider provider, ICodexProcessDetector? detector = null,
         IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null, ISyncEngineHooks? hooks = null,
         IOperationDirectoryCleaner? cleaner = null)
@@ -1012,6 +1054,12 @@ public sealed class SyncFailureTests : IDisposable
                 File.Delete(file);
             throw new IOException("marker cleanup failed");
         }
+    }
+
+    private sealed class SafetyRejectingCleaner : IOperationDirectoryCleaner
+    {
+        public void Delete(string operationDirectory, string markerFileName) =>
+            throw new ArgumentException("cleanup path safety rejected the operation directory");
     }
     private sealed class StoppedDetector : ICodexProcessDetector
     {
