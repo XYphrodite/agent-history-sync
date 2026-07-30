@@ -3,6 +3,9 @@
 Branch start: 10a09cf
 Worktree: C:\Repos\codex-history-sync\.worktrees\feature-history-sync
 
+Task 8: fix round 2/5 implementation complete (per-side authenticated conflict metadata and cross-kind resolution, serialized engine disposal/key zeroization, exact stable-identity conflict unions, dual status revisions, and atomic evidence retirement; re-review pending)
+Task 8: fix round 2 verification (focused correction set 10/10; retirement 2/2; full elevated 235/235 — Core 103, Integration 112, Git 14, Windows 6; build 0 warnings/errors; independent re-review pending)
+
 Task 1: fix round 1/5 (2 addressed, 1 open — reject any basename containing .sqlite case-insensitively; commits 87cca66..0fb39b5)
 Task 1: fix round 2/5 (1 addressed, 0 open — basename .sqlite rejection; commits 0449af8..e3a9cd4)
 Task 1: complete (commits 10a09cf..e3a9cd4, review clean; controller verification 11/11 tests and real compatibility gate exit 0)
