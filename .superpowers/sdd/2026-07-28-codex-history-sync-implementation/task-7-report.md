@@ -2,12 +2,13 @@
 
 ## Status
 
-Implementation and review-round-4 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
+Implementation and review-round-5 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
 
 ## Commits
 
 - `c121e38` — `feat: synchronize encrypted history end to end`
 - `02b3503` — `fix: close startup cleanup evidence races`
+- `32d4ff4` — `fix: reject reparse recovery targets`
 - The documentation commit containing this report is recorded in the final handoff.
 
 ## Files
@@ -38,6 +39,20 @@ The recovered implementation already provided the public API, a CHS1-encrypted r
 The final engine stages and validates every permitted download first, then preserves planned conflicts, stages uploads, resolves CAS publication, applies guarded Codex mutations, and saves baseline state only after the complete successful attempt. Rejected CAS attempts perform no live-history mutation. Conflict fingerprints prevent duplicate evidence for an unchanged conflict while retaining changed conflict versions.
 
 ## Test evidence
+
+### Review round 5: classify recovery targets before marker access
+
+The final Important finding was addressed in commit `32d4ff4` (`fix: reject reparse recovery targets`). Startup recovery now classifies each evidence-referenced operation target itself before composing or probing `local-mutation.json`. A confirmed reparse point, ordinary file, access denial, or type uncertainty fails closed before marker parsing, history-writer recovery, cleanup traversal, or provider access. A confirmed real directory continues through the existing marker recovery, while a confirmed absent target retains the prior safe orphan-evidence cleanup behavior.
+
+TDD evidence:
+
+- `StartupEvidenceReferencedReparseDirectory_IsRejectedBeforeMarkerRecoveryOrProviderRead` creates a real valid-looking interrupted-mutation journal outside staging and exposes it through an evidence-referenced directory symlink. Before the fix, startup followed the link, reached mutation recovery, and failed only later in cleanup. After target classification was added, the exact elevated Windows regression passed 1/1 and asserted zero history-writer detector checks, zero provider reads, unchanged live history, and a preserved external marker.
+
+Final round-5 verification:
+
+- Focused Task 7: 57 passed, 0 failed, 0 skipped.
+- Full solution: 189 passed, 0 failed, 0 skipped — Core 101, Integration 68, Git 14, Windows 6.
+- Solution build: 0 warnings and 0 errors.
 
 ### Review round 4: early cleanup evidence and fail-closed startup recovery
 
