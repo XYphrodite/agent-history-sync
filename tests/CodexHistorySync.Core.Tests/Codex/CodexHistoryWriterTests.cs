@@ -73,6 +73,24 @@ public sealed class CodexHistoryWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_WhenDestinationChangedSincePlan_ReturnsConflictAndPreservesConcurrentBytes()
+    {
+        var fixture = CreateFixture(new AtomicFileSystem());
+        var path = await WriteSessionAsync(fixture.Paths, "chat.jsonl", "chat", "planned");
+        var planned = new ContentHash(Hash(await File.ReadAllBytesAsync(path)));
+        var concurrent = Session("chat", "concurrent");
+        await File.WriteAllBytesAsync(path, concurrent);
+        var incoming = Session("chat", "remote");
+
+        var result = await fixture.Writer.ImportAsync(Object(path, incoming), new MemoryStream(incoming), "import-planned-race",
+            ExpectedHistoryState.Present(planned), CancellationToken.None);
+
+        Assert.Equal(ImportApplyResult.Conflict, result);
+        Assert.Equal(concurrent, await File.ReadAllBytesAsync(path));
+        Assert.False(Directory.Exists(fixture.Backups.RootPath));
+    }
+
+    [Fact]
     public async Task ApplyTombstoneAsync_ChangedSinceBaselineReturnsConflictWithoutBackupOrDelete()
     {
         var fixture = CreateFixture(new AtomicFileSystem());

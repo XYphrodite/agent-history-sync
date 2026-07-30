@@ -127,7 +127,7 @@ public sealed class BackupStore
         return removed;
     }
 
-    private async Task<BackupRecord> LoadAsync(string id, CancellationToken ct)
+    internal async Task<BackupRecord> LoadAsync(string id, CancellationToken ct)
     {
         PathSafety.RejectReparsePoints(RootPath, nameof(RootPath));
         PathSafety.ValidateFileComponent(id, nameof(id));

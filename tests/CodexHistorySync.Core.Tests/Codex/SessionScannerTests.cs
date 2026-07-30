@@ -86,6 +86,19 @@ public sealed class SessionScannerTests
     }
 
     [Fact]
+    public async Task ScanDetailedAsync_MarksKindUncertainWhenCandidateIsIncomplete()
+    {
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        await fixture.WriteFileAsync("sessions\\possibly-live.jsonl", "{\"type\":\"session_meta\",\"payload\":{\"id\":\"possibly-live\"}}");
+
+        var result = await new SessionScanner(TimeSpan.Zero).ScanDetailedAsync(CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+
+        Assert.Empty(result.Objects);
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
+        Assert.True(result.IsAbsenceConfirmed(ObjectKind.ArchivedSession));
+    }
+
+    [Fact]
     public async Task ScanAsyncSkipsLaterSessionWithDuplicateLogicalId()
     {
         // Accepting both copies would make a logical object resolve nondeterministically.

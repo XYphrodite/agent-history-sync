@@ -32,6 +32,26 @@ public sealed class ConflictStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task PreserveAsync_SameContentFingerprintAcrossCallsReturnsExistingRecord()
+    {
+        var fixture = CreateFixture();
+        var provenance = Provenance();
+
+        var first = await fixture.Store.PreserveAsync(provenance,
+            new MemoryStream(await EncryptAsync(fixture, "local\n")),
+            new MemoryStream(await EncryptAsync(fixture, "remote\n")), CancellationToken.None);
+        var second = await fixture.Store.PreserveAsync(provenance with
+        {
+            LocalTimestampUtc = provenance.LocalTimestampUtc.AddHours(1),
+            RemoteTimestampUtc = provenance.RemoteTimestampUtc.AddHours(1)
+        }, new MemoryStream(await EncryptAsync(fixture, "local\n")),
+            new MemoryStream(await EncryptAsync(fixture, "remote\n")), CancellationToken.None);
+
+        Assert.Equal(first.Id, second.Id);
+        Assert.Single(await fixture.Store.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ResolveExportBothAsync_ExportsExactPlaintextWithoutRewritingIds()
     {
         var fixture = CreateFixture();
