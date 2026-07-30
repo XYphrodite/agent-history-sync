@@ -1,5 +1,27 @@
 # Task 8 Report: Safe CLI Setup and Manual Operations
 
+## Review round 2 corrections
+
+The second independent review reported five important issues. This correction set addresses all five without claiming that the next re-review has passed:
+
+- Conflict provenance now records authenticated metadata independently for the local and remote envelopes, with a backward-compatible legacy fallback. Resolution uses the selected side's object kind throughout authentication, remote publication, guarded local mutation, baseline persistence, and final validation. Same-ID active/archived keep-local and keep-remote regressions cover both directions.
+- `SyncEngine` is synchronously and asynchronously disposable. Disposal is idempotent, serializes with active operations, zeroes the engine-owned master-key copy, and rejects later operations. Every real CLI runtime engine is scoped with `await using`; a real-runtime regression verifies its internal copy is zeroed without modifying the caller's key.
+- Preview exposes deterministic conflict identities. Synchronization reports the exact identity-deduplicated persisted conflict set after publication, while status reports the exact union of persisted evidence and the current plan. Evidence listing errors propagate so both operations fail closed.
+- Status now exposes the current authenticated remote revision and the separately persisted last-successful revision.
+- Successful conflict resolution retires evidence with an atomic same-parent directory rename before best-effort deletion. Rename failure leaves live evidence and fails the operation; deletion failure leaves a hidden retired artifact that is excluded from listings and safely cleaned after restart. Retirement rejects unexpected contents and reparse paths.
+
+TDD regressions were observed RED before their production changes: cross-kind resolution failed local provenance validation; synchronization undercounted a persisted-plus-new conflict union; the runtime disposal seam and six-field status contract did not compile; status undercounted planned-plus-persisted identities; and retirement APIs did not compile. The corresponding focused correction set passed 10/10 after implementation. Atomic retirement tests separately passed 2/2.
+
+Verification after the round-2 correction set:
+
+```powershell
+dotnet build CodexHistorySync.sln --no-restore --verbosity minimal
+$env:PSExecutionPolicyPreference='Bypass'
+dotnet test CodexHistorySync.sln --no-restore --verbosity minimal
+```
+
+Result: build 0 warnings/errors; full suite 235 passed, 0 failed, 0 skipped — Core 103, Integration 112, Git 14, Windows 6. Independent re-review remains pending.
+
 ## Status
 
 Implementation is complete and locally verified. Independent review is still required; no independent approval is claimed.
