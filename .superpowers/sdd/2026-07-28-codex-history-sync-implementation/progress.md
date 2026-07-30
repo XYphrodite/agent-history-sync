@@ -36,3 +36,5 @@ Task 7: fix round 5/5 implementation complete (commit 32d4ff4 — evidence-refer
 Task 7: fix round 5 verification (new junction/symlink regression RED then GREEN 1/1; focused 57/57; full 189/189 — Core 101, Integration 68, Git 14, Windows 6; build 0 warnings/errors; independent re-review pending)
 Task 7: complete (commits 5c480e0..e2c2f5b, round-5 independent review PASS with no findings; controller verification 189/189 — Core 101, Integration 68, Git 14, Windows 6)
 Task 8: implementation complete (CLI contracts and real composition; focused 28/28; full elevated 217/217 — Core 101, Integration 96, Git 14, Windows 6; independent review pending)
+Task 8: fix round 1/5 implementation complete (real lock/CAS conflict resolution, authenticated read-only planning, disposable fresh-install compatibility, terminal join-key zeroization, pre-secret emptiness gate, and SHA-pinned/rechecked join setup; re-review pending)
+Task 8: fix round 1 verification (focused 38/38; full elevated 227/227 — Core 101, Integration 106, Git 14, Windows 6; build 0 warnings/errors; independent re-review pending)
