@@ -66,7 +66,7 @@ public sealed class ConflictStore
         ArgumentNullException.ThrowIfNull(localEncrypted);
         ArgumentNullException.ThrowIfNull(remoteEncrypted);
         var fingerprint = Fingerprint(provenance);
-        if (await FindByFingerprintAsync(fingerprint, ct).ConfigureAwait(false) is { } existing) return existing;
+        if (await FindByFingerprintAsync(provenance, ct).ConfigureAwait(false) is { } existing) return existing;
         var id = $"{DateTimeOffset.UtcNow:yyyyMMdd'T'HHmmssfffffff'Z'}-{Guid.NewGuid():N}";
         Directory.CreateDirectory(RootPath);
         var directory = Path.Combine(RootPath, id);
@@ -229,9 +229,10 @@ public sealed class ConflictStore
             Path.Combine(directory, "remote.encrypted"), Path.Combine(directory, "manifest.json"));
     }
 
-    private async Task<ConflictRecord?> FindByFingerprintAsync(string fingerprint, CancellationToken ct)
+    private async Task<ConflictRecord?> FindByFingerprintAsync(ConflictProvenance provenance, CancellationToken ct)
     {
         if (!Directory.Exists(RootPath)) return null;
+        var requested = FingerprintCandidates(provenance);
         foreach (var directory in Directory.EnumerateDirectories(RootPath)
                      .Where(path => !Path.GetFileName(path).StartsWith(".", StringComparison.Ordinal))
                      .OrderBy(path => path, StringComparer.Ordinal))
@@ -242,9 +243,33 @@ public sealed class ConflictStore
             await using var input = new FileStream(record.ManifestPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
             var manifest = await JsonSerializer.DeserializeAsync<ConflictManifest>(input, JsonOptions, ct).ConfigureAwait(false)
                 ?? throw new InvalidDataException("Conflict manifest is empty.");
-            if (StringComparer.Ordinal.Equals(manifest.Fingerprint ?? Fingerprint(manifest.Provenance), fingerprint)) return record;
+            var existing = FingerprintCandidates(manifest.Provenance, manifest.Fingerprint);
+            if (requested.Any(candidate => existing.Any(value => FingerprintEquals(candidate, value)))) return record;
         }
         return null;
+    }
+
+    private static IReadOnlyList<string> FingerprintCandidates(ConflictProvenance provenance,
+        string? storedFingerprint = null)
+    {
+        var candidates = new List<string> { Fingerprint(provenance) };
+        if (Equals(LocalMetadata(provenance), provenance.Metadata) &&
+            Equals(RemoteMetadata(provenance), provenance.Metadata))
+            candidates.Add(LegacyFingerprint(provenance));
+        if (storedFingerprint is not null &&
+            candidates.Any(candidate => FingerprintEquals(candidate, storedFingerprint)))
+            candidates.Add(storedFingerprint);
+        return candidates;
+    }
+
+    private static bool FingerprintEquals(string left, string right)
+    {
+        if (left.Length != 64 || right.Length != 64) return false;
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(Convert.FromHexString(left), Convert.FromHexString(right));
+        }
+        catch (FormatException) { return false; }
     }
 
     private static string Fingerprint(ConflictProvenance provenance)
@@ -256,6 +281,24 @@ public sealed class ConflictStore
             objectId = provenance.Metadata.ObjectId.Value,
             localKind = (int)LocalMetadata(provenance).Kind,
             remoteKind = (int)RemoteMetadata(provenance).Kind,
+            localHash = provenance.LocalHash.Hex,
+            remoteHash = provenance.RemoteHash.Hex,
+            baselineHash = provenance.BaselineHash.Hex,
+            provenance.LocalDeviceId,
+            provenance.RemoteDeviceId,
+            provenance.LocalDeleted,
+            provenance.RemoteDeleted
+        }, JsonOptions);
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    private static string LegacyFingerprint(ConflictProvenance provenance)
+    {
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = provenance.Metadata.SchemaVersion,
+            objectId = provenance.Metadata.ObjectId.Value,
+            kind = (int)provenance.Metadata.Kind,
             localHash = provenance.LocalHash.Hex,
             remoteHash = provenance.RemoteHash.Hex,
             baselineHash = provenance.BaselineHash.Hex,
