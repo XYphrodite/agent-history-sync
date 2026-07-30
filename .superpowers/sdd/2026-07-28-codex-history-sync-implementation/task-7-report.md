@@ -2,7 +2,7 @@
 
 ## Status
 
-Complete. The recovered Task 7 implementation was audited, corrected, verified, and committed.
+Implementation and review-round-1 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
 
 ## Commits
 
@@ -37,6 +37,36 @@ The recovered implementation already provided the public API, a CHS1-encrypted r
 The final engine stages and validates every permitted download first, then preserves planned conflicts, stages uploads, resolves CAS publication, applies guarded Codex mutations, and saves baseline state only after the complete successful attempt. Rejected CAS attempts perform no live-history mutation. Conflict fingerprints prevent duplicate evidence for an unchanged conflict while retaining changed conflict versions.
 
 ## Test evidence
+
+### Review round 1: recovery and atomicity
+
+The inherited round-one changes were preserved and completed in commit `e5fbb52` (`fix: harden synchronization recovery`). The round includes scanner uncertainty propagation plus a final deletion rescan, explicit authenticated remote absence, import preconditions for edits after scanning, an OS-wide exclusive `.sync.lock`, delayed conflict publication with persisted fingerprint deduplication, and atomic multi-file local mutation recovery.
+
+The local mutation design captures and verifies every prior file before the first live mutation, then writes a durable JSON marker in the existing operation directory. The marker contains only local target metadata, before/after hashes, backup IDs, and mutation status; it contains no prompt plaintext, key, credential, or remote data. Exceptions, cancellation, and state-save failure trigger reverse conditional rollback with `CancellationToken.None`. A new process recovers leftover markers under the repository lock before contacting the provider. Atomic `state.json` is the commit discriminator: if the baseline already represents all applied after-states, restart removes a stale marker without undoing committed history.
+
+TDD evidence:
+
+- The initial batch/restart tests failed compilation because `HistoryMutationBatch` and `HistoryMutationPlan` did not exist. After implementation, state-save failure and interrupted-process recovery passed 2/2.
+- `Restart_DoesNotRollbackMutationWhoseBaselineWasAlreadySaved` failed because restart restored old history after an already-successful state save; it passed after baseline-aware recovery and the post-save rollback boundary were added.
+- `Restart_RejectsInvalidMutationStatusWithoutDiscardingRecoveryEvidence` failed by deleting a marker with an unknown status and reaching the offline provider; it passed after strict journal validation.
+- The multi-file rollback test covers a replacement and a tombstone in one batch and verifies both originals plus the old baseline are restored after injected state-save failure.
+
+Final focused command:
+
+```powershell
+dotnet test tests\CodexHistorySync.IntegrationTests\CodexHistorySync.IntegrationTests.csproj --filter "FullyQualifiedName~TwoDeviceSyncTests|FullyQualifiedName~SyncFailureTests" --no-restore --verbosity minimal
+```
+
+Result: 44 passed, 0 failed, 0 skipped.
+
+Final full command:
+
+```powershell
+$env:PSExecutionPolicyPreference='Bypass'
+dotnet test CodexHistorySync.sln --no-restore --verbosity minimal
+```
+
+Result: 175 passed, 0 failed, 0 skipped — Core 100, Integration 55, Git 14, Windows 6. `dotnet build CodexHistorySync.sln --no-restore --verbosity minimal` also completed with 0 warnings and 0 errors, and `git diff --cached --check` was clean before commit `e5fbb52`.
 
 ### Known initial RED before recovered work
 
@@ -112,4 +142,4 @@ The final requirement-by-requirement self-review found and corrected the remote-
 ## Concerns
 
 - Task 2 intentionally deferred attachment discovery because no safe documented typed attachment field was available. The Task 7 engine therefore synchronizes the active and archived session objects returned by the current scanner; authenticated attachment entries are not installed as Codex history.
-- The repository mutex coordinates engine instances in the current process. Remote cross-process publication remains protected by provider CAS; a future multi-process agent/CLI deployment should add an OS-wide repository lock if simultaneous local processes are supported.
+- Automatic recovery refuses to overwrite a file whose current hash matches neither the journaled before-state nor after-state. The marker and backups remain for explicit recovery rather than risking loss of a concurrent user edit.
