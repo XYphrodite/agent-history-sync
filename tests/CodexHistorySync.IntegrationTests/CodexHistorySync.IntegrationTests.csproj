@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\CodexHistorySync.Cli\CodexHistorySync.Cli.csproj" />
     <ProjectReference Include="..\..\src\CodexHistorySync.Core\CodexHistorySync.Core.csproj" />
     <ProjectReference Include="..\..\src\CodexHistorySync.Git\CodexHistorySync.Git.csproj" />
   </ItemGroup>
