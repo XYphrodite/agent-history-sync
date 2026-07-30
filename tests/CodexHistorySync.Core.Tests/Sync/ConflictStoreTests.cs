@@ -250,12 +250,48 @@ public sealed class ConflictStoreTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => fixture.Store.ListAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task RetireAsync_WhenAtomicRenameFails_LeavesLiveEvidenceForRetry()
+    {
+        var fixture = CreateFixture(retirement: new FailingRetirementFileSystem(failMove: true));
+        var encrypted = await EncryptAsync(fixture, "{}\n");
+        var conflict = await fixture.Store.PreserveAsync(Provenance(), new MemoryStream(encrypted),
+            new MemoryStream(encrypted), CancellationToken.None);
+
+        await Assert.ThrowsAsync<IOException>(() => fixture.Store.RetireAsync(conflict.Id, CancellationToken.None));
+
+        Assert.Single(await fixture.Store.ListAsync(CancellationToken.None));
+        var retry = new ConflictStore("repo", Path.Combine(_root, "local"), fixture.Paths);
+        await retry.RetireAsync(conflict.Id, CancellationToken.None);
+        Assert.Empty(await retry.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RetireAsync_DeleteFailureIsResolvedAndRestartCleansRetiredArtifact()
+    {
+        var fixture = CreateFixture(retirement: new FailingRetirementFileSystem(failDelete: true));
+        var encrypted = await EncryptAsync(fixture, "{}\n");
+        var conflict = await fixture.Store.PreserveAsync(Provenance(), new MemoryStream(encrypted),
+            new MemoryStream(encrypted), CancellationToken.None);
+
+        await fixture.Store.RetireAsync(conflict.Id, CancellationToken.None);
+
+        Assert.Empty(await fixture.Store.ListAsync(CancellationToken.None));
+        Assert.Single(Directory.EnumerateDirectories(fixture.Store.RootPath),
+            path => Path.GetFileName(path).Contains(".resolved-", StringComparison.Ordinal));
+        var restarted = new ConflictStore("repo", Path.Combine(_root, "local"), fixture.Paths);
+        Assert.Empty(await restarted.ListAsync(CancellationToken.None));
+        Assert.DoesNotContain(Directory.EnumerateDirectories(restarted.RootPath),
+            path => Path.GetFileName(path).Contains(".resolved-", StringComparison.Ordinal));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
     }
 
-    private Fixture CreateFixture(IAtomicDirectoryPublisher? publisher = null, IConflictStoreHooks? hooks = null, IStagingDirectoryCleaner? cleaner = null)
+    private Fixture CreateFixture(IAtomicDirectoryPublisher? publisher = null, IConflictStoreHooks? hooks = null,
+        IStagingDirectoryCleaner? cleaner = null, IConflictRetirementFileSystem? retirement = null)
     {
         var home = Path.Combine(_root, "codex");
         Directory.CreateDirectory(home);
@@ -263,7 +299,8 @@ public sealed class ConflictStoreTests : IDisposable
         var crypto = new RepositoryCrypto();
         var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
         var metadata = new EnvelopeMetadata(1, new LogicalObjectId("object-1"), ObjectKind.ActiveSession);
-        return new Fixture(paths, crypto, key, metadata, new ConflictStore("repo", Path.Combine(_root, "local"), paths, publisher, hooks, cleaner));
+        return new Fixture(paths, crypto, key, metadata, new ConflictStore("repo", Path.Combine(_root, "local"),
+            paths, publisher, hooks, cleaner, retirement));
     }
 
     private static ConflictProvenance Provenance() => new(
@@ -314,6 +351,22 @@ public sealed class ConflictStoreTests : IDisposable
     private sealed class FailingStagingDirectoryCleaner : IStagingDirectoryCleaner
     {
         public void Delete(string path) => throw new IOException("Injected staging cleanup failure.");
+    }
+
+    private sealed class FailingRetirementFileSystem(bool failMove = false, bool failDelete = false)
+        : IConflictRetirementFileSystem
+    {
+        public void Move(string source, string destination)
+        {
+            if (failMove) throw new IOException("Injected retirement rename failure.");
+            Directory.Move(source, destination);
+        }
+
+        public void Delete(string path)
+        {
+            if (failDelete) throw new IOException("Injected retired cleanup failure.");
+            Directory.Delete(path, recursive: true);
+        }
     }
 
     private sealed class FailingReadStream(byte[] bytes) : MemoryStream(bytes)

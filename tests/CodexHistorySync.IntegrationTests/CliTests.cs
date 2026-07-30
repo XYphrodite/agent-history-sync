@@ -159,7 +159,7 @@ public sealed class CliTests
     public async Task Status_reports_only_counts_and_revision_and_flags_conflicts()
     {
         var fixture = new Fixture();
-        fixture.Services.Status = new CliStatusReport(5, 6, 2, 1, "revision-safe");
+        fixture.Services.Status = new CliStatusReport(5, 6, 2, 1, "current-revision-safe", "last-revision-safe");
 
         var exitCode = await fixture.Application.RunAsync(["status"], CancellationToken.None);
 
@@ -168,7 +168,8 @@ public sealed class CliTests
         Assert.Contains("remote=6", fixture.Console.OutputText);
         Assert.Contains("pending=2", fixture.Console.OutputText);
         Assert.Contains("conflicts=1", fixture.Console.OutputText);
-        Assert.Contains("revision-safe", fixture.Console.OutputText);
+        Assert.Contains("current-revision-safe", fixture.Console.OutputText);
+        Assert.Contains("last-revision-safe", fixture.Console.OutputText);
     }
 
     [Fact]
@@ -315,7 +316,7 @@ public sealed class CliTests
         public CliGateResult CompatibilityGate { get; set; } = new(true, "codex-compatibility");
         public SyncResult SyncResult { get; set; } = new("revision-1", 0, 0, 0, 0, false);
         public SyncResult JoinResult { get; set; } = new("revision-1", 0, 0, 0, 0, false);
-        public CliStatusReport Status { get; set; } = new(0, 0, 0, 0, "none");
+        public CliStatusReport Status { get; set; } = new(0, 0, 0, 0, "none", "none");
         public CliDoctorReport Doctor { get; set; } = new([]);
         public IReadOnlyList<CliConflictInfo> Conflicts { get; set; } = [];
         public Exception? Failure { get; set; }

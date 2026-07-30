@@ -34,13 +34,14 @@ internal sealed class HistoryMutationBatch
         var markerPath = Path.Combine(Path.GetFullPath(operationDirectory), MarkerFileName);
         if (!IsPathConfirmedAbsent(markerPath)) throw new IOException("A local mutation marker already exists for this operation.");
         await EnsureCleanupEvidenceAsync(operationDirectory, ct).ConfigureAwait(false);
-        var ids = new HashSet<LogicalObjectId>();
+        var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var entries = new List<MutationEntry>(plans.Count);
         foreach (var plan in plans)
         {
             ct.ThrowIfCancellationRequested();
-            if (!ids.Add(plan.Target.Id)) throw new InvalidDataException("A local mutation batch contains duplicate object IDs.");
             var captured = await writer.CaptureRollbackAsync(plan, operationId, ct).ConfigureAwait(false);
+            if (!targets.Add($"{plan.Target.Id.Value}\0{(int)plan.Target.Kind}\0{captured.Path}"))
+                throw new InvalidDataException("A local mutation batch contains a duplicate target.");
             entries.Add(new MutationEntry(plan.Target.Id.Value, plan.Target.Kind, captured.Path,
                 plan.Before.Exists, plan.Before.ContentHash?.Hex, plan.After.Exists, plan.After.ContentHash?.Hex,
                 captured.BackupId, MutationStatus.Pending));
@@ -98,6 +99,10 @@ internal sealed class HistoryMutationBatch
     internal Task BeginApplyAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Applying, ct);
     internal Task MarkAppliedAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Applied, ct);
     internal Task MarkSkippedAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Skipped, ct);
+    internal Task BeginApplyAsync(LocalObject target, CancellationToken ct) =>
+        SetStatusAsync(target, MutationStatus.Applying, ct);
+    internal Task MarkAppliedAsync(LocalObject target, CancellationToken ct) =>
+        SetStatusAsync(target, MutationStatus.Applied, ct);
 
     internal async Task RollbackAsync(CancellationToken ct)
     {
@@ -113,8 +118,20 @@ internal sealed class HistoryMutationBatch
 
     private async Task SetStatusAsync(LogicalObjectId id, MutationStatus status, CancellationToken ct)
     {
-        var index = _journal.Entries.FindIndex(item => StringComparer.Ordinal.Equals(item.Id, id.Value));
-        if (index < 0) throw new InvalidDataException("The local mutation is absent from its durable journal.");
+        var matches = _journal.Entries.Select((item, index) => (item, index))
+            .Where(pair => StringComparer.Ordinal.Equals(pair.item.Id, id.Value)).ToArray();
+        if (matches.Length != 1) throw new InvalidDataException("The local mutation is absent or ambiguous in its durable journal.");
+        var index = matches[0].index;
+        _journal.Entries[index] = _journal.Entries[index] with { Status = status };
+        await WriteDurableAsync(_markerPath, _journal, ct).ConfigureAwait(false);
+    }
+
+    private async Task SetStatusAsync(LocalObject target, MutationStatus status, CancellationToken ct)
+    {
+        var path = Path.GetFullPath(target.SourcePath);
+        var index = _journal.Entries.FindIndex(item => StringComparer.Ordinal.Equals(item.Id, target.Id.Value) &&
+            item.Kind == target.Kind && StringComparer.OrdinalIgnoreCase.Equals(item.Path, path));
+        if (index < 0) throw new InvalidDataException("The local mutation target is absent from its durable journal.");
         _journal.Entries[index] = _journal.Entries[index] with { Status = status };
         await WriteDurableAsync(_markerPath, _journal, ct).ConfigureAwait(false);
     }
@@ -125,19 +142,20 @@ internal sealed class HistoryMutationBatch
         if (active.Length == 0) return true;
         return active.All(entry => baseline.TryGetValue(new LogicalObjectId(entry.Id), out var version) &&
             (entry.AfterExists
-                ? !version.IsDeleted && StringComparer.OrdinalIgnoreCase.Equals(version.PlaintextHash.Hex, entry.AfterHash)
-                : version.IsDeleted));
+                ? !version.IsDeleted && version.Kind == entry.Kind &&
+                  StringComparer.OrdinalIgnoreCase.Equals(version.PlaintextHash.Hex, entry.AfterHash)
+                : version.IsDeleted || version.Kind != entry.Kind));
     }
 
     private void ValidateJournal()
     {
         PathSafety.ValidateFileComponent(_journal.OperationId, nameof(_journal.OperationId));
         if (_journal.Entries.Count == 0) throw new InvalidDataException("The local mutation journal contains no entries.");
-        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in _journal.Entries)
         {
             if (string.IsNullOrWhiteSpace(entry.Id) || Path.IsPathRooted(entry.Id) || entry.Id.Contains('/') ||
-                entry.Id.Contains('\\') || entry.Id is "." or ".." || !ids.Add(entry.Id))
+                entry.Id.Contains('\\') || entry.Id is "." or "..")
                 throw new InvalidDataException("The local mutation journal contains an invalid or duplicate object ID.");
             if (entry.Kind is not (ObjectKind.ActiveSession or ObjectKind.ArchivedSession) || !Enum.IsDefined(entry.Status))
                 throw new InvalidDataException("The local mutation journal contains invalid object metadata.");
@@ -147,6 +165,8 @@ internal sealed class HistoryMutationBatch
                 throw new InvalidDataException("The local mutation journal has inconsistent backup metadata.");
             if (entry.BackupId is not null) PathSafety.ValidateFileComponent(entry.BackupId, nameof(entry.BackupId));
             _writer.ValidateJournalTarget(entry.Path, entry.Kind);
+            if (!targets.Add($"{entry.Id}\0{(int)entry.Kind}\0{Path.GetFullPath(entry.Path)}"))
+                throw new InvalidDataException("The local mutation journal contains a duplicate target.");
         }
     }
 

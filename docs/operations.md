@@ -42,7 +42,7 @@ codex-sync pull   # download/apply only; never publish local history
 codex-sync push   # publish only; never replace local history
 ```
 
-All three commands call the same `SyncEngine` used by automation. Output contains only revisions and object counts. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
+All three commands call the same `SyncEngine` used by automation. Each command disposes its temporary engine after the operation, serializing with any active work and zeroing the engine-owned repository-key copy. Output contains only revisions and object counts. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
 
 ## Status and diagnostics
 
@@ -51,7 +51,7 @@ codex-sync status
 codex-sync doctor
 ```
 
-`status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus the current authenticated remote revision; equal counts do not hide divergent objects.
+`status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus both the current authenticated remote revision and the last successfully synchronized revision. Its conflict count is the exact identity-deduplicated union of persisted evidence and conflicts in the current plan; an unreadable evidence store makes status fail closed. Equal counts do not hide divergent objects.
 
 `doctor` reports PASS or FAIL for these checks without printing paths, child-process output, URLs, credentials, keys, prompts, or exception text:
 
@@ -86,7 +86,9 @@ codex-sync resolve CONFLICT_ID --export-both C:\existing-parent\new-export-direc
 
 `--export-both` decrypts both retained envelopes into a newly created directory. The destination must be absolute, must not already exist, must have an existing parent, must be outside Codex history and conflict storage, and must pass the existing reparse-point/path-boundary checks. Export does not resolve the conflict, retains its encrypted evidence, and returns exit code 4 while any conflict remains.
 
-The keep actions authenticate the stored evidence and current remote snapshot while holding the repository lock. The chosen side is published with compare-and-swap before any local mutation, then applied through the guarded history writer and recorded as the new baseline. Evidence is removed only after remote, local, and state work all succeed. A failure retains evidence for diagnosis or an idempotent retry; no plaintext is printed.
+The keep actions authenticate the stored evidence and current remote snapshot while holding the repository lock. Each side retains its own authenticated object kind, so resolving a same-ID active/archived conflict moves the chosen version to the correct history area. The chosen side is published with compare-and-swap before any local mutation, then applied through the guarded history writer and recorded as the new baseline.
+
+After remote, local, and state work all succeed, live evidence is retired by an atomic same-parent rename. A rename failure leaves it live and makes the resolution fail for an idempotent retry. Cleanup after a successful rename is best effort: retired artifacts are excluded from conflict listings and are safely retried on a later listing or process restart. No plaintext is printed.
 
 ## Exit codes
 

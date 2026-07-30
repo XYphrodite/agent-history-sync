@@ -15,7 +15,11 @@ namespace CodexHistorySync.Core.Sync;
 public enum SyncMode { Pull, Push, Bidirectional }
 
 public sealed record SyncResult(string RemoteRevision, int Uploaded, int Downloaded, int Deleted, int Conflicts, bool RemoteChangedDuringAttempt);
-public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges, int Conflicts);
+public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges,
+    IReadOnlySet<string> ConflictIdentities)
+{
+    public int Conflicts => ConflictIdentities.Count;
+}
 public sealed record SyncConflictResolutionResult(int RemainingConflicts, bool Exported);
 
 public sealed class SyncConcurrencyException : InvalidOperationException
@@ -28,7 +32,7 @@ internal interface ISyncEngineHooks
     void OnBeforeLocalPublicationPrecondition();
 }
 
-public sealed class SyncEngine
+public sealed class SyncEngine : IDisposable, IAsyncDisposable
 {
     private const int IndexSchemaVersion = 1;
     private const string IndexObjectId = "__repository_index__";
@@ -51,6 +55,8 @@ public sealed class SyncEngine
     private readonly SemaphoreSlim _mutex;
     private readonly ISyncEngineHooks _hooks;
     private readonly IOperationDirectoryCleaner _operationCleaner;
+    private int _disposeState;
+    private readonly TaskCompletionSource _disposeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
@@ -88,10 +94,12 @@ public sealed class SyncEngine
 
     public async Task<SyncResult> SynchronizeAsync(SyncMode mode, CancellationToken ct)
     {
+        ThrowIfDisposed();
         if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             await using var repositoryLock = await RepositorySyncLock.AcquireAsync(_stateStore.GetStatePath(_repositoryId), ct).ConfigureAwait(false);
             await RecoverInterruptedMutationsAsync(ct).ConfigureAwait(false);
             var raced = false;
@@ -120,7 +128,6 @@ public sealed class SyncEngine
                     var attemptUploads = 0;
                     var attemptDownloaded = 0;
                     var attemptDeleted = 0;
-                    var attemptConflicts = 0;
                     var stagedImports = new Dictionary<LogicalObjectId, StagedImport>();
                     var pendingConflicts = new List<PendingConflict>();
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
@@ -129,7 +136,6 @@ public sealed class SyncEngine
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Conflict))
                     {
                         pendingConflicts.Add(await PrepareConflictAsync(action, locals, remote, ct).ConfigureAwait(false));
-                        attemptConflicts++;
                         deferred.Add(action.ObjectId);
                     }
 
@@ -245,7 +251,6 @@ public sealed class SyncEngine
                                             : new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
                                     };
                                     await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
-                                    attemptConflicts++;
                                     continue;
                                 }
                                 await mutationBatch.MarkAppliedAsync(action.ObjectId, ct).ConfigureAwait(false);
@@ -269,7 +274,6 @@ public sealed class SyncEngine
                                         Local = new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
                                     };
                                     await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
-                                    attemptConflicts++;
                                     continue;
                                 }
                                 await mutationBatch.MarkAppliedAsync(action.ObjectId, ct).ConfigureAwait(false);
@@ -281,12 +285,14 @@ public sealed class SyncEngine
                         foreach (var action in plan.Actions)
                             if (!deferred.Contains(action.ObjectId) && successful.TryGetValue(action.ObjectId, out var version)) next[action.ObjectId] = version;
                         if (!remote.HasAuthenticatedIndex && changes.Count == 0 && baseline.Count == 0)
-                            return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted, attemptConflicts, raced);
+                            return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
+                                await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced);
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
                             next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
                         stateSaved = true;
                         operationCommitted = true;
-                        return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted, attemptConflicts, raced);
+                        return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
+                            await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced);
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
                     {
@@ -321,10 +327,12 @@ public sealed class SyncEngine
 
     public async Task<SyncPreview> PreviewAsync(SyncMode mode, CancellationToken ct)
     {
+        ThrowIfDisposed();
         if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
             var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
@@ -332,7 +340,8 @@ public sealed class SyncEngine
             var remote = await AuthenticateSnapshotAsync(snapshot, stateInitialized, baseline.Count, ct).ConfigureAwait(false);
             var plan = ThreeWayPlanner.CreatePlan(CreateLocalVersions(scan, baseline),
                 CreateRemoteVersions(remote.Versions, baseline), baseline);
-            var conflicts = plan.Actions.Count(action => action.Kind == SyncActionKind.Conflict);
+            var conflicts = plan.Actions.Where(action => action.Kind == SyncActionKind.Conflict)
+                .Select(ConflictIdentity).ToHashSet(StringComparer.Ordinal);
             var pending = plan.Actions.Count(action => IsApplicablePreviewChange(action.Kind, mode));
             return new SyncPreview(snapshot.Revision, scan.Objects.Count,
                 remote.Versions.Values.Count(value => !value.IsDeleted), pending, conflicts);
@@ -343,10 +352,12 @@ public sealed class SyncEngine
     public async Task<SyncConflictResolutionResult> ResolveConflictAsync(string conflictId,
         ConflictResolution resolution, string? exportDirectory, CancellationToken ct)
     {
+        ThrowIfDisposed();
         if (!Enum.IsDefined(resolution)) throw new ArgumentOutOfRangeException(nameof(resolution));
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             await using var repositoryLock = await RepositorySyncLock.AcquireAsync(
                 _stateStore.GetStatePath(_repositoryId), ct).ConfigureAwait(false);
             await RecoverInterruptedMutationsAsync(ct).ConfigureAwait(false);
@@ -356,7 +367,7 @@ public sealed class SyncEngine
             var selected = await _conflictStore.ResolveAsync(conflictId, resolution, exportDirectory, _crypto,
                 _masterKey, ct).ConfigureAwait(false);
             if (resolution == ConflictResolution.ExportBoth)
-                return new SyncConflictResolutionResult((await _conflictStore.ListAsync(ct).ConfigureAwait(false)).Count, true);
+                return new SyncConflictResolutionResult(await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), true);
 
             var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
             ValidateConflictLocal(conflict, scan, resolution);
@@ -369,12 +380,14 @@ public sealed class SyncEngine
             var chooseLocal = resolution == ConflictResolution.KeepLocal;
             var deleted = chooseLocal ? conflict.Provenance.LocalDeleted : conflict.Provenance.RemoteDeleted;
             var hash = chooseLocal ? conflict.Provenance.LocalHash : conflict.Provenance.RemoteHash;
+            var selectedMetadata = chooseLocal ? ConflictStore.LocalMetadata(conflict.Provenance) :
+                ConflictStore.RemoteMetadata(conflict.Provenance);
             var selectedPath = selected.SelectedEncryptedPath
                 ?? throw new InvalidDataException("The selected conflict envelope is missing.");
-            var plaintext = await AuthenticateConflictSelectionAsync(selectedPath, conflict.Provenance.Metadata,
+            var plaintext = await AuthenticateConflictSelectionAsync(selectedPath, selectedMetadata,
                 hash, deleted, ct).ConfigureAwait(false);
-            var id = conflict.Provenance.Metadata.ObjectId;
-            var kind = conflict.Provenance.Metadata.Kind;
+            var id = selectedMetadata.ObjectId;
+            var kind = selectedMetadata.Kind;
             var operationId = Guid.NewGuid().ToString("N");
             var directory = Path.Combine(_stagingRoot, operationId);
             Directory.CreateDirectory(directory);
@@ -384,48 +397,67 @@ public sealed class SyncEngine
             {
                 var currentRemote = remote.Versions.GetValueOrDefault(id);
                 var remoteAlreadySelected = currentRemote is not null && currentRemote.IsDeleted == deleted &&
-                    BackupStore.HashEquals(currentRemote.PlaintextHash, hash);
+                    currentRemote.Kind == kind && BackupStore.HashEquals(currentRemote.PlaintextHash, hash);
                 var selectedVersion = remoteAlreadySelected
                     ? currentRemote!
-                    : await PublishResolvedRemoteAsync(snapshot, remote, conflict, selectedPath, hash, deleted,
+                    : await PublishResolvedRemoteAsync(snapshot, remote, selectedMetadata, selectedPath, hash, deleted,
                         directory, ct).ConfigureAwait(false);
 
                 var currentLocal = scan.Objects.SingleOrDefault(item => item.Id == id);
                 var localAlreadySelected = deleted
                     ? currentLocal is null && scan.IsAbsenceConfirmed(kind)
-                    : currentLocal is not null && BackupStore.HashEquals(currentLocal.Hash, hash);
+                    : currentLocal is not null && currentLocal.Kind == kind &&
+                      BackupStore.HashEquals(currentLocal.Hash, hash);
                 HistoryMutationBatch? batch = null;
                 if (!localAlreadySelected)
                 {
-                    var destination = currentLocal?.SourcePath ?? Path.Combine(kind switch
+                    var destination = currentLocal is not null && currentLocal.Kind == kind
+                        ? currentLocal.SourcePath
+                        : Path.Combine(kind switch
                     {
                         ObjectKind.ActiveSession => _paths.Sessions,
                         ObjectKind.ArchivedSession => _paths.ArchivedSessions,
                         _ => throw new InvalidDataException("Only session conflicts can be resolved.")
                     }, id.Value + ".jsonl");
                     var target = new LocalObject(id, kind, destination, hash, plaintext.LongLength, DateTimeOffset.UtcNow);
-                    var before = currentLocal is null
+                    var before = currentLocal is null || currentLocal.Kind != kind
                         ? ExpectedHistoryState.Absent
                         : ExpectedHistoryState.Present(currentLocal.Hash);
                     var after = deleted ? ExpectedHistoryState.Absent : ExpectedHistoryState.Present(hash);
+                    var plans = new List<HistoryMutationPlan>();
+                    if (currentLocal is not null && currentLocal.Kind != kind)
+                        plans.Add(new HistoryMutationPlan(currentLocal, ExpectedHistoryState.Present(currentLocal.Hash),
+                            ExpectedHistoryState.Absent));
+                    if (!deleted || currentLocal is not null && currentLocal.Kind == kind)
+                        plans.Add(new HistoryMutationPlan(target, before, after));
                     batch = await HistoryMutationBatch.PrepareAsync(_historyWriter, directory, operationId,
-                        [new HistoryMutationPlan(target, before, after)], ct).ConfigureAwait(false);
+                        plans, ct).ConfigureAwait(false);
                     try
                     {
-                        await batch.BeginApplyAsync(id, ct).ConfigureAwait(false);
-                        if (deleted)
+                        if (currentLocal is not null && currentLocal.Kind != kind)
                         {
+                            await batch.BeginApplyAsync(currentLocal, ct).ConfigureAwait(false);
+                            if (await _historyWriter.ApplyTombstoneAsync(currentLocal, currentLocal.Hash, operationId,
+                                    ct).ConfigureAwait(false) == TombstoneApplyResult.Conflict)
+                                throw new IOException("Local history changed during conflict resolution.");
+                            await batch.MarkAppliedAsync(currentLocal, ct).ConfigureAwait(false);
+                        }
+                        if (deleted && currentLocal is not null && currentLocal.Kind == kind)
+                        {
+                            await batch.BeginApplyAsync(target, ct).ConfigureAwait(false);
                             if (currentLocal is not null && await _historyWriter.ApplyTombstoneAsync(currentLocal,
                                     currentLocal.Hash, operationId, ct).ConfigureAwait(false) == TombstoneApplyResult.Conflict)
                                 throw new IOException("Local history changed during conflict resolution.");
+                            await batch.MarkAppliedAsync(target, ct).ConfigureAwait(false);
                         }
-                        else
+                        else if (!deleted)
                         {
+                            await batch.BeginApplyAsync(target, ct).ConfigureAwait(false);
                             await using var input = new MemoryStream(plaintext, false);
                             if (await _historyWriter.ImportAsync(target, input, operationId, before, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
                                 throw new IOException("Local history changed during conflict resolution.");
+                            await batch.MarkAppliedAsync(target, ct).ConfigureAwait(false);
                         }
-                        await batch.MarkAppliedAsync(id, ct).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -437,7 +469,7 @@ public sealed class SyncEngine
                 try
                 {
                     var finalScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
-                    ValidateSelectedLocal(conflict, finalScan, deleted, hash);
+                    ValidateSelectedLocal(selectedMetadata, finalScan, deleted, hash);
                     var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
                     next[id] = selectedVersion;
                     await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
@@ -449,9 +481,8 @@ public sealed class SyncEngine
                     throw;
                 }
                 operationCommitted = true;
-                await _conflictStore.RemoveAsync(conflictId, ct).ConfigureAwait(false);
-                return new SyncConflictResolutionResult(
-                    (await _conflictStore.ListAsync(ct).ConfigureAwait(false)).Count, false);
+                await _conflictStore.RetireAsync(conflictId, ct).ConfigureAwait(false);
+                return new SyncConflictResolutionResult(await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), false);
             }
             finally
             {
@@ -461,6 +492,41 @@ public sealed class SyncEngine
         }
         finally { _mutex.Release(); }
     }
+
+    public void Dispose()
+    {
+        if (Interlocked.CompareExchange(ref _disposeState, 1, 0) == 0)
+        {
+            _mutex.Wait();
+            try
+            {
+                CryptographicOperations.ZeroMemory(_masterKey);
+                Volatile.Write(ref _disposeState, 2);
+                _disposeCompletion.TrySetResult();
+            }
+            finally { _mutex.Release(); }
+        }
+        else _disposeCompletion.Task.GetAwaiter().GetResult();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.CompareExchange(ref _disposeState, 1, 0) == 0)
+        {
+            await _mutex.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                CryptographicOperations.ZeroMemory(_masterKey);
+                Volatile.Write(ref _disposeState, 2);
+                _disposeCompletion.TrySetResult();
+            }
+            finally { _mutex.Release(); }
+        }
+        else await _disposeCompletion.Task.ConfigureAwait(false);
+    }
+
+    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(
+        Volatile.Read(ref _disposeState) != 0, this);
 
     private static bool IsApplicablePreviewChange(SyncActionKind kind, SyncMode mode) => kind switch
     {
@@ -473,15 +539,17 @@ public sealed class SyncEngine
         ConflictResolution resolution)
     {
         var provenance = conflict.Provenance;
-        var current = scan.Objects.SingleOrDefault(item => item.Id == provenance.Metadata.ObjectId);
+        var localMetadata = ConflictStore.LocalMetadata(provenance);
+        var remoteMetadata = ConflictStore.RemoteMetadata(provenance);
+        var current = scan.Objects.SingleOrDefault(item => item.Id == localMetadata.ObjectId);
         var matches = provenance.LocalDeleted
-            ? current is null && scan.IsAbsenceConfirmed(provenance.Metadata.Kind)
-            : current is not null && current.Kind == provenance.Metadata.Kind &&
+            ? current is null && scan.IsAbsenceConfirmed(localMetadata.Kind)
+            : current is not null && current.Kind == localMetadata.Kind &&
               BackupStore.HashEquals(current.Hash, provenance.LocalHash);
         if (!matches && resolution == ConflictResolution.KeepRemote)
             matches = provenance.RemoteDeleted
-                ? current is null && scan.IsAbsenceConfirmed(provenance.Metadata.Kind)
-                : current is not null && current.Kind == provenance.Metadata.Kind &&
+                ? current is null && scan.IsAbsenceConfirmed(remoteMetadata.Kind)
+                : current is not null && current.Kind == remoteMetadata.Kind &&
                   BackupStore.HashEquals(current.Hash, provenance.RemoteHash);
         if (!matches) throw new InvalidOperationException("Local history changed after the conflict was recorded.");
     }
@@ -490,28 +558,30 @@ public sealed class SyncEngine
         ConflictResolution resolution)
     {
         var provenance = conflict.Provenance;
-        var current = remote.Versions.GetValueOrDefault(provenance.Metadata.ObjectId);
+        var localMetadata = ConflictStore.LocalMetadata(provenance);
+        var remoteMetadata = ConflictStore.RemoteMetadata(provenance);
+        var current = remote.Versions.GetValueOrDefault(remoteMetadata.ObjectId);
         var matches = provenance.RemoteDeleted
-            ? current is null || current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+            ? current is null || current.IsDeleted && current.Kind == remoteMetadata.Kind &&
               BackupStore.HashEquals(current.PlaintextHash, provenance.RemoteHash)
-            : current is not null && !current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+            : current is not null && !current.IsDeleted && current.Kind == remoteMetadata.Kind &&
               BackupStore.HashEquals(current.PlaintextHash, provenance.RemoteHash);
         if (!matches && resolution == ConflictResolution.KeepLocal)
             matches = provenance.LocalDeleted
-                ? current is null || current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+                ? current is null || current.IsDeleted && current.Kind == localMetadata.Kind &&
                   BackupStore.HashEquals(current.PlaintextHash, provenance.LocalHash)
-                : current is not null && !current.IsDeleted && current.Kind == provenance.Metadata.Kind &&
+                : current is not null && !current.IsDeleted && current.Kind == localMetadata.Kind &&
                   BackupStore.HashEquals(current.PlaintextHash, provenance.LocalHash);
         if (!matches) throw new InvalidOperationException("Remote history changed after the conflict was recorded.");
     }
 
-    private static void ValidateSelectedLocal(ConflictRecord conflict, SessionScanResult scan, bool deleted,
+    private static void ValidateSelectedLocal(EnvelopeMetadata selectedMetadata, SessionScanResult scan, bool deleted,
         ContentHash hash)
     {
-        var current = scan.Objects.SingleOrDefault(item => item.Id == conflict.Provenance.Metadata.ObjectId);
+        var current = scan.Objects.SingleOrDefault(item => item.Id == selectedMetadata.ObjectId);
         var matches = deleted
-            ? current is null && scan.IsAbsenceConfirmed(conflict.Provenance.Metadata.Kind)
-            : current is not null && current.Kind == conflict.Provenance.Metadata.Kind &&
+            ? current is null && scan.IsAbsenceConfirmed(selectedMetadata.Kind)
+            : current is not null && current.Kind == selectedMetadata.Kind &&
               BackupStore.HashEquals(current.Hash, hash);
         if (!matches) throw new IOException("Local history changed before conflict resolution could be committed.");
     }
@@ -543,13 +613,13 @@ public sealed class SyncEngine
     }
 
     private async Task<ObjectVersion> PublishResolvedRemoteAsync(RemoteSnapshot snapshot,
-        AuthenticatedSnapshot remote, ConflictRecord conflict, string selectedPath, ContentHash hash, bool deleted,
+        AuthenticatedSnapshot remote, EnvelopeMetadata selectedMetadata, string selectedPath, ContentHash hash, bool deleted,
         string directory, CancellationToken ct)
     {
-        var id = conflict.Provenance.Metadata.ObjectId;
+        var id = selectedMetadata.ObjectId;
         var ciphertext = await File.ReadAllBytesAsync(selectedPath, ct).ConfigureAwait(false);
         var opaque = Sha256(ciphertext).Hex;
-        var resolved = new IndexEntry(id, conflict.Provenance.Metadata.Kind, hash, deleted, opaque,
+        var resolved = new IndexEntry(id, selectedMetadata.Kind, hash, deleted, opaque,
             _deviceId + ":resolved:" + Guid.NewGuid().ToString("N"), selectedPath);
         var entries = remote.Entries.ToDictionary(entry => entry.Id);
         entries[id] = resolved;
@@ -574,6 +644,26 @@ public sealed class SyncEngine
         try { return (await _stateStore.LoadAsync(_repositoryId, ct).ConfigureAwait(false)).Objects.ToDictionary(value => value.Id); }
         catch (FileNotFoundException) { return []; }
         catch (DirectoryNotFoundException) { return []; }
+    }
+
+    private async Task<int> CountUnresolvedConflictsAsync(CancellationToken ct) =>
+        (await _conflictStore.ListAsync(ct).ConfigureAwait(false))
+        .Select(record => ConflictStore.GetIdentity(record.Provenance)).Distinct(StringComparer.Ordinal).Count();
+
+    private static string ConflictIdentity(SyncAction action)
+    {
+        var localKind = action.Local?.Kind ?? action.Baseline?.Kind ?? action.Remote?.Kind
+            ?? throw new InvalidDataException("A conflict has no local object kind.");
+        var remoteKind = action.Remote?.Kind ?? action.Baseline?.Kind ?? action.Local?.Kind
+            ?? throw new InvalidDataException("A conflict has no remote object kind.");
+        var empty = EmptyHash();
+        return ConflictStore.GetIdentity(new ConflictProvenance(
+            new EnvelopeMetadata(IndexSchemaVersion, action.ObjectId, localKind),
+            action.Local?.PlaintextHash ?? empty, action.Remote?.PlaintextHash ?? empty,
+            action.Baseline?.PlaintextHash ?? empty, "preview", "preview", DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch, action.Local?.IsDeleted ?? true, action.Remote?.IsDeleted ?? true,
+            new EnvelopeMetadata(IndexSchemaVersion, action.ObjectId, localKind),
+            new EnvelopeMetadata(IndexSchemaVersion, action.ObjectId, remoteKind)));
     }
 
     private async Task RecoverInterruptedMutationsAsync(CancellationToken ct)
@@ -955,10 +1045,13 @@ public sealed class SyncEngine
             throw new InvalidDataException("Local conflict version changed after stable scanning.");
         await using var localPlaintext = new MemoryStream(localBytes, false);
         await using var localEncrypted = new MemoryStream();
-        var kind = action.Remote?.Kind ?? action.Local?.Kind ?? action.Baseline?.Kind
-            ?? throw new InvalidDataException("A conflict has no object kind.");
-        var metadata = new EnvelopeMetadata(IndexSchemaVersion, action.ObjectId, kind);
-        await _crypto.EncryptAsync(localPlaintext, localEncrypted, _masterKey, metadata, ct).ConfigureAwait(false);
+        var localKind = action.Local?.Kind ?? action.Baseline?.Kind ?? action.Remote?.Kind
+            ?? throw new InvalidDataException("A conflict has no local object kind.");
+        var remoteKind = action.Remote?.Kind ?? action.Baseline?.Kind ?? action.Local?.Kind
+            ?? throw new InvalidDataException("A conflict has no remote object kind.");
+        var localMetadata = new EnvelopeMetadata(IndexSchemaVersion, action.ObjectId, localKind);
+        var remoteMetadata = new EnvelopeMetadata(IndexSchemaVersion, action.ObjectId, remoteKind);
+        await _crypto.EncryptAsync(localPlaintext, localEncrypted, _masterKey, localMetadata, ct).ConfigureAwait(false);
         localEncrypted.Position = 0;
         var empty = EmptyHash();
         await using var remoteEncrypted = new MemoryStream();
@@ -972,13 +1065,13 @@ public sealed class SyncEngine
         else
         {
             await using var remotePlaintext = new MemoryStream(Array.Empty<byte>(), false);
-            await _crypto.EncryptAsync(remotePlaintext, remoteEncrypted, _masterKey, metadata, ct).ConfigureAwait(false);
+            await _crypto.EncryptAsync(remotePlaintext, remoteEncrypted, _masterKey, remoteMetadata, ct).ConfigureAwait(false);
             remoteDevice = "remote";
         }
         remoteEncrypted.Position = 0;
-        var provenance = new ConflictProvenance(metadata, action.Local?.PlaintextHash ?? empty, action.Remote?.PlaintextHash ?? empty,
+        var provenance = new ConflictProvenance(localMetadata, action.Local?.PlaintextHash ?? empty, action.Remote?.PlaintextHash ?? empty,
             action.Baseline?.PlaintextHash ?? empty, _deviceId, remoteDevice, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
-            action.Local?.IsDeleted ?? true, action.Remote?.IsDeleted ?? true);
+            action.Local?.IsDeleted ?? true, action.Remote?.IsDeleted ?? true, localMetadata, remoteMetadata);
         return new PendingConflict(provenance, localEncrypted.ToArray(), remoteEncrypted.ToArray());
     }
 

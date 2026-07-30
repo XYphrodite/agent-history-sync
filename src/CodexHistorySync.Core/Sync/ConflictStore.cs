@@ -9,13 +9,19 @@ namespace CodexHistorySync.Core.Sync;
 
 public sealed record ConflictProvenance(EnvelopeMetadata Metadata, ContentHash LocalHash, ContentHash RemoteHash, ContentHash BaselineHash,
     string LocalDeviceId, string RemoteDeviceId, DateTimeOffset LocalTimestampUtc, DateTimeOffset RemoteTimestampUtc,
-    bool LocalDeleted = false, bool RemoteDeleted = false);
+    bool LocalDeleted = false, bool RemoteDeleted = false, EnvelopeMetadata? LocalMetadata = null,
+    EnvelopeMetadata? RemoteMetadata = null);
 public sealed record ConflictRecord(string Id, ConflictProvenance Provenance, string DirectoryPath, string LocalEncryptedPath, string RemoteEncryptedPath, string ManifestPath);
 public enum ConflictResolution { KeepLocal, KeepRemote, ExportBoth }
 public sealed record ConflictResolutionResult(string? SelectedEncryptedPath, string? LocalPlaintextPath, string? RemotePlaintextPath);
 internal sealed record ConflictManifest(int SchemaVersion, ConflictProvenance Provenance, ContentHash LocalEnvelopeHash,
     ContentHash RemoteEnvelopeHash, string? Fingerprint = null);
 internal interface IAtomicDirectoryPublisher { void Publish(string stagingPath, string destinationPath); }
+internal interface IConflictRetirementFileSystem
+{
+    void Move(string source, string destination);
+    void Delete(string path);
+}
 internal interface IConflictStoreHooks
 {
     void OnAfterFirstEnvelope();
@@ -31,11 +37,14 @@ public sealed class ConflictStore
     private readonly IAtomicDirectoryPublisher _publisher;
     private readonly IConflictStoreHooks _hooks;
     private readonly IStagingDirectoryCleaner _stagingCleaner;
+    private readonly IConflictRetirementFileSystem _retirement;
 
     public ConflictStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths)
-        : this(repositoryId, localAppDataDirectory, codexPaths, null, null, null) { }
+        : this(repositoryId, localAppDataDirectory, codexPaths, null, null, null, null) { }
 
-    internal ConflictStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicDirectoryPublisher? publisher, IConflictStoreHooks? hooks, IStagingDirectoryCleaner? stagingCleaner)
+    internal ConflictStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths,
+        IAtomicDirectoryPublisher? publisher, IConflictStoreHooks? hooks, IStagingDirectoryCleaner? stagingCleaner,
+        IConflictRetirementFileSystem? retirement = null)
     {
         _paths = codexPaths ?? throw new ArgumentNullException(nameof(codexPaths));
         PathSafety.ValidateFileComponent(repositoryId, nameof(repositoryId));
@@ -45,6 +54,7 @@ public sealed class ConflictStore
         _publisher = publisher ?? DirectoryPublisher.Instance;
         _hooks = hooks ?? NoopConflictStoreHooks.Instance;
         _stagingCleaner = stagingCleaner ?? ConflictStagingDirectoryCleaner.Instance;
+        _retirement = retirement ?? ConflictRetirementFileSystem.Instance;
     }
 
     public string RootPath { get; }
@@ -96,6 +106,7 @@ public sealed class ConflictStore
     {
         PathSafety.RejectReparsePoints(RootPath, nameof(RootPath));
         if (!Directory.Exists(RootPath)) return [];
+        CleanupRetiredBestEffort();
         var records = new List<ConflictRecord>();
         foreach (var directory in Directory.EnumerateDirectories(RootPath).Where(path => !Path.GetFileName(path).StartsWith(".", StringComparison.Ordinal)).OrderBy(x => x, StringComparer.Ordinal))
         {
@@ -128,10 +139,12 @@ public sealed class ConflictStore
         try
         {
             ValidateConcretePaths(staging, localOutput, remoteOutput);
-            await DecryptDurablyAsync(crypto, conflict.LocalEncryptedPath, localOutput, masterKey, conflict.Provenance.Metadata, ct).ConfigureAwait(false);
+            await DecryptDurablyAsync(crypto, conflict.LocalEncryptedPath, localOutput, masterKey,
+                LocalMetadata(conflict.Provenance), ct).ConfigureAwait(false);
             _hooks.OnAfterFirstPlaintext();
             ct.ThrowIfCancellationRequested();
-            await DecryptDurablyAsync(crypto, conflict.RemoteEncryptedPath, remoteOutput, masterKey, conflict.Provenance.Metadata, ct).ConfigureAwait(false);
+            await DecryptDurablyAsync(crypto, conflict.RemoteEncryptedPath, remoteOutput, masterKey,
+                RemoteMetadata(conflict.Provenance), ct).ConfigureAwait(false);
             ValidateConcretePaths(staging, localOutput, remoteOutput, target);
             _hooks.OnBeforeExportPublication();
             ct.ThrowIfCancellationRequested();
@@ -166,18 +179,54 @@ public sealed class ConflictStore
         return new(id, manifest.Provenance, directory, localPath, remotePath, manifestPath);
     }
 
-    public async Task RemoveAsync(string conflictId, CancellationToken ct)
+    public async Task RetireAsync(string conflictId, CancellationToken ct)
     {
         PathSafety.RejectReparsePoints(RootPath, nameof(RootPath));
         var conflict = await LoadAsync(conflictId, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         ValidateConcretePaths(conflict.DirectoryPath, conflict.LocalEncryptedPath, conflict.RemoteEncryptedPath,
             conflict.ManifestPath);
-        if (Directory.EnumerateDirectories(conflict.DirectoryPath).Any() ||
-            Directory.EnumerateFiles(conflict.DirectoryPath).Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal)
+        ValidateCompleteEvidenceDirectory(conflict.DirectoryPath);
+        var retired = Path.Combine(RootPath, $".{conflict.Id}.resolved-{Guid.NewGuid():N}");
+        if (Directory.Exists(retired) || File.Exists(retired))
+            throw new IOException("The retired conflict destination already exists.");
+        PathSafety.RejectReparsePoints(retired, nameof(retired));
+        _retirement.Move(conflict.DirectoryPath, retired);
+        TryDeleteRetired(retired);
+    }
+
+    private void CleanupRetiredBestEffort()
+    {
+        foreach (var directory in Directory.EnumerateDirectories(RootPath)
+                     .Where(path => Path.GetFileName(path).StartsWith(".", StringComparison.Ordinal) &&
+                         Path.GetFileName(path).Contains(".resolved-", StringComparison.Ordinal)))
+            TryDeleteRetired(directory);
+    }
+
+    private void TryDeleteRetired(string directory)
+    {
+        try
+        {
+            ValidateCompleteEvidenceDirectory(directory);
+            _retirement.Delete(directory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                             ArgumentException or System.Security.SecurityException)
+        {
+        }
+    }
+
+    private static void ValidateCompleteEvidenceDirectory(string directory)
+    {
+        ValidateConcretePaths(directory);
+        if ((File.GetAttributes(directory) & FileAttributes.Directory) == 0)
+            throw new IOException("The conflict evidence target is not a directory.");
+        if (Directory.EnumerateDirectories(directory).Any() ||
+            Directory.EnumerateFiles(directory).Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal)
                 .SetEquals(["local.encrypted", "remote.encrypted", "manifest.json"]) is false)
             throw new IOException("The conflict evidence directory contains unexpected entries.");
-        Directory.Delete(conflict.DirectoryPath, recursive: true);
+        ValidateConcretePaths(Path.Combine(directory, "local.encrypted"),
+            Path.Combine(directory, "remote.encrypted"), Path.Combine(directory, "manifest.json"));
     }
 
     private async Task<ConflictRecord?> FindByFingerprintAsync(string fingerprint, CancellationToken ct)
@@ -202,14 +251,36 @@ public sealed class ConflictStore
     {
         var canonical = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            schemaVersion = provenance.Metadata.SchemaVersion,
+            localSchemaVersion = LocalMetadata(provenance).SchemaVersion,
+            remoteSchemaVersion = RemoteMetadata(provenance).SchemaVersion,
             objectId = provenance.Metadata.ObjectId.Value,
-            kind = (int)provenance.Metadata.Kind,
+            localKind = (int)LocalMetadata(provenance).Kind,
+            remoteKind = (int)RemoteMetadata(provenance).Kind,
             localHash = provenance.LocalHash.Hex,
             remoteHash = provenance.RemoteHash.Hex,
             baselineHash = provenance.BaselineHash.Hex,
             provenance.LocalDeviceId,
             provenance.RemoteDeviceId,
+            provenance.LocalDeleted,
+            provenance.RemoteDeleted
+        }, JsonOptions);
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    public static string GetIdentity(ConflictProvenance provenance)
+    {
+        ArgumentNullException.ThrowIfNull(provenance);
+        ValidateProvenance(provenance);
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            localSchemaVersion = LocalMetadata(provenance).SchemaVersion,
+            remoteSchemaVersion = RemoteMetadata(provenance).SchemaVersion,
+            objectId = provenance.Metadata.ObjectId.Value,
+            localKind = (int)LocalMetadata(provenance).Kind,
+            remoteKind = (int)RemoteMetadata(provenance).Kind,
+            localHash = provenance.LocalHash.Hex,
+            remoteHash = provenance.RemoteHash.Hex,
+            baselineHash = provenance.BaselineHash.Hex,
             provenance.LocalDeleted,
             provenance.RemoteDeleted
         }, JsonOptions);
@@ -223,8 +294,19 @@ public sealed class ConflictStore
         PathSafety.ValidateFileComponent(value.Metadata.ObjectId.Value, nameof(value.Metadata.ObjectId));
         PathSafety.ValidateFileComponent(value.LocalDeviceId, nameof(value.LocalDeviceId));
         PathSafety.ValidateFileComponent(value.RemoteDeviceId, nameof(value.RemoteDeviceId));
-        if (value.Metadata.SchemaVersion < 1 || !Enum.IsDefined(value.Metadata.Kind)) throw new ArgumentException("Conflict envelope metadata is invalid.", nameof(value));
+        var local = LocalMetadata(value);
+        var remote = RemoteMetadata(value);
+        if (local.SchemaVersion < 1 || remote.SchemaVersion < 1 || !Enum.IsDefined(local.Kind) ||
+            !Enum.IsDefined(remote.Kind) || local.ObjectId != value.Metadata.ObjectId ||
+            remote.ObjectId != value.Metadata.ObjectId)
+            throw new ArgumentException("Conflict envelope metadata is invalid.", nameof(value));
     }
+
+    internal static EnvelopeMetadata LocalMetadata(ConflictProvenance provenance) =>
+        provenance.LocalMetadata ?? provenance.Metadata;
+
+    internal static EnvelopeMetadata RemoteMetadata(ConflictProvenance provenance) =>
+        provenance.RemoteMetadata ?? provenance.Metadata;
 
     private static async Task WriteDurableAsync(string path, Stream input, CancellationToken ct)
     {
@@ -278,6 +360,13 @@ public sealed class ConflictStore
     private sealed class ConflictStagingDirectoryCleaner : IStagingDirectoryCleaner
     {
         public static readonly ConflictStagingDirectoryCleaner Instance = new();
+        public void Delete(string path) => Directory.Delete(path, recursive: true);
+    }
+
+    private sealed class ConflictRetirementFileSystem : IConflictRetirementFileSystem
+    {
+        public static readonly ConflictRetirementFileSystem Instance = new();
+        public void Move(string source, string destination) => Directory.Move(source, destination);
         public void Delete(string path) => Directory.Delete(path, recursive: true);
     }
 }
