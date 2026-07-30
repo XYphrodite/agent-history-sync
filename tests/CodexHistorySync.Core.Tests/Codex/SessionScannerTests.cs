@@ -95,7 +95,19 @@ public sealed class SessionScannerTests
 
         Assert.Empty(result.Objects);
         Assert.False(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
-        Assert.True(result.IsAbsenceConfirmed(ObjectKind.ArchivedSession));
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ArchivedSession));
+    }
+
+    [Fact]
+    public async Task ScanDetailedAsync_MarksMissingRootsUncertain()
+    {
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        var paths = CodexPaths.Resolve(fixture.Home);
+
+        var result = await new SessionScanner(TimeSpan.Zero).ScanDetailedAsync(paths, CancellationToken.None);
+
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ArchivedSession));
     }
 
     [Fact]
