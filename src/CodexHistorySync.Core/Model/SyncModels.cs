@@ -5,7 +5,8 @@ public enum ObjectKind
     ActiveSession,
     ArchivedSession,
     Attachment,
-    Tombstone
+    Tombstone,
+    RepositoryIndex
 }
 
 public readonly record struct LogicalObjectId(string Value);
