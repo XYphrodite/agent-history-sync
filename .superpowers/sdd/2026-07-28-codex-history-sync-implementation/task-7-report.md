@@ -2,11 +2,12 @@
 
 ## Status
 
-Implementation and review-round-3 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
+Implementation and review-round-4 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
 
 ## Commits
 
 - `c121e38` — `feat: synchronize encrypted history end to end`
+- `02b3503` — `fix: close startup cleanup evidence races`
 - The documentation commit containing this report is recorded in the final handoff.
 
 ## Files
@@ -37,6 +38,28 @@ The recovered implementation already provided the public API, a CHS1-encrypted r
 The final engine stages and validates every permitted download first, then preserves planned conflicts, stages uploads, resolves CAS publication, applies guarded Codex mutations, and saves baseline state only after the complete successful attempt. Rejected CAS attempts perform no live-history mutation. Conflict fingerprints prevent duplicate evidence for an unchanged conflict while retaining changed conflict versions.
 
 ## Test evidence
+
+### Review round 4: early cleanup evidence and fail-closed startup recovery
+
+The three related Important findings were addressed in commit `02b3503` (`fix: close startup cleanup evidence races`).
+
+- Every synchronization attempt now creates and durably flushes its sibling cleanup-evidence file immediately after creating the operation directory and before staging any downloaded plaintext. `HistoryMutationBatch` validates and reuses that evidence instead of trying to replace it when local mutation begins later.
+- Startup recovery takes one initial snapshot of operation directories and cleanup-evidence files, derives the evidence-referenced operation paths, and strictly processes their union. A referenced path created while an earlier directory is being cleaned therefore cannot be silently ignored; it must be removed or confirmed absent before provider access.
+- Marker detection no longer uses `File.Exists`. A fail-closed attribute and open probe distinguishes confirmed absence from a regular readable marker; directories, reparse points, access denial, and other uncertain states abort recovery before provider access.
+- Cleanup evidence is removed only after strict operation-path absence confirmation. Failed best-effort cleanup retains both the staged operation and its sibling evidence for the next locked startup recovery.
+
+TDD evidence:
+
+- `StartupEvidencePathCreatedAfterDirectorySnapshot_AbortsBeforeProviderRead` failed because the first directory snapshot omitted the evidence-referenced path and the later evidence pass did not clean or reject it.
+- `StartupMarkerWithUncertainType_AbortsBeforeProviderRead` failed because `File.Exists` reported false for a marker directory and startup deleted it as ordinary staging.
+- `CasRetryAfterDownloadStaging_PreservesEarlyEvidenceUntilRestartCleanup` failed because all five rejected-CAS attempts staged plaintext before creating cleanup evidence.
+- The exact regression batch first failed 0/3 and passed 3/3 after the fix.
+
+Final round-4 verification:
+
+- Focused Task 7: 56 passed, 0 failed, 0 skipped.
+- Full solution: 188 passed, 0 failed, 0 skipped — Core 101, Integration 67, Git 14, Windows 6.
+- Solution build: 0 warnings and 0 errors.
 
 ### Review round 3: strict startup cleanup versus non-failing committed cleanup
 
@@ -186,7 +209,7 @@ Result: 161 passed, 0 failed, 0 skipped — Core 97, Git 14, Windows 6, Integrat
 
 ## Self-review and review status
 
-The final requirement-by-requirement self-review found and corrected the remote-removal conflict, tombstone-race evidence, and strict stage-before-conflict-publication gaps described above. An independent read-only reviewer was requested but did not return a usable finding set or verdict before being interrupted; no independent approval is claimed. The controller can perform its own final review from commit `c121e38` plus the report commit.
+The final requirement-by-requirement self-review found and corrected the remote-removal conflict, tombstone-race evidence, strict stage-before-conflict-publication, and startup cleanup-evidence gaps described above. No independent approval is claimed. The controller can perform its independent review across `c121e38..02b3503` plus the report commit.
 
 ## Concerns
 
