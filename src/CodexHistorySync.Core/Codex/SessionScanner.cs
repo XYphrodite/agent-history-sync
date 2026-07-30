@@ -64,7 +64,7 @@ public sealed class SessionScanner
         List<LocalObject> objects,
         CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(directory)) return true;
+        if (!Directory.Exists(directory)) return false;
 
         IEnumerable<string> candidates;
         try

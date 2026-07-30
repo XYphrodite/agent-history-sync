@@ -47,6 +47,26 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task MissingSessionRoot_WithBaseline_DoesNotPublishTombstone()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("missing-root-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "root-may-be-unavailable");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var target = CreateDevice("missing-root-target", key, provider);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var baseline = await target.State.LoadAsync("repository", CancellationToken.None);
+        Directory.Delete(target.Paths.Sessions, recursive: true);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        Assert.Equal(0, result.Uploaded);
+        Assert.Equal(1, provider.PublishCalls);
+        Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+    }
+
+    [Fact]
     public async Task SessionAppearingAfterScan_DoesNotPublishTombstone()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -66,6 +86,29 @@ public sealed class SyncFailureTests : IDisposable
         Assert.Equal(0, result.Uploaded);
         Assert.Equal(1, provider.PublishCalls);
         Assert.True(File.Exists(targetPath));
+    }
+
+    [Fact]
+    public async Task SessionReappearingAtPublicationPrecondition_AbortsTombstoneAndReplans()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("precondition-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "precondition-session");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var initialTarget = CreateDevice("precondition-target", key, provider);
+        await initialTarget.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var path = Path.Combine(initialTarget.Paths.Sessions, "precondition-session.jsonl");
+        File.Delete(path);
+        var hook = new ReappearingPublicationHook(() => WriteSessionAsync(initialTarget.Paths.Sessions, "precondition-session"));
+        var target = CreateDevice("precondition-target", key, provider, hooks: hook);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        Assert.Equal(0, result.Uploaded);
+        Assert.Equal(1, provider.PublishCalls);
+        Assert.True(File.Exists(path));
+        Assert.False(Assert.Single((await target.State.LoadAsync("repository", CancellationToken.None)).Objects).IsDeleted);
     }
 
     [Fact]
@@ -130,6 +173,69 @@ public sealed class SyncFailureTests : IDisposable
 
         Assert.Empty(await ScanAsync(target));
         Assert.False(File.Exists(target.State.GetStatePath("repository")));
+    }
+
+    [Fact]
+    public async Task MissingIndexAfterInitialization_IsRejectedWithoutDeletingOrAdvancingBaseline()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("missing-index-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "missing-index-session");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var target = CreateDevice("missing-index-target", key, provider);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var path = Path.Combine(target.Paths.Sessions, "missing-index-session.jsonl");
+        var before = await File.ReadAllTextAsync(path);
+        var baseline = await target.State.LoadAsync("repository", CancellationToken.None);
+        provider.ClearRepository();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(path));
+        Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+    }
+
+    [Fact]
+    public async Task TransientEmptyProviderResponse_IsRejectedWithoutChangingInitializedHistory()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("empty-response-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "empty-response-session");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var initialTarget = CreateDevice("empty-response-target", key, provider);
+        await initialTarget.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var path = Path.Combine(initialTarget.Paths.Sessions, "empty-response-session.jsonl");
+        var before = await File.ReadAllTextAsync(path);
+        var baseline = await initialTarget.State.LoadAsync("repository", CancellationToken.None);
+        var target = CreateDevice("empty-response-target", key, new EmptySnapshotProvider(provider));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(path));
+        Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+    }
+
+    [Fact]
+    public async Task MissingIndexAfterAuthenticatedEmptyIndex_IsRejected()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        await WriteIndexAsync(provider, key, new JsonObject
+        {
+            ["schemaVersion"] = 1,
+            ["repositoryId"] = "repository",
+            ["objects"] = new JsonArray()
+        });
+        var device = CreateDevice("missing-empty-index", key, provider);
+        await device.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Assert.Empty((await device.State.LoadAsync("repository", CancellationToken.None)).Objects);
+        provider.ClearRepository();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => device.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Empty((await device.State.LoadAsync("repository", CancellationToken.None)).Objects);
     }
 
     [Fact]
@@ -689,8 +795,36 @@ public sealed class SyncFailureTests : IDisposable
         Assert.True(File.Exists(markerPath));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CommittedCleanupFailure_DoesNotFailAndRestartRemovesOperationPlaintext(bool failAtMarker)
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("cleanup-source-" + failAtMarker, key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "cleanup-session");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var cleaner = new FailingOperationDirectoryCleaner(failAtMarker);
+        var target = CreateDevice("cleanup-target-" + failAtMarker, key, provider, cleaner: cleaner);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(1, result.Downloaded);
+        Assert.Single((await target.State.LoadAsync("repository", CancellationToken.None)).Objects);
+        var operation = Assert.Single(Directory.EnumerateDirectories(target.StagingRoot));
+        Assert.True(File.Exists(Path.Combine(operation, HistoryMutationBatch.MarkerFileName)));
+        Assert.True(File.Exists(HistoryMutationBatch.CleanupEvidencePath(operation)));
+        var restarted = CreateDevice("cleanup-target-" + failAtMarker, key, new OfflineProvider());
+
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(restarted.StagingRoot));
+    }
+
     private Device CreateDevice(string name, byte[] key, IStorageProvider provider, ICodexProcessDetector? detector = null,
-        IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null)
+        IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null, ISyncEngineHooks? hooks = null,
+        IOperationDirectoryCleaner? cleaner = null)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -701,8 +835,12 @@ public sealed class SyncFailureTests : IDisposable
         var backups = new BackupStore("repository", local, paths, fileSystem);
         var writer = new CodexHistoryWriter(paths, backups, detector ?? new StoppedDetector(), fileSystem);
         var conflicts = new ConflictStore("repository", local, paths);
-        var engine = new SyncEngine("repository", name, paths, key, new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
-            writer, conflicts, provider, Path.Combine(local, "staging"));
+        var engine = hooks is null && cleaner is null
+            ? new SyncEngine("repository", name, paths, key, new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
+                writer, conflicts, provider, Path.Combine(local, "staging"))
+            : new SyncEngine("repository", name, paths, key, new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
+                writer, conflicts, provider, Path.Combine(local, "staging"), hooks ?? NoopTestSyncEngineHooks.Instance,
+                cleaner ?? new OperationDirectoryCleaner());
         return new(paths, state, conflicts, writer, Path.Combine(local, "staging"), engine);
     }
 
@@ -848,6 +986,33 @@ public sealed class SyncFailureTests : IDisposable
     {
         public void Replace(string sourcePath, string destinationPath) => throw new IOException("state save failed");
     }
+
+    private sealed class ReappearingPublicationHook(Func<Task> action) : ISyncEngineHooks
+    {
+        private int _invoked;
+        public void OnBeforeLocalPublicationPrecondition()
+        {
+            if (Interlocked.Exchange(ref _invoked, 1) == 0) action().GetAwaiter().GetResult();
+        }
+    }
+
+    private sealed class NoopTestSyncEngineHooks : ISyncEngineHooks
+    {
+        internal static readonly NoopTestSyncEngineHooks Instance = new();
+        public void OnBeforeLocalPublicationPrecondition() { }
+    }
+
+    private sealed class FailingOperationDirectoryCleaner(bool failAtMarker) : IOperationDirectoryCleaner
+    {
+        public void Delete(string operationDirectory, string markerFileName)
+        {
+            if (!failAtMarker) throw new IOException("directory cleanup failed");
+            foreach (var file in Directory.EnumerateFiles(operationDirectory, "*", SearchOption.AllDirectories)
+                         .Where(path => !StringComparer.OrdinalIgnoreCase.Equals(Path.GetFileName(path), markerFileName)))
+                File.Delete(file);
+            throw new IOException("marker cleanup failed");
+        }
+    }
     private sealed class StoppedDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;
@@ -873,6 +1038,17 @@ public sealed class SyncFailureTests : IDisposable
             var snapshot = await inner.ReadSnapshotAsync(ct);
             if (Interlocked.Exchange(ref _invoked, 1) == 0) await hook();
             return snapshot;
+        }
+
+        public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct) => inner.TryPublishAsync(request, ct);
+    }
+
+    private sealed class EmptySnapshotProvider(IStorageProvider inner) : IStorageProvider
+    {
+        public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
+        {
+            var snapshot = await inner.ReadSnapshotAsync(ct);
+            return new RemoteSnapshot(snapshot.Revision, null, []);
         }
 
         public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct) => inner.TryPublishAsync(request, ct);
@@ -942,6 +1118,7 @@ public sealed class SyncFailureTests : IDisposable
         public void ReplaceSingleObject(LogicalObjectId id, byte[] ciphertext) { _objects.Clear(); _objects[id] = ciphertext; }
         public void RenameSingleObject(LogicalObjectId id) { var ciphertext = _objects.Values.Single(); _objects.Clear(); _objects[id] = ciphertext; }
         public void ReplaceObject(LogicalObjectId oldId, LogicalObjectId newId, byte[] ciphertext) { _objects.Remove(oldId); _objects[newId] = ciphertext; }
+        public void ClearRepository() { _index = null; _objects.Clear(); }
     }
 
     private sealed class FailingWriteFileSystem : IAtomicFileSystem

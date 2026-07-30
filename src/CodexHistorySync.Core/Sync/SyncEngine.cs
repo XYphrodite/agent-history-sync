@@ -21,6 +21,11 @@ public sealed class SyncConcurrencyException : InvalidOperationException
     public SyncConcurrencyException() : base("The remote repository changed during all five synchronization attempts.") { }
 }
 
+internal interface ISyncEngineHooks
+{
+    void OnBeforeLocalPublicationPrecondition();
+}
+
 public sealed class SyncEngine
 {
     private const int IndexSchemaVersion = 1;
@@ -42,10 +47,19 @@ public sealed class SyncEngine
     private readonly IStorageProvider _provider;
     private readonly string _stagingRoot;
     private readonly SemaphoreSlim _mutex;
+    private readonly ISyncEngineHooks _hooks;
+    private readonly IOperationDirectoryCleaner _operationCleaner;
 
     public SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory)
+        : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
+            provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner()) { }
+
+    internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
+        SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
+        ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory, ISyncEngineHooks hooks,
+        IOperationDirectoryCleaner operationCleaner)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -64,6 +78,8 @@ public sealed class SyncEngine
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
         PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory));
+        _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
+        _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
         _mutex = RepositoryMutexes.GetOrAdd(RepositorySyncLock.CanonicalStateIdentity(_stateStore.GetStatePath(repositoryId)),
             _ => new SemaphoreSlim(1, 1));
     }
@@ -81,15 +97,17 @@ public sealed class SyncEngine
             {
                 var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
                 var locals = scan.Objects;
-                var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
-                var remote = await AuthenticateSnapshotAsync(snapshot, ct).ConfigureAwait(false);
+                var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
                 var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
+                var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
+                var remote = await AuthenticateSnapshotAsync(snapshot, stateInitialized, baseline.Count, ct).ConfigureAwait(false);
                 var localVersions = CreateLocalVersions(scan, baseline);
                 var remoteVersions = CreateRemoteVersions(remote.Versions, baseline);
                 var plan = ThreeWayPlanner.CreatePlan(localVersions, remoteVersions, baseline);
                 var operationId = Guid.NewGuid().ToString("N");
                 var directory = Path.Combine(_stagingRoot, operationId);
                 Directory.CreateDirectory(directory);
+                var operationCommitted = false;
                 try
                 {
                     var successful = new Dictionary<LogicalObjectId, ObjectVersion>();
@@ -104,10 +122,6 @@ public sealed class SyncEngine
                     var pendingConflicts = new List<PendingConflict>();
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
                         stagedImports.Add(action.ObjectId, await StageDownloadAsync(action, locals, remote, directory, ct).ConfigureAwait(false));
-
-                    var finalDeletionScan = plan.Actions.Any(action => action.Kind == SyncActionKind.PublishTombstone && mode != SyncMode.Pull)
-                        ? await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false)
-                        : null;
 
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Conflict))
                     {
@@ -141,11 +155,6 @@ public sealed class SyncEngine
                             }
                             case SyncActionKind.PublishTombstone when mode != SyncMode.Pull:
                             {
-                                if (!IsAbsenceConfirmed(finalDeletionScan!, action))
-                                {
-                                    deferred.Add(action.ObjectId);
-                                    break;
-                                }
                                 var previous = action.Baseline ?? action.Remote ?? throw new InvalidDataException("A tombstone has no prior version.");
                                 var entry = await StageEncryptedObjectAsync(previous.Id, previous.Kind, EmptyHash(), true, null, directory, ct).ConfigureAwait(false);
                                 entries[entry.Id] = entry;
@@ -165,10 +174,18 @@ public sealed class SyncEngine
                     var revision = snapshot.Revision;
                     if (changes.Count != 0)
                     {
+                        var tombstones = plan.Actions.Where(action => action.Kind == SyncActionKind.PublishTombstone &&
+                            mode != SyncMode.Pull && !deferred.Contains(action.ObjectId)).ToArray();
                         var referenced = entries.Values.Select(entry => entry.OpaqueObjectId).ToHashSet(StringComparer.Ordinal);
                         foreach (var old in remote.Entries.Where(entry => !referenced.Contains(entry.OpaqueObjectId)))
                             changes.Add(new EncryptedObjectChange(new LogicalObjectId(old.OpaqueObjectId), string.Empty, true));
                         var indexPath = await StageIndexAsync(entries.Values, directory, ct).ConfigureAwait(false);
+                        if (tombstones.Length != 0)
+                        {
+                            _hooks.OnBeforeLocalPublicationPrecondition();
+                            var publicationScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                            if (tombstones.Any(action => !IsAbsenceConfirmed(publicationScan, action))) continue;
+                        }
                         var result = await _provider.TryPublishAsync(new PublishRequest(snapshot.Revision,
                             new EncryptedIndexChange(indexPath, false), changes, "Synchronize encrypted Codex history"), ct).ConfigureAwait(false);
                         if (!result.Published)
@@ -260,10 +277,12 @@ public sealed class SyncEngine
                         var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
                         foreach (var action in plan.Actions)
                             if (!deferred.Contains(action.ObjectId) && successful.TryGetValue(action.ObjectId, out var version)) next[action.ObjectId] = version;
+                        if (!remote.HasAuthenticatedIndex && changes.Count == 0 && baseline.Count == 0)
+                            return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted, attemptConflicts, raced);
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
                             next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
                         stateSaved = true;
-                        if (mutationBatch is not null) await mutationBatch.CommitAsync().ConfigureAwait(false);
+                        operationCommitted = true;
                         return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted, attemptConflicts, raced);
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
@@ -279,8 +298,9 @@ public sealed class SyncEngine
                 }
                 finally
                 {
-                    if (Directory.Exists(directory) && !File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
-                        Directory.Delete(directory, true);
+                    if (Directory.Exists(directory) && (operationCommitted ||
+                        !File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName))))
+                        TryCleanupOperation(directory);
                 }
             }
             throw new SyncConcurrencyException();
@@ -302,10 +322,37 @@ public sealed class SyncEngine
         foreach (var directory in Directory.EnumerateDirectories(_stagingRoot).OrderBy(path => path, StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested();
-            if (!File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName))) continue;
-            await HistoryMutationBatch.RecoverAsync(_historyWriter, directory, baseline, ct).ConfigureAwait(false);
-            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            if (File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
+                await HistoryMutationBatch.RecoverAsync(_historyWriter, directory, baseline, ct).ConfigureAwait(false);
+            TryCleanupOperation(directory);
         }
+        foreach (var evidence in Directory.EnumerateFiles(_stagingRoot, ".*" + HistoryMutationBatch.CleanupEvidenceExtension)
+                     .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            var name = Path.GetFileName(evidence);
+            var operationId = name[1..^HistoryMutationBatch.CleanupEvidenceExtension.Length];
+            var directory = Path.Combine(_stagingRoot, operationId);
+            if (!Directory.Exists(directory)) TryDeleteCleanupEvidence(evidence);
+        }
+    }
+
+    private void TryCleanupOperation(string directory)
+    {
+        try
+        {
+            _operationCleaner.Delete(directory, HistoryMutationBatch.MarkerFileName);
+            if (!Directory.Exists(directory)) TryDeleteCleanupEvidence(HistoryMutationBatch.CleanupEvidencePath(directory));
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void TryDeleteCleanupEvidence(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static Dictionary<LogicalObjectId, ObjectVersion> CreateLocalVersions(
@@ -340,12 +387,15 @@ public sealed class SyncEngine
         return scan.IsAbsenceConfirmed(kind) && scan.Objects.All(item => item.Id != action.ObjectId);
     }
 
-    private async Task<AuthenticatedSnapshot> AuthenticateSnapshotAsync(RemoteSnapshot snapshot, CancellationToken ct)
+    private async Task<AuthenticatedSnapshot> AuthenticateSnapshotAsync(RemoteSnapshot snapshot, bool stateInitialized,
+        int baselineCount, CancellationToken ct)
     {
         if (snapshot.IndexCiphertext is null)
         {
             if (snapshot.Objects.Count != 0) throw new InvalidDataException("Remote ciphertext exists without an authenticated repository index.");
-            return new([], new Dictionary<LogicalObjectId, ObjectVersion>(), new Dictionary<LogicalObjectId, byte[]>(), new Dictionary<string, byte[]>(StringComparer.Ordinal));
+            if (stateInitialized || baselineCount != 0 || !string.IsNullOrEmpty(snapshot.Revision))
+                throw new InvalidDataException("An initialized repository response is missing its authenticated index.");
+            return new(false, [], new Dictionary<LogicalObjectId, ObjectVersion>(), new Dictionary<LogicalObjectId, byte[]>(), new Dictionary<string, byte[]>(StringComparer.Ordinal));
         }
         byte[] plaintext;
         try
@@ -386,7 +436,7 @@ public sealed class SyncEngine
             versions.Add(entry.Id, Version(entry));
             objects.Add(entry.Id, bytes);
         }
-        return new(entries, versions, objects, encrypted);
+        return new(true, entries, versions, objects, encrypted);
     }
 
     private IReadOnlyList<IndexEntry> ParseIndex(byte[] plaintext)
@@ -612,10 +662,15 @@ public sealed class SyncEngine
 
     private sealed record IndexEntry(LogicalObjectId Id, ObjectKind Kind, ContentHash PlaintextHash, bool Deleted,
         string OpaqueObjectId, string Version, string? StagedPath = null);
-    private sealed record AuthenticatedSnapshot(IReadOnlyList<IndexEntry> Entries,
+    private sealed record AuthenticatedSnapshot(bool HasAuthenticatedIndex, IReadOnlyList<IndexEntry> Entries,
         IReadOnlyDictionary<LogicalObjectId, ObjectVersion> Versions,
         IReadOnlyDictionary<LogicalObjectId, byte[]> Plaintext,
         IReadOnlyDictionary<string, byte[]> Encrypted);
     private sealed record StagedImport(LocalObject Incoming, string Path, ExpectedHistoryState ExpectedState);
     private sealed record PendingConflict(ConflictProvenance Provenance, byte[] LocalEncrypted, byte[] RemoteEncrypted);
+    private sealed class NoopSyncEngineHooks : ISyncEngineHooks
+    {
+        internal static readonly NoopSyncEngineHooks Instance = new();
+        public void OnBeforeLocalPublicationPrecondition() { }
+    }
 }

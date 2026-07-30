@@ -10,6 +10,7 @@ internal sealed record HistoryMutationPlan(LocalObject Target, ExpectedHistorySt
 internal sealed class HistoryMutationBatch
 {
     internal const string MarkerFileName = "local-mutation.json";
+    internal const string CleanupEvidenceExtension = ".cleanup";
     private const int SchemaVersion = 1;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly CodexHistoryWriter _writer;
@@ -31,7 +32,9 @@ internal sealed class HistoryMutationBatch
         if (string.IsNullOrWhiteSpace(operationDirectory)) throw new ArgumentException("An operation directory is required.", nameof(operationDirectory));
         Directory.CreateDirectory(operationDirectory);
         var markerPath = Path.Combine(Path.GetFullPath(operationDirectory), MarkerFileName);
+        var cleanupEvidencePath = CleanupEvidencePath(operationDirectory);
         if (File.Exists(markerPath)) throw new IOException("A local mutation marker already exists for this operation.");
+        await WriteCleanupEvidenceAsync(cleanupEvidencePath, ct).ConfigureAwait(false);
         var ids = new HashSet<LogicalObjectId>();
         var entries = new List<MutationEntry>(plans.Count);
         foreach (var plan in plans)
@@ -57,23 +60,20 @@ internal sealed class HistoryMutationBatch
         var batch = new HistoryMutationBatch(writer, markerPath, journal);
         batch.ValidateJournal();
         if (batch.IsCommitted(baseline))
-        {
-            await batch.CommitAsync().ConfigureAwait(false);
             return true;
-        }
         await batch.RollbackAsync(ct).ConfigureAwait(false);
         return true;
+    }
+
+    internal static string CleanupEvidencePath(string operationDirectory)
+    {
+        var directory = Path.GetFullPath(operationDirectory);
+        return Path.Combine(Path.GetDirectoryName(directory)!, "." + Path.GetFileName(directory) + CleanupEvidenceExtension);
     }
 
     internal Task BeginApplyAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Applying, ct);
     internal Task MarkAppliedAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Applied, ct);
     internal Task MarkSkippedAsync(LogicalObjectId id, CancellationToken ct) => SetStatusAsync(id, MutationStatus.Skipped, ct);
-
-    internal Task CommitAsync()
-    {
-        if (File.Exists(_markerPath)) File.Delete(_markerPath);
-        return Task.CompletedTask;
-    }
 
     internal async Task RollbackAsync(CancellationToken ct)
     {
@@ -164,6 +164,14 @@ internal sealed class HistoryMutationBatch
             else File.Move(temporary, path);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private static async Task WriteCleanupEvidenceAsync(string path, CancellationToken ct)
+    {
+        await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await output.FlushAsync(ct).ConfigureAwait(false);
+        output.Flush(true);
     }
 
     private sealed record MutationJournal(int SchemaVersion, string OperationId, List<MutationEntry> Entries);
