@@ -300,7 +300,7 @@ public sealed class SyncEngine
                 {
                     if (Directory.Exists(directory) && (operationCommitted ||
                         !File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName))))
-                        TryCleanupOperation(directory);
+                        TryCleanupOperationBestEffort(directory);
                 }
             }
             throw new SyncConcurrencyException();
@@ -317,14 +317,16 @@ public sealed class SyncEngine
 
     private async Task RecoverInterruptedMutationsAsync(CancellationToken ct)
     {
-        if (!Directory.Exists(_stagingRoot)) return;
+        string[] operationDirectories;
+        try { operationDirectories = Directory.EnumerateDirectories(_stagingRoot).OrderBy(path => path, StringComparer.Ordinal).ToArray(); }
+        catch (DirectoryNotFoundException) { return; }
         var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
-        foreach (var directory in Directory.EnumerateDirectories(_stagingRoot).OrderBy(path => path, StringComparer.Ordinal))
+        foreach (var directory in operationDirectories)
         {
             ct.ThrowIfCancellationRequested();
             if (File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
                 await HistoryMutationBatch.RecoverAsync(_historyWriter, directory, baseline, ct).ConfigureAwait(false);
-            TryCleanupOperation(directory);
+            CleanupOperationStrict(directory);
         }
         foreach (var evidence in Directory.EnumerateFiles(_stagingRoot, ".*" + HistoryMutationBatch.CleanupEvidenceExtension)
                      .OrderBy(path => path, StringComparer.Ordinal))
@@ -333,26 +335,53 @@ public sealed class SyncEngine
             var name = Path.GetFileName(evidence);
             var operationId = name[1..^HistoryMutationBatch.CleanupEvidenceExtension.Length];
             var directory = Path.Combine(_stagingRoot, operationId);
-            if (!Directory.Exists(directory)) TryDeleteCleanupEvidence(evidence);
+            if (IsPathConfirmedAbsent(directory)) TryDeleteCleanupEvidence(evidence);
         }
     }
 
-    private void TryCleanupOperation(string directory)
+    private void CleanupOperationStrict(string directory)
     {
         try
         {
             _operationCleaner.Delete(directory, HistoryMutationBatch.MarkerFileName);
-            if (!Directory.Exists(directory)) TryDeleteCleanupEvidence(HistoryMutationBatch.CleanupEvidencePath(directory));
+            if (!IsPathConfirmedAbsent(directory))
+                throw new IOException("Recovered synchronization operation cleanup did not remove its directory.");
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        catch (Exception exception) when (IsExpectedCleanupFailure(exception))
+        {
+            throw new IOException("Recovered synchronization operation cleanup could not be completed before provider access.", exception);
+        }
+        TryDeleteCleanupEvidence(HistoryMutationBatch.CleanupEvidencePath(directory));
+    }
+
+    private void TryCleanupOperationBestEffort(string directory)
+    {
+        try
+        {
+            _operationCleaner.Delete(directory, HistoryMutationBatch.MarkerFileName);
+            if (IsPathConfirmedAbsent(directory)) TryDeleteCleanupEvidence(HistoryMutationBatch.CleanupEvidencePath(directory));
+        }
+        catch (Exception exception) when (IsExpectedCleanupFailure(exception)) { }
     }
 
     private static void TryDeleteCleanupEvidence(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        catch (Exception exception) when (IsExpectedCleanupFailure(exception)) { }
+    }
+
+    private static bool IsExpectedCleanupFailure(Exception exception) => exception is
+        IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Security.SecurityException;
+
+    private static bool IsPathConfirmedAbsent(string path)
+    {
+        try
+        {
+            _ = File.GetAttributes(path);
+            return false;
+        }
+        catch (FileNotFoundException) { return true; }
+        catch (DirectoryNotFoundException) { return true; }
     }
 
     private static Dictionary<LogicalObjectId, ObjectVersion> CreateLocalVersions(
