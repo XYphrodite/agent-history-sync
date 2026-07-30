@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and review-round-1 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
+Implementation and review-round-2 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
 
 ## Commits
 
@@ -37,6 +37,36 @@ The recovered implementation already provided the public API, a CHS1-encrypted r
 The final engine stages and validates every permitted download first, then preserves planned conflicts, stages uploads, resolves CAS publication, applies guarded Codex mutations, and saves baseline state only after the complete successful attempt. Rejected CAS attempts perform no live-history mutation. Conflict fingerprints prevent duplicate evidence for an unchanged conflict while retaining changed conflict versions.
 
 ## Test evidence
+
+### Review round 2: authenticated emptiness, tombstone preconditions, and committed cleanup
+
+All three Important findings were addressed in commit `34c4a1b` (`fix: close synchronization review gaps`).
+
+- A missing remote index is accepted only when the local state file does not exist, the baseline and remote ciphertext set are empty, and the remote revision is empty. Such a null-index no-op does not create local state. Once initialized, even with an authenticated empty index, a missing or transient empty response is rejected before planning, local mutation, or baseline advancement. An authenticated empty index remains the explicit deletion signal.
+- Missing or access-hidden session roots are uncertain, never confirmed empty. Tombstone candidates are rebound to a fresh complete scan after the encrypted index is staged and immediately before provider CAS. A reappearing root/session aborts the attempt and is replanned without publishing the tombstone.
+- Atomic state replacement is the irreversible success boundary. Local mutation markers are retained until marker-last operation cleanup; a durable sibling `.cleanup` evidence file exists outside the operation directory until that directory is gone. Cleanup failures after commit are swallowed, do not turn a successful synchronization into an error, and are retried under the repository lock before the next provider read.
+
+TDD evidence:
+
+- Missing-root plus missing-index tests failed 3/3 exactly as reported, then passed 3/3 after initialization-aware authentication and uncertainty propagation.
+- The last-moment reappearance test initially failed compilation because the pre-CAS hook did not exist, then passed 1/1 after the final scan was moved to the publication boundary.
+- The committed-cleanup theory initially failed compilation because marker-last cleanup did not exist, then passed 2/2 for failures before directory deletion and at marker deletion.
+- The first focused regression run exposed one existing empty-repository mutex failure (49/50): the first allowed null-index pull had created state. Avoiding state creation for a truly uninitialized no-op corrected it; the final focused run passed 51/51.
+
+Final round-2 verification:
+
+```powershell
+dotnet test tests\CodexHistorySync.IntegrationTests\CodexHistorySync.IntegrationTests.csproj --filter "FullyQualifiedName~TwoDeviceSyncTests|FullyQualifiedName~SyncFailureTests" --no-restore --verbosity minimal
+```
+
+Result: 51 passed, 0 failed, 0 skipped.
+
+```powershell
+$env:PSExecutionPolicyPreference='Bypass'
+dotnet test CodexHistorySync.sln --no-restore --verbosity minimal
+```
+
+Result: 183 passed, 0 failed, 0 skipped — Core 101, Integration 62, Git 14, Windows 6. The solution build completed with 0 warnings and 0 errors.
 
 ### Review round 1: recovery and atomicity
 
@@ -143,3 +173,4 @@ The final requirement-by-requirement self-review found and corrected the remote-
 
 - Task 2 intentionally deferred attachment discovery because no safe documented typed attachment field was available. The Task 7 engine therefore synchronizes the active and archived session objects returned by the current scanner; authenticated attachment entries are not installed as Codex history.
 - Automatic recovery refuses to overwrite a file whose current hash matches neither the journaled before-state nor after-state. The marker and backups remain for explicit recovery rather than risking loss of a concurrent user edit.
+- If filesystem permissions permanently prevent committed staging cleanup, encrypted/plaintext operation artifacts remain local with durable cleanup evidence and cleanup is retried on every synchronization; the successful baseline is not rolled back or falsely reported as failed.
