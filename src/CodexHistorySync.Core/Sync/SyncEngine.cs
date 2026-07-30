@@ -106,10 +106,11 @@ public sealed class SyncEngine
                 var plan = ThreeWayPlanner.CreatePlan(localVersions, remoteVersions, baseline);
                 var operationId = Guid.NewGuid().ToString("N");
                 var directory = Path.Combine(_stagingRoot, operationId);
-                Directory.CreateDirectory(directory);
                 var operationCommitted = false;
                 try
                 {
+                    Directory.CreateDirectory(directory);
+                    await HistoryMutationBatch.EnsureCleanupEvidenceAsync(directory, ct).ConfigureAwait(false);
                     var successful = new Dictionary<LogicalObjectId, ObjectVersion>();
                     var deferred = new HashSet<LogicalObjectId>();
                     var entries = remote.Entries.ToDictionary(entry => entry.Id);
@@ -298,9 +299,17 @@ public sealed class SyncEngine
                 }
                 finally
                 {
-                    if (Directory.Exists(directory) && (operationCommitted ||
-                        !File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName))))
-                        TryCleanupOperationBestEffort(directory);
+                    if (operationCommitted) TryCleanupOperationBestEffort(directory);
+                    else
+                    {
+                        try
+                        {
+                            if (!IsPathConfirmedAbsent(directory) &&
+                                IsPathConfirmedAbsent(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
+                                TryCleanupOperationBestEffort(directory);
+                        }
+                        catch (Exception exception) when (IsExpectedCleanupFailure(exception)) { }
+                    }
                 }
             }
             throw new SyncConcurrencyException();
@@ -318,24 +327,55 @@ public sealed class SyncEngine
     private async Task RecoverInterruptedMutationsAsync(CancellationToken ct)
     {
         string[] operationDirectories;
-        try { operationDirectories = Directory.EnumerateDirectories(_stagingRoot).OrderBy(path => path, StringComparer.Ordinal).ToArray(); }
+        string[] cleanupEvidence;
+        try
+        {
+            operationDirectories = Directory.EnumerateDirectories(_stagingRoot).ToArray();
+            cleanupEvidence = Directory.EnumerateFiles(_stagingRoot, ".*" + HistoryMutationBatch.CleanupEvidenceExtension).ToArray();
+        }
         catch (DirectoryNotFoundException) { return; }
+        var recoveryTargets = operationDirectories.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var evidence in cleanupEvidence)
+        {
+            var name = Path.GetFileName(evidence);
+            var operationId = name[1..^HistoryMutationBatch.CleanupEvidenceExtension.Length];
+            try { PathSafety.ValidateFileComponent(operationId, nameof(operationId)); }
+            catch (ArgumentException exception)
+            {
+                throw new IOException("A cleanup evidence file has an invalid operation identifier.", exception);
+            }
+            recoveryTargets.Add(Path.Combine(_stagingRoot, operationId));
+        }
         var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
-        foreach (var directory in operationDirectories)
+        foreach (var directory in recoveryTargets.OrderBy(path => path, StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested();
-            if (File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
+            if (ProbeMarker(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
                 await HistoryMutationBatch.RecoverAsync(_historyWriter, directory, baseline, ct).ConfigureAwait(false);
             CleanupOperationStrict(directory);
         }
-        foreach (var evidence in Directory.EnumerateFiles(_stagingRoot, ".*" + HistoryMutationBatch.CleanupEvidenceExtension)
-                     .OrderBy(path => path, StringComparer.Ordinal))
+    }
+
+    private static bool ProbeMarker(string markerPath)
+    {
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(markerPath); }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch (Exception exception) when (IsExpectedCleanupFailure(exception))
         {
-            ct.ThrowIfCancellationRequested();
-            var name = Path.GetFileName(evidence);
-            var operationId = name[1..^HistoryMutationBatch.CleanupEvidenceExtension.Length];
-            var directory = Path.Combine(_stagingRoot, operationId);
-            if (IsPathConfirmedAbsent(directory)) TryDeleteCleanupEvidence(evidence);
+            throw new IOException("The local mutation marker could not be confirmed absent or opened safely.", exception);
+        }
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new IOException("The local mutation marker is not a regular file.");
+        try
+        {
+            using var input = new FileStream(markerPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return true;
+        }
+        catch (Exception exception) when (IsExpectedCleanupFailure(exception))
+        {
+            throw new IOException("The local mutation marker could not be opened safely.", exception);
         }
     }
 
