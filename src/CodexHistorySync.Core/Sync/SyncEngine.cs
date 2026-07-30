@@ -350,10 +350,28 @@ public sealed class SyncEngine
         foreach (var directory in recoveryTargets.OrderBy(path => path, StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested();
-            if (ProbeMarker(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
+            if (ProbeOperationDirectory(directory) &&
+                ProbeMarker(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
                 await HistoryMutationBatch.RecoverAsync(_historyWriter, directory, baseline, ct).ConfigureAwait(false);
             CleanupOperationStrict(directory);
         }
+    }
+
+    private static bool ProbeOperationDirectory(string directory)
+    {
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(directory); }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch (Exception exception) when (IsExpectedCleanupFailure(exception))
+        {
+            throw new IOException("The recovered synchronization operation target could not be classified safely.", exception);
+        }
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("The recovered synchronization operation target is a reparse point.");
+        if ((attributes & FileAttributes.Directory) == 0)
+            throw new IOException("The recovered synchronization operation target is not a real directory.");
+        return true;
     }
 
     private static bool ProbeMarker(string markerPath)

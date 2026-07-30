@@ -883,6 +883,48 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task StartupEvidenceReferencedReparseDirectory_IsRejectedBeforeMarkerRecoveryOrProviderRead()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var target = CreateDevice("reparse-operation-target", key, provider);
+        await WriteSessionAsync(target.Paths.Sessions, "reparse-operation-session");
+        var historyPath = Path.Combine(target.Paths.Sessions, "reparse-operation-session.jsonl");
+        var before = await File.ReadAllTextAsync(historyPath);
+        var beforeHash = await BackupStore.HashFileAsync(historyPath, CancellationToken.None);
+        var changed = before + "{\"type\":\"message\",\"payload\":{\"text\":\"interrupted\"}}\n";
+        var afterHash = new ContentHash(Hash(Encoding.UTF8.GetBytes(changed)));
+        var local = Assert.Single(await ScanAsync(target));
+        var externalOperation = Path.Combine(_root, "external-reparse-operation");
+        Directory.CreateDirectory(externalOperation);
+        var batch = await HistoryMutationBatch.PrepareAsync(target.Writer, externalOperation, "linked-operation",
+            [new HistoryMutationPlan(local, ExpectedHistoryState.Present(beforeHash), ExpectedHistoryState.Present(afterHash))],
+            CancellationToken.None);
+        await batch.BeginApplyAsync(local.Id, CancellationToken.None);
+        await File.WriteAllTextAsync(historyPath, changed, new UTF8Encoding(false));
+        Directory.CreateDirectory(target.StagingRoot);
+        var linkedOperation = Path.Combine(target.StagingRoot, "linked-operation");
+        try { Directory.CreateSymbolicLink(linkedOperation, externalOperation); }
+        catch (Exception creationException) when (creationException is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Symbolic-link creation is unavailable: {creationException.GetType().Name}");
+        }
+        await File.WriteAllBytesAsync(HistoryMutationBatch.CleanupEvidencePath(linkedOperation), []);
+        var detector = new CountingDetector();
+        var restarted = CreateDevice("reparse-operation-target", key, provider, detector);
+        var readsBeforeRestart = provider.ReadCalls;
+
+        var exception = await Assert.ThrowsAsync<IOException>(() =>
+            restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Contains("operation target", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, detector.Checks);
+        Assert.Equal(readsBeforeRestart, provider.ReadCalls);
+        Assert.Equal(changed, await File.ReadAllTextAsync(historyPath));
+        Assert.True(File.Exists(Path.Combine(externalOperation, HistoryMutationBatch.MarkerFileName)));
+    }
+
+    [Fact]
     public async Task CasRetryAfterDownloadStaging_PreservesEarlyEvidenceUntilRestartCleanup()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -1142,6 +1184,17 @@ public sealed class SyncFailureTests : IDisposable
     private sealed class StoppedDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;
+        public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+    private sealed class CountingDetector : ICodexProcessDetector
+    {
+        private int _checks;
+        public int Checks => Volatile.Read(ref _checks);
+        public bool IsRunning()
+        {
+            Interlocked.Increment(ref _checks);
+            return false;
+        }
         public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
     private sealed class StartsDuringImportDetector : ICodexProcessDetector
