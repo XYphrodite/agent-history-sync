@@ -5,6 +5,13 @@ using CodexHistorySync.Core.Model;
 
 namespace CodexHistorySync.Core.Codex;
 
+public sealed record SessionScanResult(
+    IReadOnlyList<LocalObject> Objects,
+    IReadOnlySet<ObjectKind> UncertainKinds)
+{
+    public bool IsAbsenceConfirmed(ObjectKind kind) => !UncertainKinds.Contains(kind);
+}
+
 public sealed class SessionScanner
 {
     private static readonly HashSet<string> DisallowedDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
@@ -34,24 +41,30 @@ public sealed class SessionScanner
     }
 
     public async Task<IReadOnlyList<LocalObject>> ScanAsync(CodexPaths paths, CancellationToken cancellationToken)
+        => (await ScanDetailedAsync(paths, cancellationToken).ConfigureAwait(false)).Objects;
+
+    public async Task<SessionScanResult> ScanDetailedAsync(CodexPaths paths, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
         var objects = new List<LocalObject>();
         var ids = new HashSet<LogicalObjectId>();
-        await ScanDirectoryAsync(paths.Sessions, ObjectKind.ActiveSession, ids, objects, cancellationToken);
-        await ScanDirectoryAsync(paths.ArchivedSessions, ObjectKind.ArchivedSession, ids, objects, cancellationToken);
-        return objects;
+        var uncertainKinds = new HashSet<ObjectKind>();
+        if (!await ScanDirectoryAsync(paths.Sessions, ObjectKind.ActiveSession, ids, objects, cancellationToken).ConfigureAwait(false))
+            uncertainKinds.Add(ObjectKind.ActiveSession);
+        if (!await ScanDirectoryAsync(paths.ArchivedSessions, ObjectKind.ArchivedSession, ids, objects, cancellationToken).ConfigureAwait(false))
+            uncertainKinds.Add(ObjectKind.ArchivedSession);
+        return new SessionScanResult(objects, uncertainKinds);
     }
 
-    private async Task ScanDirectoryAsync(
+    private async Task<bool> ScanDirectoryAsync(
         string directory,
         ObjectKind kind,
         HashSet<LogicalObjectId> ids,
         List<LocalObject> objects,
         CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(directory)) return;
+        if (!Directory.Exists(directory)) return true;
 
         IEnumerable<string> candidates;
         try
@@ -65,21 +78,24 @@ public sealed class SessionScanner
         }
         catch (IOException)
         {
-            return;
+            return false;
         }
         catch (UnauthorizedAccessException)
         {
-            return;
+            return false;
         }
 
+        var complete = true;
         foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!CodexPaths.IsPathWithin(candidate, directory) || IsDisallowedCandidate(candidate, directory)) continue;
 
             var session = await ReadStableSessionAsync(candidate, kind, cancellationToken);
-            if (session is not null && ids.Add(session.Id)) objects.Add(session);
+            if (session is null) complete = false;
+            else if (ids.Add(session.Id)) objects.Add(session);
         }
+        return complete;
     }
 
     private async Task<LocalObject?> ReadStableSessionAsync(string path, ObjectKind kind, CancellationToken cancellationToken)

@@ -64,7 +64,8 @@ public sealed class SyncEngine
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
         PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory));
-        _mutex = RepositoryMutexes.GetOrAdd(Path.GetFullPath(_stateStore.GetStatePath(repositoryId)), _ => new SemaphoreSlim(1, 1));
+        _mutex = RepositoryMutexes.GetOrAdd(RepositorySyncLock.CanonicalStateIdentity(_stateStore.GetStatePath(repositoryId)),
+            _ => new SemaphoreSlim(1, 1));
     }
 
     public async Task<SyncResult> SynchronizeAsync(SyncMode mode, CancellationToken ct)
@@ -73,16 +74,19 @@ public sealed class SyncEngine
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            await using var repositoryLock = await RepositorySyncLock.AcquireAsync(_stateStore.GetStatePath(_repositoryId), ct).ConfigureAwait(false);
+            await RecoverInterruptedMutationsAsync(ct).ConfigureAwait(false);
             var raced = false;
-            var preservedConflicts = new HashSet<ConflictFingerprint>();
             for (var attempt = 1; attempt <= 5; attempt++)
             {
-                var locals = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                var locals = scan.Objects;
                 var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
                 var remote = await AuthenticateSnapshotAsync(snapshot, ct).ConfigureAwait(false);
                 var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
-                var localVersions = CreateLocalVersions(locals, baseline);
-                var plan = ThreeWayPlanner.CreatePlan(localVersions, remote.Versions, baseline);
+                var localVersions = CreateLocalVersions(scan, baseline);
+                var remoteVersions = CreateRemoteVersions(remote.Versions, baseline);
+                var plan = ThreeWayPlanner.CreatePlan(localVersions, remoteVersions, baseline);
                 var operationId = Guid.NewGuid().ToString("N");
                 var directory = Path.Combine(_stagingRoot, operationId);
                 Directory.CreateDirectory(directory);
@@ -97,13 +101,17 @@ public sealed class SyncEngine
                     var attemptDeleted = 0;
                     var attemptConflicts = 0;
                     var stagedImports = new Dictionary<LogicalObjectId, StagedImport>();
+                    var pendingConflicts = new List<PendingConflict>();
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
                         stagedImports.Add(action.ObjectId, await StageDownloadAsync(action, locals, remote, directory, ct).ConfigureAwait(false));
 
+                    var finalDeletionScan = plan.Actions.Any(action => action.Kind == SyncActionKind.PublishTombstone && mode != SyncMode.Pull)
+                        ? await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false)
+                        : null;
+
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Conflict))
                     {
-                        if (preservedConflicts.Add(new ConflictFingerprint(action.ObjectId, action.Local, action.Remote, action.Baseline)))
-                            await PreserveConflictAsync(action, locals, remote, ct).ConfigureAwait(false);
+                        pendingConflicts.Add(await PrepareConflictAsync(action, locals, remote, ct).ConfigureAwait(false));
                         attemptConflicts++;
                         deferred.Add(action.ObjectId);
                     }
@@ -133,6 +141,11 @@ public sealed class SyncEngine
                             }
                             case SyncActionKind.PublishTombstone when mode != SyncMode.Pull:
                             {
+                                if (!IsAbsenceConfirmed(finalDeletionScan!, action))
+                                {
+                                    deferred.Add(action.ObjectId);
+                                    break;
+                                }
                                 var previous = action.Baseline ?? action.Remote ?? throw new InvalidDataException("A tombstone has no prior version.");
                                 var entry = await StageEncryptedObjectAsync(previous.Id, previous.Kind, EmptyHash(), true, null, directory, ct).ConfigureAwait(false);
                                 entries[entry.Id] = entry;
@@ -167,47 +180,107 @@ public sealed class SyncEngine
                         revision = result.CurrentRevision;
                     }
 
+                    foreach (var conflict in pendingConflicts)
+                        await PublishConflictAsync(conflict, ct).ConfigureAwait(false);
+
+                    var mutationPlans = new List<HistoryMutationPlan>();
                     foreach (var action in plan.Actions)
                     {
                         if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
                         {
-                            await ApplyStagedImportAsync(stagedImports[action.ObjectId], operationId, ct).ConfigureAwait(false);
-                            attemptDownloaded++;
+                            var staged = stagedImports[action.ObjectId];
+                            mutationPlans.Add(new HistoryMutationPlan(staged.Incoming, staged.ExpectedState,
+                                ExpectedHistoryState.Present(staged.Incoming.Hash)));
                         }
                         else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null)
                         {
                             var source = locals.Single(item => item.Id == action.ObjectId);
-                            if (await _historyWriter.ApplyTombstoneAsync(source, action.Baseline!.PlaintextHash, operationId, ct).ConfigureAwait(false) == TombstoneApplyResult.Conflict)
-                            {
-                                successful.Remove(action.ObjectId);
-                                deferred.Add(action.ObjectId);
-                                var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
-                                var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId)
-                                    ?? throw new InvalidDataException("The concurrent local tombstone conflict could not be scanned stably.");
-                                var conflict = action with
-                                {
-                                    Kind = SyncActionKind.Conflict,
-                                    Local = new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
-                                };
-                                if (preservedConflicts.Add(new ConflictFingerprint(conflict.ObjectId, conflict.Local, conflict.Remote, conflict.Baseline)))
-                                    await PreserveConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false);
-                                attemptConflicts++;
-                                continue;
-                            }
-                            attemptDeleted++;
+                            mutationPlans.Add(new HistoryMutationPlan(source, ExpectedHistoryState.Present(action.Baseline!.PlaintextHash),
+                                ExpectedHistoryState.Absent));
                         }
                     }
+                    HistoryMutationBatch? mutationBatch = null;
+                    var stateSaved = false;
+                    if (mutationPlans.Count != 0)
+                        mutationBatch = await HistoryMutationBatch.PrepareAsync(_historyWriter, directory, operationId, mutationPlans, ct).ConfigureAwait(false);
+                    try
+                    {
+                        foreach (var action in plan.Actions)
+                        {
+                            if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
+                            {
+                                await mutationBatch!.BeginApplyAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                if (await ApplyStagedImportAsync(stagedImports[action.ObjectId], operationId, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
+                                {
+                                    await mutationBatch.MarkSkippedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                    successful.Remove(action.ObjectId);
+                                    deferred.Add(action.ObjectId);
+                                    var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                    var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId);
+                                    var conflict = action with
+                                    {
+                                        Kind = SyncActionKind.Conflict,
+                                        Local = current is null
+                                            ? new ObjectVersion(action.ObjectId, action.Remote!.Kind, EmptyHash(), "local:deleted", true)
+                                            : new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
+                                    };
+                                    await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+                                    attemptConflicts++;
+                                    continue;
+                                }
+                                await mutationBatch.MarkAppliedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                attemptDownloaded++;
+                            }
+                            else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null)
+                            {
+                                await mutationBatch!.BeginApplyAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                var source = locals.Single(item => item.Id == action.ObjectId);
+                                if (await _historyWriter.ApplyTombstoneAsync(source, action.Baseline!.PlaintextHash, operationId, ct).ConfigureAwait(false) == TombstoneApplyResult.Conflict)
+                                {
+                                    await mutationBatch.MarkSkippedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                    successful.Remove(action.ObjectId);
+                                    deferred.Add(action.ObjectId);
+                                    var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                    var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId)
+                                        ?? throw new InvalidDataException("The concurrent local tombstone conflict could not be scanned stably.");
+                                    var conflict = action with
+                                    {
+                                        Kind = SyncActionKind.Conflict,
+                                        Local = new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
+                                    };
+                                    await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+                                    attemptConflicts++;
+                                    continue;
+                                }
+                                await mutationBatch.MarkAppliedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                attemptDeleted++;
+                            }
+                        }
 
-                    var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
-                    foreach (var action in plan.Actions)
-                        if (!deferred.Contains(action.ObjectId) && successful.TryGetValue(action.ObjectId, out var version)) next[action.ObjectId] = version;
-                    await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
-                        next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
-                    return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted, attemptConflicts, raced);
+                        var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
+                        foreach (var action in plan.Actions)
+                            if (!deferred.Contains(action.ObjectId) && successful.TryGetValue(action.ObjectId, out var version)) next[action.ObjectId] = version;
+                        await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
+                            next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
+                        stateSaved = true;
+                        if (mutationBatch is not null) await mutationBatch.CommitAsync().ConfigureAwait(false);
+                        return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted, attemptConflicts, raced);
+                    }
+                    catch (Exception primary) when (mutationBatch is not null && !stateSaved)
+                    {
+                        try { await mutationBatch.RollbackAsync(CancellationToken.None).ConfigureAwait(false); }
+                        catch (Exception rollback)
+                        {
+                            throw new AtomicMutationException("Synchronization failed and the local mutation batch could not be fully rolled back.",
+                                new AggregateException(primary, rollback), [directory]);
+                        }
+                        throw;
+                    }
                 }
                 finally
                 {
-                    if (Directory.Exists(directory)) Directory.Delete(directory, true);
+                    if (Directory.Exists(directory) && !File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName)))
+                        Directory.Delete(directory, true);
                 }
             }
             throw new SyncConcurrencyException();
@@ -222,16 +295,49 @@ public sealed class SyncEngine
         catch (DirectoryNotFoundException) { return []; }
     }
 
-    private static Dictionary<LogicalObjectId, ObjectVersion> CreateLocalVersions(
-        IReadOnlyList<LocalObject> objects, IReadOnlyDictionary<LogicalObjectId, ObjectVersion> baseline)
+    private async Task RecoverInterruptedMutationsAsync(CancellationToken ct)
     {
+        if (!Directory.Exists(_stagingRoot)) return;
+        var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
+        foreach (var directory in Directory.EnumerateDirectories(_stagingRoot).OrderBy(path => path, StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!File.Exists(Path.Combine(directory, HistoryMutationBatch.MarkerFileName))) continue;
+            await HistoryMutationBatch.RecoverAsync(_historyWriter, directory, baseline, ct).ConfigureAwait(false);
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    private static Dictionary<LogicalObjectId, ObjectVersion> CreateLocalVersions(
+        SessionScanResult scan, IReadOnlyDictionary<LogicalObjectId, ObjectVersion> baseline)
+    {
+        var objects = scan.Objects;
         if (objects.Any(item => StringComparer.Ordinal.Equals(item.Id.Value, IndexObjectId)))
             throw new InvalidDataException("Local history uses the reserved repository-index object ID.");
         var result = objects.ToDictionary(item => item.Id,
             item => new ObjectVersion(item.Id, item.Kind, item.Hash, "local:" + item.Hash.Hex, false));
         foreach (var missing in baseline.Values.Where(item => !result.ContainsKey(item.Id)))
-            result[missing.Id] = new ObjectVersion(missing.Id, missing.Kind, EmptyHash(), "local:deleted", true);
+            result[missing.Id] = scan.IsAbsenceConfirmed(missing.Kind)
+                ? new ObjectVersion(missing.Id, missing.Kind, EmptyHash(), "local:deleted", true)
+                : missing;
         return result;
+    }
+
+    private static Dictionary<LogicalObjectId, ObjectVersion> CreateRemoteVersions(
+        IReadOnlyDictionary<LogicalObjectId, ObjectVersion> authenticated,
+        IReadOnlyDictionary<LogicalObjectId, ObjectVersion> baseline)
+    {
+        var result = authenticated.ToDictionary(pair => pair.Key, pair => pair.Value);
+        foreach (var missing in baseline.Values.Where(item => !result.ContainsKey(item.Id)))
+            result[missing.Id] = new ObjectVersion(missing.Id, missing.Kind, EmptyHash(), "remote:absent", true);
+        return result;
+    }
+
+    private static bool IsAbsenceConfirmed(SessionScanResult scan, SyncAction action)
+    {
+        var kind = action.Local?.Kind ?? action.Baseline?.Kind ?? action.Remote?.Kind
+            ?? throw new InvalidDataException("A tombstone has no object kind.");
+        return scan.IsAbsenceConfirmed(kind) && scan.Objects.All(item => item.Id != action.ObjectId);
     }
 
     private async Task<AuthenticatedSnapshot> AuthenticateSnapshotAsync(RemoteSnapshot snapshot, CancellationToken ct)
@@ -353,14 +459,17 @@ public sealed class SyncEngine
         ValidateSessionJsonl(staged, action.ObjectId, ct);
         var incoming = new LocalObject(action.ObjectId, version.Kind, path, version.PlaintextHash,
             staged.LongLength, DateTimeOffset.UtcNow);
-        return new StagedImport(incoming, stagedPath);
+        var expected = action.Local is { IsDeleted: false } local
+            ? ExpectedHistoryState.Present(local.PlaintextHash)
+            : ExpectedHistoryState.Absent;
+        return new StagedImport(incoming, stagedPath, expected);
     }
 
-    private async Task ApplyStagedImportAsync(StagedImport staged, string operationId, CancellationToken ct)
+    private async Task<ImportApplyResult> ApplyStagedImportAsync(StagedImport staged, string operationId, CancellationToken ct)
     {
         await using var content = new FileStream(staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 81_920,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await _historyWriter.ImportAsync(staged.Incoming, content, operationId, ct).ConfigureAwait(false);
+        return await _historyWriter.ImportAsync(staged.Incoming, content, operationId, staged.ExpectedState, ct).ConfigureAwait(false);
     }
 
     private static void ValidateSessionJsonl(byte[] bytes, LogicalObjectId expectedId, CancellationToken ct)
@@ -448,7 +557,8 @@ public sealed class SyncEngine
         return path;
     }
 
-    private async Task PreserveConflictAsync(SyncAction action, IReadOnlyList<LocalObject> locals, AuthenticatedSnapshot remote, CancellationToken ct)
+    private async Task<PendingConflict> PrepareConflictAsync(SyncAction action, IReadOnlyList<LocalObject> locals,
+        AuthenticatedSnapshot remote, CancellationToken ct)
     {
         var local = locals.SingleOrDefault(item => item.Id == action.ObjectId);
         var localBytes = local is null ? Array.Empty<byte>() : await File.ReadAllBytesAsync(local.SourcePath, ct).ConfigureAwait(false);
@@ -464,9 +574,9 @@ public sealed class SyncEngine
         var empty = EmptyHash();
         await using var remoteEncrypted = new MemoryStream();
         string remoteDevice;
-        if (action.Remote is not null)
+        var remoteEntry = remote.Entries.SingleOrDefault(entry => entry.Id == action.ObjectId);
+        if (remoteEntry is not null)
         {
-            var remoteEntry = remote.Entries.Single(entry => entry.Id == action.ObjectId);
             await remoteEncrypted.WriteAsync(remote.Encrypted[remoteEntry.OpaqueObjectId], ct).ConfigureAwait(false);
             remoteDevice = DeviceFromVersion(remoteEntry.Version);
         }
@@ -478,8 +588,16 @@ public sealed class SyncEngine
         }
         remoteEncrypted.Position = 0;
         var provenance = new ConflictProvenance(metadata, action.Local?.PlaintextHash ?? empty, action.Remote?.PlaintextHash ?? empty,
-            action.Baseline?.PlaintextHash ?? empty, _deviceId, remoteDevice, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        await _conflictStore.PreserveAsync(provenance, localEncrypted, remoteEncrypted, ct).ConfigureAwait(false);
+            action.Baseline?.PlaintextHash ?? empty, _deviceId, remoteDevice, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+            action.Local?.IsDeleted ?? true, action.Remote?.IsDeleted ?? true);
+        return new PendingConflict(provenance, localEncrypted.ToArray(), remoteEncrypted.ToArray());
+    }
+
+    private async Task PublishConflictAsync(PendingConflict conflict, CancellationToken ct)
+    {
+        await using var local = new MemoryStream(conflict.LocalEncrypted, writable: false);
+        await using var remote = new MemoryStream(conflict.RemoteEncrypted, writable: false);
+        await _conflictStore.PreserveAsync(conflict.Provenance, local, remote, ct).ConfigureAwait(false);
     }
 
     private static ObjectVersion Version(IndexEntry entry) => new(entry.Id, entry.Kind, entry.PlaintextHash, entry.Version, entry.Deleted);
@@ -498,6 +616,6 @@ public sealed class SyncEngine
         IReadOnlyDictionary<LogicalObjectId, ObjectVersion> Versions,
         IReadOnlyDictionary<LogicalObjectId, byte[]> Plaintext,
         IReadOnlyDictionary<string, byte[]> Encrypted);
-    private sealed record StagedImport(LocalObject Incoming, string Path);
-    private sealed record ConflictFingerprint(LogicalObjectId Id, ObjectVersion? Local, ObjectVersion? Remote, ObjectVersion? Baseline);
+    private sealed record StagedImport(LocalObject Incoming, string Path, ExpectedHistoryState ExpectedState);
+    private sealed record PendingConflict(ConflictProvenance Provenance, byte[] LocalEncrypted, byte[] RemoteEncrypted);
 }

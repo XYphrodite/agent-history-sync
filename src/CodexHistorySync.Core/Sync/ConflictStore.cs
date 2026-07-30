@@ -7,11 +7,14 @@ using CodexHistorySync.Core.Model;
 
 namespace CodexHistorySync.Core.Sync;
 
-public sealed record ConflictProvenance(EnvelopeMetadata Metadata, ContentHash LocalHash, ContentHash RemoteHash, ContentHash BaselineHash, string LocalDeviceId, string RemoteDeviceId, DateTimeOffset LocalTimestampUtc, DateTimeOffset RemoteTimestampUtc);
+public sealed record ConflictProvenance(EnvelopeMetadata Metadata, ContentHash LocalHash, ContentHash RemoteHash, ContentHash BaselineHash,
+    string LocalDeviceId, string RemoteDeviceId, DateTimeOffset LocalTimestampUtc, DateTimeOffset RemoteTimestampUtc,
+    bool LocalDeleted = false, bool RemoteDeleted = false);
 public sealed record ConflictRecord(string Id, ConflictProvenance Provenance, string DirectoryPath, string LocalEncryptedPath, string RemoteEncryptedPath, string ManifestPath);
 public enum ConflictResolution { KeepLocal, KeepRemote, ExportBoth }
 public sealed record ConflictResolutionResult(string? SelectedEncryptedPath, string? LocalPlaintextPath, string? RemotePlaintextPath);
-internal sealed record ConflictManifest(int SchemaVersion, ConflictProvenance Provenance, ContentHash LocalEnvelopeHash, ContentHash RemoteEnvelopeHash);
+internal sealed record ConflictManifest(int SchemaVersion, ConflictProvenance Provenance, ContentHash LocalEnvelopeHash,
+    ContentHash RemoteEnvelopeHash, string? Fingerprint = null);
 internal interface IAtomicDirectoryPublisher { void Publish(string stagingPath, string destinationPath); }
 internal interface IConflictStoreHooks
 {
@@ -52,6 +55,8 @@ public sealed class ConflictStore
         ValidateProvenance(provenance);
         ArgumentNullException.ThrowIfNull(localEncrypted);
         ArgumentNullException.ThrowIfNull(remoteEncrypted);
+        var fingerprint = Fingerprint(provenance);
+        if (await FindByFingerprintAsync(fingerprint, ct).ConfigureAwait(false) is { } existing) return existing;
         var id = $"{DateTimeOffset.UtcNow:yyyyMMdd'T'HHmmssfffffff'Z'}-{Guid.NewGuid():N}";
         Directory.CreateDirectory(RootPath);
         var directory = Path.Combine(RootPath, id);
@@ -67,7 +72,8 @@ public sealed class ConflictStore
             _hooks.OnAfterFirstEnvelope();
             ct.ThrowIfCancellationRequested();
             await WriteDurableAsync(remotePath, remoteEncrypted, ct).ConfigureAwait(false);
-            var manifest = new ConflictManifest(1, provenance, await BackupStore.HashFileAsync(localPath, ct).ConfigureAwait(false), await BackupStore.HashFileAsync(remotePath, ct).ConfigureAwait(false));
+            var manifest = new ConflictManifest(1, provenance, await BackupStore.HashFileAsync(localPath, ct).ConfigureAwait(false),
+                await BackupStore.HashFileAsync(remotePath, ct).ConfigureAwait(false), fingerprint);
             await WriteDurableAsync(manifestPath, new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions), writable: false), ct).ConfigureAwait(false);
             ValidateConcretePaths(staging, localPath, remotePath, manifestPath, directory);
             _hooks.OnBeforePreservePublication();
@@ -158,6 +164,42 @@ public sealed class ConflictStore
         if (manifest.SchemaVersion != 1) throw new InvalidDataException("Conflict manifest schema is unsupported.");
         ValidateProvenance(manifest.Provenance);
         return new(id, manifest.Provenance, directory, localPath, remotePath, manifestPath);
+    }
+
+    private async Task<ConflictRecord?> FindByFingerprintAsync(string fingerprint, CancellationToken ct)
+    {
+        if (!Directory.Exists(RootPath)) return null;
+        foreach (var directory in Directory.EnumerateDirectories(RootPath)
+                     .Where(path => !Path.GetFileName(path).StartsWith(".", StringComparison.Ordinal))
+                     .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            var id = Path.GetFileName(directory);
+            var record = await LoadAsync(id, ct).ConfigureAwait(false);
+            await using var input = new FileStream(record.ManifestPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
+            var manifest = await JsonSerializer.DeserializeAsync<ConflictManifest>(input, JsonOptions, ct).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Conflict manifest is empty.");
+            if (StringComparer.Ordinal.Equals(manifest.Fingerprint ?? Fingerprint(manifest.Provenance), fingerprint)) return record;
+        }
+        return null;
+    }
+
+    private static string Fingerprint(ConflictProvenance provenance)
+    {
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = provenance.Metadata.SchemaVersion,
+            objectId = provenance.Metadata.ObjectId.Value,
+            kind = (int)provenance.Metadata.Kind,
+            localHash = provenance.LocalHash.Hex,
+            remoteHash = provenance.RemoteHash.Hex,
+            baselineHash = provenance.BaselineHash.Hex,
+            provenance.LocalDeviceId,
+            provenance.RemoteDeviceId,
+            provenance.LocalDeleted,
+            provenance.RemoteDeleted
+        }, JsonOptions);
+        return Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
     }
 
     private static void ValidateProvenance(ConflictProvenance value)

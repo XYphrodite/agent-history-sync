@@ -28,6 +28,47 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task IncompleteObservedSession_DoesNotPublishFalseTombstone()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("source-incomplete-local", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "possibly-live");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var target = CreateDevice("target-incomplete-local", key, provider);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await File.WriteAllTextAsync(Path.Combine(target.Paths.Sessions, "possibly-live.jsonl"), "{\"type\":\"session_meta\",\"payload\":{\"id\":\"possibly-live\"}}");
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        Assert.Equal(0, result.Uploaded);
+        Assert.Equal(1, provider.PublishCalls);
+        Assert.False(Assert.Single((await target.State.LoadAsync("repository", CancellationToken.None)).Objects).IsDeleted);
+    }
+
+    [Fact]
+    public async Task SessionAppearingAfterScan_DoesNotPublishTombstone()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("source-final-absence", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "reappearing");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var initialTarget = CreateDevice("target-final-absence", key, provider);
+        await initialTarget.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var targetPath = Path.Combine(initialTarget.Paths.Sessions, "reappearing.jsonl");
+        File.Delete(targetPath);
+        var hooked = new ReadHookProvider(provider, () => WriteSessionAsync(initialTarget.Paths.Sessions, "reappearing"));
+        var target = CreateDevice("target-final-absence", key, hooked);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        Assert.Equal(0, result.Uploaded);
+        Assert.Equal(1, provider.PublishCalls);
+        Assert.True(File.Exists(targetPath));
+    }
+
+    [Fact]
     public async Task RepositoryMutex_SerializesEnginesSharingLocalState()
     {
         var provider = new ConcurrencyProbeProvider();
@@ -40,6 +81,40 @@ public sealed class SyncFailureTests : IDisposable
             second.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
 
         Assert.Equal(1, provider.MaximumConcurrentReads);
+    }
+
+    [Fact]
+    public async Task RepositoryFileLock_WaitsForExclusiveHandleAndReleasesOnCancellation()
+    {
+        var provider = new MemoryProvider();
+        var device = CreateDevice("machine-lock", RandomNumberGenerator.GetBytes(32), provider);
+        var stateDirectory = Path.GetDirectoryName(device.State.GetStatePath("repository"))!;
+        Directory.CreateDirectory(stateDirectory);
+        var lockPath = Path.Combine(stateDirectory, ".sync.lock");
+        await using (var held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => device.Engine.SynchronizeAsync(SyncMode.Pull, cancellation.Token));
+            Assert.Equal(0, provider.ReadCalls);
+        }
+
+        await device.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(1, provider.ReadCalls);
+    }
+
+    [Fact]
+    public async Task RepositoryFileLock_ExistingUnlockedFileDoesNotBlock()
+    {
+        var provider = new MemoryProvider();
+        var device = CreateDevice("stale-machine-lock", RandomNumberGenerator.GetBytes(32), provider);
+        var stateDirectory = Path.GetDirectoryName(device.State.GetStatePath("repository"))!;
+        Directory.CreateDirectory(stateDirectory);
+        await File.WriteAllTextAsync(Path.Combine(stateDirectory, ".sync.lock"), "stale");
+
+        await device.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(1, provider.ReadCalls);
     }
 
     [Fact]
@@ -133,6 +208,33 @@ public sealed class SyncFailureTests : IDisposable
 
         Assert.Equal(original, await File.ReadAllTextAsync(targetPath));
         Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+    }
+
+    [Fact]
+    public async Task LocalEditAfterScan_IsPreservedAndDefersDownloadedBaseline()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("source-late-local-edit", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "late-local-edit");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var initialTarget = CreateDevice("target-late-local-edit", key, provider);
+        await initialTarget.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var targetPath = Path.Combine(initialTarget.Paths.Sessions, "late-local-edit.jsonl");
+        var baseline = await initialTarget.State.LoadAsync("repository", CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "late-local-edit.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote change\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var fileSystem = new MutatingPublishFileSystem(targetPath);
+        var target = CreateDevice("target-late-local-edit", key, provider, fileSystem: fileSystem);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(0, result.Downloaded);
+        Assert.Equal(1, result.Conflicts);
+        Assert.Contains("concurrent local edit", await File.ReadAllTextAsync(targetPath));
+        Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+        Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
     }
 
     [Fact]
@@ -248,6 +350,29 @@ public sealed class SyncFailureTests : IDisposable
         await File.AppendAllTextAsync(Path.Combine(target.Paths.Sessions, "shared-conflict-staging.jsonl"), "{\"type\":\"message\",\"payload\":{\"text\":\"local change\"}}\n");
 
         await Assert.ThrowsAsync<InvalidDataException>(() => target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Empty(await target.Conflicts.ListAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FivePublicationRaces_DoNotPublishPendingConflictEvidence()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("failed-cas-conflict-source", key, provider);
+        var target = CreateDevice("failed-cas-conflict-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "failed-cas-conflict");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "failed-cas-conflict.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(target.Paths.Sessions, "failed-cas-conflict.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local\"}}\n");
+        await WriteSessionAsync(target.Paths.Sessions, "forces-cas");
+        provider.RejectionsRemaining = 5;
+
+        await Assert.ThrowsAsync<SyncConcurrencyException>(() => target.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None));
 
         Assert.Empty(await target.Conflicts.ListAsync(CancellationToken.None));
     }
@@ -387,6 +512,11 @@ public sealed class SyncFailureTests : IDisposable
         Assert.True(result.RemoteChangedDuringAttempt);
         Assert.Equal(1, result.Conflicts);
         Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+
+        var repeated = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(1, repeated.Conflicts);
+        Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
     }
 
     [Fact]
@@ -411,6 +541,27 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task AuthenticatedRemoteRemoval_DeletesUnchangedLocalWithoutNullBaseline()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("remote-removal-unchanged-source", key, provider);
+        var target = CreateDevice("remote-removal-unchanged-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "removed-unchanged");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        await RemoveIndexEntryAsync(provider, key, "removed-unchanged");
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(1, result.Deleted);
+        Assert.Empty(await ScanAsync(target));
+        var baseline = Assert.Single((await target.State.LoadAsync("repository", CancellationToken.None)).Objects);
+        Assert.NotNull(baseline);
+        Assert.True(baseline.IsDeleted);
+    }
+
+    [Fact]
     public async Task ReservedRepositoryIndexId_IsRejectedAsLocalHistory()
     {
         var provider = new MemoryProvider();
@@ -423,20 +574,136 @@ public sealed class SyncFailureTests : IDisposable
         Assert.False(File.Exists(device.State.GetStatePath("repository")));
     }
 
-    private Device CreateDevice(string name, byte[] key, IStorageProvider provider, ICodexProcessDetector? detector = null, IAtomicFileSystem? fileSystem = null)
+    [Fact]
+    public async Task StateSaveFailure_RollsBackEveryAppliedLocalMutation()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("batch-rollback-source", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "batch-first");
+        await WriteSessionAsync(source.Paths.Sessions, "batch-second");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var initialTarget = CreateDevice("batch-rollback-target", key, provider);
+        await initialTarget.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var firstPath = Path.Combine(initialTarget.Paths.Sessions, "batch-first.jsonl");
+        var secondPath = Path.Combine(initialTarget.Paths.Sessions, "batch-second.jsonl");
+        var firstBefore = await File.ReadAllTextAsync(firstPath);
+        var secondBefore = await File.ReadAllTextAsync(secondPath);
+        var baseline = await initialTarget.State.LoadAsync("repository", CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "batch-first.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote first\"}}\n");
+        File.Delete(Path.Combine(source.Paths.Sessions, "batch-second.jsonl"));
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var target = CreateDevice("batch-rollback-target", key, provider, stateReplacer: new FailingStateFileReplacer());
+
+        await Assert.ThrowsAsync<IOException>(() => target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(firstBefore, await File.ReadAllTextAsync(firstPath));
+        Assert.Equal(secondBefore, await File.ReadAllTextAsync(secondPath));
+        Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+    }
+
+    [Fact]
+    public async Task Restart_RecoversInterruptedMutationBeforeReadingProvider()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var device = CreateDevice("restart-recovery", key, provider);
+        await WriteSessionAsync(device.Paths.Sessions, "restart-session");
+        var path = Path.Combine(device.Paths.Sessions, "restart-session.jsonl");
+        var before = await File.ReadAllTextAsync(path);
+        var beforeHash = await BackupStore.HashFileAsync(path, CancellationToken.None);
+        var changed = before + "{\"type\":\"message\",\"payload\":{\"text\":\"interrupted\"}}\n";
+        var afterHash = new ContentHash(Hash(Encoding.UTF8.GetBytes(changed)));
+        var local = Assert.Single(await ScanAsync(device));
+        var operationDirectory = Path.Combine(device.StagingRoot, "interrupted-operation");
+        Directory.CreateDirectory(operationDirectory);
+        var interrupted = await HistoryMutationBatch.PrepareAsync(device.Writer, operationDirectory, "interrupted-operation",
+            [new HistoryMutationPlan(local, ExpectedHistoryState.Present(beforeHash), ExpectedHistoryState.Present(afterHash))],
+            CancellationToken.None);
+        await interrupted.BeginApplyAsync(local.Id, CancellationToken.None);
+        await File.WriteAllTextAsync(path, changed, new UTF8Encoding(false));
+        var restarted = CreateDevice("restart-recovery", key, new OfflineProvider());
+
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(path));
+        Assert.False(Directory.Exists(operationDirectory));
+    }
+
+    [Fact]
+    public async Task Restart_DoesNotRollbackMutationWhoseBaselineWasAlreadySaved()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var device = CreateDevice("restart-committed", key, new MemoryProvider());
+        await WriteSessionAsync(device.Paths.Sessions, "committed-session");
+        var path = Path.Combine(device.Paths.Sessions, "committed-session.jsonl");
+        var beforeHash = await BackupStore.HashFileAsync(path, CancellationToken.None);
+        var changed = await File.ReadAllTextAsync(path) + "{\"type\":\"message\",\"payload\":{\"text\":\"committed\"}}\n";
+        var afterHash = new ContentHash(Hash(Encoding.UTF8.GetBytes(changed)));
+        var local = Assert.Single(await ScanAsync(device));
+        var operationDirectory = Path.Combine(device.StagingRoot, "committed-operation");
+        Directory.CreateDirectory(operationDirectory);
+        var batch = await HistoryMutationBatch.PrepareAsync(device.Writer, operationDirectory, "committed-operation",
+            [new HistoryMutationPlan(local, ExpectedHistoryState.Present(beforeHash), ExpectedHistoryState.Present(afterHash))],
+            CancellationToken.None);
+        await batch.BeginApplyAsync(local.Id, CancellationToken.None);
+        await File.WriteAllTextAsync(path, changed, new UTF8Encoding(false));
+        await batch.MarkAppliedAsync(local.Id, CancellationToken.None);
+        await device.State.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, "repository",
+            [new ObjectVersion(local.Id, local.Kind, afterHash, "committed-version", false)]), CancellationToken.None);
+        var restarted = CreateDevice("restart-committed", key, new OfflineProvider());
+
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(changed, await File.ReadAllTextAsync(path));
+        Assert.False(Directory.Exists(operationDirectory));
+    }
+
+    [Fact]
+    public async Task Restart_RejectsInvalidMutationStatusWithoutDiscardingRecoveryEvidence()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var device = CreateDevice("restart-invalid-marker", key, new MemoryProvider());
+        await WriteSessionAsync(device.Paths.Sessions, "invalid-marker-session");
+        var path = Path.Combine(device.Paths.Sessions, "invalid-marker-session.jsonl");
+        var beforeHash = await BackupStore.HashFileAsync(path, CancellationToken.None);
+        var changed = await File.ReadAllTextAsync(path) + "{\"type\":\"message\",\"payload\":{\"text\":\"uncertain\"}}\n";
+        var afterHash = new ContentHash(Hash(Encoding.UTF8.GetBytes(changed)));
+        var local = Assert.Single(await ScanAsync(device));
+        var operationDirectory = Path.Combine(device.StagingRoot, "invalid-marker-operation");
+        Directory.CreateDirectory(operationDirectory);
+        var batch = await HistoryMutationBatch.PrepareAsync(device.Writer, operationDirectory, "invalid-marker-operation",
+            [new HistoryMutationPlan(local, ExpectedHistoryState.Present(beforeHash), ExpectedHistoryState.Present(afterHash))],
+            CancellationToken.None);
+        await batch.BeginApplyAsync(local.Id, CancellationToken.None);
+        await File.WriteAllTextAsync(path, changed, new UTF8Encoding(false));
+        var markerPath = Path.Combine(operationDirectory, HistoryMutationBatch.MarkerFileName);
+        var marker = await File.ReadAllTextAsync(markerPath);
+        await File.WriteAllTextAsync(markerPath, marker.Replace("\"status\":1", "\"status\":99", StringComparison.Ordinal));
+        var restarted = CreateDevice("restart-invalid-marker", key, new OfflineProvider());
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(changed, await File.ReadAllTextAsync(path));
+        Assert.True(File.Exists(markerPath));
+    }
+
+    private Device CreateDevice(string name, byte[] key, IStorageProvider provider, ICodexProcessDetector? detector = null,
+        IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
         var paths = CodexPaths.Resolve(home);
         Directory.CreateDirectory(paths.Sessions);
         var local = Path.Combine(_root, name, "local");
-        var state = new LocalStateStore(local);
+        var state = stateReplacer is null ? new LocalStateStore(local) : new LocalStateStore(local, stateReplacer);
         var backups = new BackupStore("repository", local, paths, fileSystem);
         var writer = new CodexHistoryWriter(paths, backups, detector ?? new StoppedDetector(), fileSystem);
         var conflicts = new ConflictStore("repository", local, paths);
         var engine = new SyncEngine("repository", name, paths, key, new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
             writer, conflicts, provider, Path.Combine(local, "staging"));
-        return new(paths, state, conflicts, engine);
+        return new(paths, state, conflicts, writer, Path.Combine(local, "staging"), engine);
     }
 
     private static async Task WriteSessionAsync(string directory, string id)
@@ -574,7 +841,13 @@ public sealed class SyncFailureTests : IDisposable
 
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
 
-    private sealed record Device(CodexPaths Paths, LocalStateStore State, ConflictStore Conflicts, SyncEngine Engine);
+    private sealed record Device(CodexPaths Paths, LocalStateStore State, ConflictStore Conflicts, CodexHistoryWriter Writer,
+        string StagingRoot, SyncEngine Engine);
+
+    private sealed class FailingStateFileReplacer : IStateFileReplacer
+    {
+        public void Replace(string sourcePath, string destinationPath) => throw new IOException("state save failed");
+    }
     private sealed class StoppedDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;
@@ -590,6 +863,19 @@ public sealed class SyncFailureTests : IDisposable
     {
         public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct) => throw new IOException("offline");
         public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct) => throw new IOException("offline");
+    }
+
+    private sealed class ReadHookProvider(IStorageProvider inner, Func<Task> hook) : IStorageProvider
+    {
+        private int _invoked;
+        public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
+        {
+            var snapshot = await inner.ReadSnapshotAsync(ct);
+            if (Interlocked.Exchange(ref _invoked, 1) == 0) await hook();
+            return snapshot;
+        }
+
+        public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct) => inner.TryPublishAsync(request, ct);
     }
 
     private sealed class ConcurrencyProbeProvider : IStorageProvider
@@ -626,10 +912,15 @@ public sealed class SyncFailureTests : IDisposable
         private int _revision;
         public int RejectionsRemaining { get; set; }
         public int PublishCalls { get; private set; }
+        public int ReadCalls { get; private set; }
         public byte[] Index => _index!.ToArray();
         public LogicalObjectId SingleObjectId => _objects.Keys.Single();
-        public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct) => Task.FromResult(new RemoteSnapshot(
-            _revision == 0 ? string.Empty : _revision.ToString(), _index?.ToArray(), _objects.Select(pair => new EncryptedRemoteObject(pair.Key, pair.Value.ToArray())).ToArray()));
+        public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
+        {
+            ReadCalls++;
+            return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(), _index?.ToArray(),
+                _objects.Select(pair => new EncryptedRemoteObject(pair.Key, pair.Value.ToArray())).ToArray()));
+        }
         public async Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct)
         {
             PublishCalls++;
@@ -678,5 +969,25 @@ public sealed class SyncFailureTests : IDisposable
             await File.AppendAllTextAsync(path, "{\"type\":\"message\",\"payload\":{\"text\":\"concurrent local change\"}}\n", ct);
             return await _inner.DeleteIfUnchangedAsync(path, expectedHash, mutationAllowed, ct);
         }
+    }
+
+    private sealed class MutatingPublishFileSystem(string destination) : IAtomicFileSystem
+    {
+        private readonly AtomicFileSystem _inner = new();
+        private int _mutated;
+        public Task WriteTemporaryAsync(string path, Stream content, CancellationToken ct) => _inner.WriteTemporaryAsync(path, content, ct);
+        public Task ReplaceAsync(string temporaryPath, string destinationPath, CancellationToken ct) => _inner.ReplaceAsync(temporaryPath, destinationPath, ct);
+        public async Task PublishAsync(string temporaryPath, string destinationPath, ContentHash expectedSourceHash,
+            ContentHash? expectedDestinationHash, Func<bool>? mutationAllowed, CancellationToken ct)
+        {
+            if (StringComparer.OrdinalIgnoreCase.Equals(destination, destinationPath) && Interlocked.Exchange(ref _mutated, 1) == 0)
+                await File.AppendAllTextAsync(destinationPath, "{\"type\":\"message\",\"payload\":{\"text\":\"concurrent local edit\"}}\n", ct);
+            await _inner.PublishAsync(temporaryPath, destinationPath, expectedSourceHash, expectedDestinationHash, mutationAllowed, ct);
+        }
+        public Task<bool> ReplaceIfUnchangedAsync(string temporaryPath, string destinationPath, ContentHash expectedDestinationHash,
+            Func<bool>? mutationAllowed, CancellationToken ct) => _inner.ReplaceIfUnchangedAsync(temporaryPath, destinationPath, expectedDestinationHash, mutationAllowed, ct);
+        public Task DeleteAsync(string path, CancellationToken ct) => _inner.DeleteAsync(path, ct);
+        public Task<bool> DeleteIfUnchangedAsync(string path, ContentHash expectedHash, Func<bool>? mutationAllowed, CancellationToken ct) =>
+            _inner.DeleteIfUnchangedAsync(path, expectedHash, mutationAllowed, ct);
     }
 }
