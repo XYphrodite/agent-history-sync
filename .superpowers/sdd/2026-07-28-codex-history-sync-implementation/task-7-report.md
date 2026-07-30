@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and review-round-2 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
+Implementation and review-round-3 fixes are complete and verified. Independent re-review is still required; no independent approval is claimed.
 
 ## Commits
 
@@ -37,6 +37,25 @@ The recovered implementation already provided the public API, a CHS1-encrypted r
 The final engine stages and validates every permitted download first, then preserves planned conflicts, stages uploads, resolves CAS publication, applies guarded Codex mutations, and saves baseline state only after the complete successful attempt. Rejected CAS attempts perform no live-history mutation. Conflict fingerprints prevent duplicate evidence for an unchanged conflict while retaining changed conflict versions.
 
 ## Test evidence
+
+### Review round 3: strict startup cleanup versus non-failing committed cleanup
+
+The two related Important findings were addressed in commit `ebe8c87` (`fix: enforce strict recovery cleanup`). Startup recovery and post-commit cleanup now have deliberately different contracts:
+
+- Startup recovery runs under the repository lock and treats operation cleanup as strict. Expected I/O, access, or path-safety denial is surfaced as `IOException`; a cleaner that returns without removing the directory is also rejected. Absence is confirmed with `File.GetAttributes`, avoiding the ambiguous false returned by `Directory.Exists` on access denial. Provider reads cannot start while a recovered operation directory may remain.
+- Cleanup after successful atomic state replacement is best-effort and cannot convert the committed synchronization into a false failure for expected filesystem, access, reparse/path-safety, or cleaner-contract exceptions. The operation marker and sibling cleanup evidence remain for strict recovery on the next run.
+
+TDD evidence:
+
+- `StartupCleanupDenial_AbortsBeforeProviderReadAndPreservesEvidence` failed because cleanup denial was swallowed and provider access continued.
+- `PostCommitSafetyRejection_DoesNotTurnCommittedSyncIntoFailure` failed because `ArgumentException` escaped after the baseline was committed.
+- After separating strict and best-effort cleanup, the exact new test pair passed 2/2.
+
+Final round-3 verification:
+
+- Focused Task 7: 53 passed, 0 failed, 0 skipped.
+- Full solution: 185 passed, 0 failed, 0 skipped — Core 101, Integration 64, Git 14, Windows 6.
+- Solution build: 0 warnings and 0 errors.
 
 ### Review round 2: authenticated emptiness, tombstone preconditions, and committed cleanup
 
@@ -174,3 +193,4 @@ The final requirement-by-requirement self-review found and corrected the remote-
 - Task 2 intentionally deferred attachment discovery because no safe documented typed attachment field was available. The Task 7 engine therefore synchronizes the active and archived session objects returned by the current scanner; authenticated attachment entries are not installed as Codex history.
 - Automatic recovery refuses to overwrite a file whose current hash matches neither the journaled before-state nor after-state. The marker and backups remain for explicit recovery rather than risking loss of a concurrent user edit.
 - If filesystem permissions permanently prevent committed staging cleanup, encrypted/plaintext operation artifacts remain local with durable cleanup evidence and cleanup is retried on every synchronization; the successful baseline is not rolled back or falsely reported as failed.
+- Strict startup cleanup intentionally blocks all provider access until those retained operation artifacts are confirmed removed or an operator restores sufficient local filesystem access.
