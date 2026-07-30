@@ -2,6 +2,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodexHistorySync.Core\CodexHistorySync.Core.csproj" />
+    <ProjectReference Include="..\CodexHistorySync.Git\CodexHistorySync.Git.csproj" />
+    <ProjectReference Include="..\CodexHistorySync.Windows\CodexHistorySync.Windows.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

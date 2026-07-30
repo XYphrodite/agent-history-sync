@@ -1,0 +1,235 @@
+using System.Security.Cryptography;
+using CodexHistorySync.Core.Sync;
+
+namespace CodexHistorySync.Cli;
+
+public sealed record CliGateResult(bool Passed, string Name);
+public sealed record CliInitializationResult(string RepositoryId);
+public sealed record CliAuthenticatedRepository(string RepositoryId, string RemoteRevision);
+public sealed record CliJoinPlan(int Local, int Remote, int Pending, int Conflicts);
+public sealed record CliStatusReport(int Local, int Remote, int Pending, int Conflicts, string LastSuccessfulRevision);
+public sealed record CliDoctorCheck(string Name, bool Passed);
+public sealed record CliDoctorReport(IReadOnlyList<CliDoctorCheck> Checks);
+public sealed record CliConflictInfo(string Id, string LocalHash, string RemoteHash, string LocalDeviceId,
+    string RemoteDeviceId, DateTimeOffset LocalTimestampUtc, DateTimeOffset RemoteTimestampUtc);
+
+public enum CliResolution { KeepLocal, KeepRemote, ExportBoth }
+
+public sealed class CliGateException : Exception
+{
+    public CliGateException(string message) : base(message) { }
+    public CliGateException(string message, Exception innerException) : base(message, innerException) { }
+}
+
+public interface ICliConsole
+{
+    void WriteLine(string value);
+    void WriteError(string value);
+    Task<char[]> ReadSecretAsync(string prompt, CancellationToken cancellationToken);
+}
+
+public interface ICliServices
+{
+    Task<CliGateResult> VerifyPrivateRepositoryAsync(string remoteUrl, CancellationToken cancellationToken);
+    Task<CliInitializationResult> InitializeAsync(string remoteUrl, ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken);
+    Task<CliAuthenticatedRepository> AuthenticateRepositoryAsync(string remoteUrl, ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken);
+    Task<CliGateResult> ProbeCompatibilityAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken);
+    Task<CliJoinPlan> PlanJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken);
+    Task ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken);
+    Task<SyncResult> SynchronizeAsync(SyncMode mode, CancellationToken cancellationToken);
+    Task<CliStatusReport> GetStatusAsync(CancellationToken cancellationToken);
+    Task<CliDoctorReport> RunDoctorAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<CliConflictInfo>> ListConflictsAsync(CancellationToken cancellationToken);
+    Task ResolveAsync(string conflictId, CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken);
+}
+
+public sealed class CliApplication
+{
+    private readonly ICliServices services;
+    private readonly ICliConsole console;
+
+    public CliApplication(ICliServices services, ICliConsole console)
+    {
+        this.services = services ?? throw new ArgumentNullException(nameof(services));
+        this.console = console ?? throw new ArgumentNullException(nameof(console));
+    }
+
+    public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        try
+        {
+            return args.Length == 0 ? Usage() : args[0] switch
+            {
+                "init" => await RunInitAsync(args, cancellationToken).ConfigureAwait(false),
+                "join" => await RunJoinAsync(args, cancellationToken).ConfigureAwait(false),
+                "sync" when args.Length == 1 => await RunSyncAsync(SyncMode.Bidirectional, cancellationToken).ConfigureAwait(false),
+                "pull" when args.Length == 1 => await RunSyncAsync(SyncMode.Pull, cancellationToken).ConfigureAwait(false),
+                "push" when args.Length == 1 => await RunSyncAsync(SyncMode.Push, cancellationToken).ConfigureAwait(false),
+                "status" when args.Length == 1 => await RunStatusAsync(cancellationToken).ConfigureAwait(false),
+                "doctor" when args.Length == 1 => await RunDoctorAsync(cancellationToken).ConfigureAwait(false),
+                "conflicts" when args.Length == 1 => await RunConflictsAsync(cancellationToken).ConfigureAwait(false),
+                "resolve" => await RunResolveAsync(args, cancellationToken).ConfigureAwait(false),
+                _ => Usage()
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (CliGateException)
+        {
+            console.WriteError("Security or compatibility gate failed.");
+            return 3;
+        }
+        catch (Exception)
+        {
+            console.WriteError("Operation failed.");
+            return 1;
+        }
+    }
+
+    private async Task<int> RunInitAsync(string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1])) return Usage();
+        var gate = await services.VerifyPrivateRepositoryAsync(args[1], cancellationToken).ConfigureAwait(false);
+        if (!gate.Passed) return GateFailure(gate.Name);
+
+        char[]? first = null;
+        char[]? confirmation = null;
+        try
+        {
+            first = await console.ReadSecretAsync("Passphrase: ", cancellationToken).ConfigureAwait(false);
+            confirmation = await console.ReadSecretAsync("Confirm passphrase: ", cancellationToken).ConfigureAwait(false);
+            if (first.Length == 0 || !FixedTimeEquals(first, confirmation))
+            {
+                console.WriteError("Passphrases must be non-empty and match.");
+                return 2;
+            }
+            var result = await services.InitializeAsync(args[1], first, cancellationToken).ConfigureAwait(false);
+            console.WriteLine($"Initialized repository {SafeToken(result.RepositoryId)}.");
+            return 0;
+        }
+        finally
+        {
+            if (first is not null) CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsBytes(first.AsSpan()));
+            if (confirmation is not null) CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsBytes(confirmation.AsSpan()));
+        }
+    }
+
+    private async Task<int> RunJoinAsync(string[] args, CancellationToken cancellationToken)
+    {
+        var apply = args.Length == 3 && args[2] == "--apply";
+        if ((args.Length != 2 && !apply) || string.IsNullOrWhiteSpace(args[1])) return Usage();
+        var gate = await services.VerifyPrivateRepositoryAsync(args[1], cancellationToken).ConfigureAwait(false);
+        if (!gate.Passed) return GateFailure(gate.Name);
+
+        char[]? passphrase = null;
+        try
+        {
+            passphrase = await console.ReadSecretAsync("Passphrase: ", cancellationToken).ConfigureAwait(false);
+            if (passphrase.Length == 0) return Usage();
+            var repository = await services.AuthenticateRepositoryAsync(args[1], passphrase, cancellationToken).ConfigureAwait(false);
+            var compatibility = await services.ProbeCompatibilityAsync(repository, cancellationToken).ConfigureAwait(false);
+            if (!compatibility.Passed) return GateFailure(compatibility.Name);
+            var plan = await services.PlanJoinAsync(repository, cancellationToken).ConfigureAwait(false);
+            console.WriteLine($"Join plan: local={plan.Local} remote={plan.Remote} pending={plan.Pending} conflicts={plan.Conflicts}.");
+            if (!apply)
+            {
+                console.WriteLine("Dry run only; repeat with --apply to perform the first import.");
+                return plan.Conflicts == 0 ? 0 : 4;
+            }
+            await services.ApplyJoinAsync(repository, plan, cancellationToken).ConfigureAwait(false);
+            console.WriteLine("Join applied.");
+            return plan.Conflicts == 0 ? 0 : 4;
+        }
+        finally
+        {
+            if (passphrase is not null) CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsBytes(passphrase.AsSpan()));
+        }
+    }
+
+    private async Task<int> RunSyncAsync(SyncMode mode, CancellationToken cancellationToken)
+    {
+        var result = await services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
+        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts}");
+        return result.Conflicts == 0 ? 0 : 4;
+    }
+
+    private async Task<int> RunStatusAsync(CancellationToken cancellationToken)
+    {
+        var result = await services.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        console.WriteLine($"local={result.Local} remote={result.Remote} pending={result.Pending} conflicts={result.Conflicts} last-revision={SafeToken(result.LastSuccessfulRevision)}");
+        return result.Conflicts == 0 ? 0 : 4;
+    }
+
+    private async Task<int> RunDoctorAsync(CancellationToken cancellationToken)
+    {
+        var report = await services.RunDoctorAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var check in report.Checks)
+            console.WriteLine($"{SafeToken(check.Name)}: {(check.Passed ? "PASS" : "FAIL")}");
+        return report.Checks.All(check => check.Passed) ? 0 : 3;
+    }
+
+    private async Task<int> RunConflictsAsync(CancellationToken cancellationToken)
+    {
+        var conflicts = await services.ListConflictsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var conflict in conflicts)
+        {
+            console.WriteLine($"id={SafeToken(conflict.Id)} local-hash={SafeToken(conflict.LocalHash)} remote-hash={SafeToken(conflict.RemoteHash)} " +
+                $"local-device={SafeToken(conflict.LocalDeviceId)} remote-device={SafeToken(conflict.RemoteDeviceId)} " +
+                $"local-time={conflict.LocalTimestampUtc:O} remote-time={conflict.RemoteTimestampUtc:O}");
+        }
+        return conflicts.Count == 0 ? 0 : 4;
+    }
+
+    private async Task<int> RunResolveAsync(string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length < 3 || string.IsNullOrWhiteSpace(args[1])) return Usage();
+        CliResolution resolution;
+        string? exportDirectory = null;
+        if (args.Length == 3 && args[2] == "--keep-local") resolution = CliResolution.KeepLocal;
+        else if (args.Length == 3 && args[2] == "--keep-remote") resolution = CliResolution.KeepRemote;
+        else if (args.Length == 4 && args[2] == "--export-both" && !string.IsNullOrWhiteSpace(args[3]))
+        {
+            resolution = CliResolution.ExportBoth;
+            exportDirectory = args[3];
+        }
+        else return Usage();
+
+        await services.ResolveAsync(args[1], resolution, exportDirectory, cancellationToken).ConfigureAwait(false);
+        console.WriteLine($"Resolved conflict {SafeToken(args[1])}.");
+        return 0;
+    }
+
+    private int Usage()
+    {
+        console.WriteError("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve> [options]");
+        return 2;
+    }
+
+    private int GateFailure(string name)
+    {
+        console.WriteError($"Gate failed: {SafeToken(name)}.");
+        return 3;
+    }
+
+    private static bool FixedTimeEquals(ReadOnlySpan<char> left, ReadOnlySpan<char> right)
+    {
+        var difference = left.Length ^ right.Length;
+        var length = Math.Max(left.Length, right.Length);
+        for (var index = 0; index < length; index++)
+        {
+            var leftValue = index < left.Length ? left[index] : '\0';
+            var rightValue = index < right.Length ? right[index] : '\0';
+            difference |= leftValue ^ rightValue;
+        }
+        return difference == 0;
+    }
+
+    private static string SafeToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "unknown";
+        return new string(value.Select(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':' ? character : '_').ToArray());
+    }
+}
