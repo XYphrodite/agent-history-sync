@@ -2,7 +2,12 @@ using System.Security.Cryptography;
 using CodexHistorySync.Cli;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.IO;
+using CodexHistorySync.Core.Model;
+using CodexHistorySync.Core.Providers;
+using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
+using System.Reflection;
 
 namespace CodexHistorySync.IntegrationTests;
 
@@ -203,6 +208,84 @@ public sealed class CliServiceTests
     }
 
     [Fact]
+    public async Task Real_runtime_disposes_temporary_engine_and_zeroes_only_its_key_copy()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "codex-history-runtime-disposal-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var callerKey = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        SyncEngine? created = null;
+        try
+        {
+            var runtime = new CoreCliSyncRuntime(root, new FakeGateway([]), new RecordingProcessDetector(),
+                (_, _) => Task.FromResult(new CompatibilityResult(true, "test", "compatible")),
+                (configuration, key) => created = CreateEngine(root, configuration, key));
+            var configuration = new CliLocalConfiguration(1, "repository-123", "device-123", Remote, "old-revision");
+
+            await runtime.SynchronizeAsync(configuration, callerKey, SyncMode.Pull, CancellationToken.None);
+
+            Assert.NotNull(created);
+            var engineKey = Assert.IsType<byte[]>(typeof(SyncEngine)
+                .GetField("_masterKey", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(created));
+            Assert.All(engineKey, value => Assert.Equal(0, value));
+            Assert.Contains(callerKey, value => value != 0);
+            await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+                created.PreviewAsync(SyncMode.Pull, CancellationToken.None));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            CryptographicOperations.ZeroMemory(callerKey);
+        }
+    }
+
+    [Fact]
+    public async Task Status_counts_exact_union_of_persisted_and_planned_conflict_identities()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "codex-history-status-union-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var provider = new TestMemoryProvider();
+        var configuration = new CliLocalConfiguration(1, "repository-123", "target-device", Remote, "last-0");
+        try
+        {
+            var sourceRoot = Path.Combine(root, "source");
+            var sourceConfiguration = configuration with { DeviceId = "source-device" };
+            await WriteSessionAsync(Path.Combine(sourceRoot, "codex", "sessions"), "planned-b", "remote");
+            await using (var source = CreateEngine(sourceRoot, sourceConfiguration, key, provider))
+                await source.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+            await WriteSessionAsync(Path.Combine(root, "codex", "sessions"), "planned-b", "local");
+            var targetPaths = CodexPaths.Resolve(Path.Combine(root, "codex"));
+            var conflictStore = new ConflictStore(configuration.RepositoryId, root, targetPaths);
+            var crypto = new RepositoryCrypto();
+            var metadata = new EnvelopeMetadata(1, new LogicalObjectId("persisted-a"), ObjectKind.ActiveSession);
+            var localBytes = System.Text.Encoding.UTF8.GetBytes("{\"type\":\"session_meta\",\"payload\":{\"id\":\"persisted-a\"}}\n");
+            await using var encryptedLocal = new MemoryStream();
+            await using var encryptedRemote = new MemoryStream();
+            await crypto.EncryptAsync(new MemoryStream(localBytes), encryptedLocal, key, metadata, CancellationToken.None);
+            await crypto.EncryptAsync(new MemoryStream(localBytes), encryptedRemote, key, metadata, CancellationToken.None);
+            await conflictStore.PreserveAsync(new ConflictProvenance(metadata, new ContentHash("local-a"),
+                    new ContentHash("remote-a"), new ContentHash("baseline-a"), "target-device", "source-device",
+                    DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                new MemoryStream(encryptedLocal.ToArray()), new MemoryStream(encryptedRemote.ToArray()),
+                CancellationToken.None);
+            var runtime = new CoreCliSyncRuntime(root, new FakeGateway([]), new RecordingProcessDetector(),
+                (_, _) => Task.FromResult(new CompatibilityResult(true, "test", "compatible")),
+                (current, currentKey) => CreateEngine(root, current, currentKey, provider));
+
+            var status = await runtime.GetStatusAsync(configuration, key, CancellationToken.None);
+
+            Assert.Equal(2, status.Conflicts);
+            Assert.Equal("1", status.RemoteRevision);
+            Assert.Equal("last-0", status.LastSuccessfulRevision);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            CryptographicOperations.ZeroMemory(key);
+        }
+    }
+
+    [Fact]
     public async Task Successful_manual_sync_updates_the_last_successful_revision()
     {
         var log = new List<string>();
@@ -319,7 +402,8 @@ public sealed class CliServiceTests
         }
 
         public Task<CliStatusReport> GetStatusAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
-            CancellationToken cancellationToken) => Task.FromResult(new CliStatusReport(0, 0, 0, 0, "revision-1"));
+            CancellationToken cancellationToken) => Task.FromResult(new CliStatusReport(0, 0, 0, 0,
+                "revision-1", configuration.LastSuccessfulRevision));
 
         public Task<CliDoctorReport> RunDoctorAsync(CliLocalConfiguration? configuration, ReadOnlyMemory<byte> key,
             CancellationToken cancellationToken) => Task.FromResult(new CliDoctorReport([]));
@@ -337,5 +421,63 @@ public sealed class CliServiceTests
         public bool WasChecked { get; private set; }
         public bool IsRunning() { WasChecked = true; return false; }
         public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private static SyncEngine CreateEngine(string root, CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
+        IStorageProvider? provider = null)
+    {
+        var home = Path.Combine(root, "codex");
+        Directory.CreateDirectory(home);
+        var paths = CodexPaths.Resolve(home);
+        Directory.CreateDirectory(paths.Sessions);
+        var state = new LocalStateStore(root);
+        var backups = new BackupStore(configuration.RepositoryId, root, paths);
+        var conflicts = new ConflictStore(configuration.RepositoryId, root, paths);
+        var writer = new CodexHistoryWriter(paths, backups, new RecordingProcessDetector());
+        return new SyncEngine(configuration.RepositoryId, configuration.DeviceId, paths, key,
+            new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state, writer, conflicts,
+            provider ?? new EmptyProvider(), Path.Combine(root, "staging"));
+    }
+
+    private static async Task WriteSessionAsync(string directory, string id, string side)
+    {
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, id + ".jsonl"),
+            $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n" +
+            $"{{\"type\":\"message\",\"payload\":{{\"text\":\"{side}\"}}}}\n");
+    }
+
+    private sealed class EmptyProvider : IStorageProvider
+    {
+        public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new RemoteSnapshot(string.Empty, null, []));
+        public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("No publication expected.");
+    }
+
+    private sealed class TestMemoryProvider : IStorageProvider
+    {
+        private readonly Dictionary<LogicalObjectId, byte[]> objects = [];
+        private byte[]? index;
+        private int revision;
+
+        public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken) => Task.FromResult(
+            new RemoteSnapshot(revision == 0 ? string.Empty : revision.ToString(), index?.ToArray(),
+                objects.Select(pair => new EncryptedRemoteObject(pair.Key, pair.Value.ToArray())).ToArray()));
+
+        public async Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken cancellationToken)
+        {
+            var expected = revision == 0 ? string.Empty : revision.ToString();
+            if (!StringComparer.Ordinal.Equals(expected, request.ExpectedRevision)) return new(false, expected);
+            if (request.Index is { Delete: false } changedIndex)
+                index = await File.ReadAllBytesAsync(changedIndex.CiphertextPath, cancellationToken);
+            foreach (var change in request.Changes)
+            {
+                if (change.Delete) objects.Remove(change.ObjectId);
+                else objects[change.ObjectId] = await File.ReadAllBytesAsync(change.CiphertextPath, cancellationToken);
+            }
+            revision++;
+            return new(true, revision.ToString());
+        }
     }
 }

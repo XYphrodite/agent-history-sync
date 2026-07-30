@@ -7,7 +7,8 @@ public sealed record CliGateResult(bool Passed, string Name);
 public sealed record CliInitializationResult(string RepositoryId);
 public sealed record CliAuthenticatedRepository(string RepositoryId, string RemoteRevision);
 public sealed record CliJoinPlan(int Local, int Remote, int Pending, int Conflicts);
-public sealed record CliStatusReport(int Local, int Remote, int Pending, int Conflicts, string RemoteRevision);
+public sealed record CliStatusReport(int Local, int Remote, int Pending, int Conflicts, string RemoteRevision,
+    string LastSuccessfulRevision);
 public sealed record CliDoctorCheck(string Name, bool Passed);
 public sealed record CliDoctorReport(IReadOnlyList<CliDoctorCheck> Checks);
 public sealed record CliConflictInfo(string Id, string LocalHash, string RemoteHash, string LocalDeviceId,
@@ -164,7 +165,8 @@ public sealed class CliApplication
     private async Task<int> RunStatusAsync(CancellationToken cancellationToken)
     {
         var result = await services.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-        console.WriteLine($"local={result.Local} remote={result.Remote} pending={result.Pending} conflicts={result.Conflicts} remote-revision={SafeToken(result.RemoteRevision)}");
+        console.WriteLine($"local={result.Local} remote={result.Remote} pending={result.Pending} conflicts={result.Conflicts} " +
+            $"remote-revision={SafeToken(result.RemoteRevision)} last-successful-revision={SafeToken(result.LastSuccessfulRevision)}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

@@ -253,20 +253,29 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly ICliRepositoryGateway gateway;
     private readonly ICodexProcessDetector processDetector;
     private readonly Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe;
+    private readonly Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
         : this(localAppData, gateway, processDetector,
-            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken))
+            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken), null)
     {
     }
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
         Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe)
+        : this(localAppData, gateway, processDetector, compatibilityProbe, null)
+    {
+    }
+
+    public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
+        Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe,
+        Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         this.processDetector = processDetector ?? throw new ArgumentNullException(nameof(processDetector));
         this.compatibilityProbe = compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe));
+        this.engineFactory = engineFactory;
     }
 
     public async Task<CliGateResult> ProbeCompatibilityAsync(CancellationToken cancellationToken)
@@ -297,22 +306,29 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     public async Task<CliJoinPlan> PreviewJoinAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
         CliRemoteSetup setup, CancellationToken cancellationToken)
     {
-        var preview = await Build(configuration, key, pinnedRevision: setup.Revision).Engine
-            .PreviewAsync(SyncMode.Pull, cancellationToken).ConfigureAwait(false);
+        await using var components = Build(configuration, key, pinnedRevision: setup.Revision);
+        var preview = await components.Engine!.PreviewAsync(SyncMode.Pull, cancellationToken).ConfigureAwait(false);
         return new CliJoinPlan(preview.LocalObjects, preview.RemoteObjects, preview.PendingChanges, preview.Conflicts);
     }
 
-    public Task<SyncResult> SynchronizeAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
-        SyncMode mode, CancellationToken cancellationToken) => Build(configuration, key).Engine.SynchronizeAsync(mode, cancellationToken);
+    public async Task<SyncResult> SynchronizeAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
+        SyncMode mode, CancellationToken cancellationToken)
+    {
+        await using var components = Build(configuration, key);
+        return await components.Engine!.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<CliStatusReport> GetStatusAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
         CancellationToken cancellationToken)
     {
-        var components = Build(configuration, key);
-        var preview = await components.Engine.PreviewAsync(SyncMode.Bidirectional, cancellationToken).ConfigureAwait(false);
-        var conflictCount = (await components.Conflicts.ListAsync(cancellationToken).ConfigureAwait(false)).Count;
+        await using var components = Build(configuration, key);
+        var preview = await components.Engine!.PreviewAsync(SyncMode.Bidirectional, cancellationToken).ConfigureAwait(false);
+        var conflictIdentities = preview.ConflictIdentities.ToHashSet(StringComparer.Ordinal);
+        foreach (var conflict in await components.Conflicts.ListAsync(cancellationToken).ConfigureAwait(false))
+            conflictIdentities.Add(ConflictStore.GetIdentity(conflict.Provenance));
         return new CliStatusReport(preview.LocalObjects, preview.RemoteObjects, preview.PendingChanges,
-            Math.Max(preview.Conflicts, conflictCount), preview.RemoteRevision);
+            conflictIdentities.Count, preview.RemoteRevision,
+            configuration.LastSuccessfulRevision);
     }
 
     public async Task<CliDoctorReport> RunDoctorAsync(CliLocalConfiguration? configuration, ReadOnlyMemory<byte> key,
@@ -339,7 +355,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     public async Task<IReadOnlyList<CliConflictInfo>> ListConflictsAsync(CliLocalConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        var conflicts = Build(configuration, ReadOnlyMemory<byte>.Empty, requireKey: false).Conflicts;
+        await using var components = Build(configuration, ReadOnlyMemory<byte>.Empty, requireKey: false);
+        var conflicts = components.Conflicts;
         return (await conflicts.ListAsync(cancellationToken).ConfigureAwait(false)).Select(record => new CliConflictInfo(
             record.Id, record.Provenance.LocalHash.Hex, record.Provenance.RemoteHash.Hex,
             record.Provenance.LocalDeviceId, record.Provenance.RemoteDeviceId,
@@ -349,7 +366,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     public async Task<CliResolutionResult> ResolveAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, string conflictId,
         CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken)
     {
-        var components = Build(configuration, key);
+        await using var components = Build(configuration, key);
         var mapped = resolution switch
         {
             CliResolution.KeepLocal => ConflictResolution.KeepLocal,
@@ -357,7 +374,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             CliResolution.ExportBoth => ConflictResolution.ExportBoth,
             _ => throw new ArgumentOutOfRangeException(nameof(resolution))
         };
-        var result = await components.Engine.ResolveConflictAsync(conflictId, mapped, exportDirectory, cancellationToken).ConfigureAwait(false);
+        var result = await components.Engine!.ResolveConflictAsync(conflictId, mapped, exportDirectory, cancellationToken).ConfigureAwait(false);
         return new CliResolutionResult(result.RemainingConflicts, result.Exported);
     }
 
@@ -376,8 +393,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             Path.Combine(localAppData, "CodexHistorySync", "repositories"));
         if (pinnedRevision is not null) provider = new RevisionPinnedProvider(provider, pinnedRevision);
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
-        var engine = new SyncEngine(configuration.RepositoryId, configuration.DeviceId, paths, key, scanner,
-            new RepositoryCrypto(), state, writer, conflicts, provider, staging);
+        var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
+            configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging);
         return new Components(paths, scanner, conflicts, engine);
     }
 
@@ -407,7 +424,11 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         catch { return false; }
     }
 
-    private sealed record Components(CodexPaths Paths, SessionScanner Scanner, ConflictStore Conflicts, SyncEngine Engine);
+    private sealed record Components(CodexPaths Paths, SessionScanner Scanner, ConflictStore Conflicts, SyncEngine? Engine)
+        : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => Engine?.DisposeAsync() ?? ValueTask.CompletedTask;
+    }
 
     private sealed class RevisionPinnedProvider(IStorageProvider inner, string expectedRevision) : IStorageProvider
     {

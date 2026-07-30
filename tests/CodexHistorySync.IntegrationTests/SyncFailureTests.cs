@@ -720,6 +720,121 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task KeepLocalResolution_PreservesArchivedKindAgainstActiveRemoteSide()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("cross-kind-local-source", key, provider);
+        var target = CreateDevice("cross-kind-local-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "cross-kind-local");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Directory.CreateDirectory(target.Paths.ArchivedSessions);
+        var targetActive = Path.Combine(target.Paths.Sessions, "cross-kind-local.jsonl");
+        var targetArchived = Path.Combine(target.Paths.ArchivedSessions, "cross-kind-local.jsonl");
+        File.Move(targetActive, targetArchived);
+        await File.AppendAllTextAsync(targetArchived,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"archived-local-choice\"}}\n");
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "cross-kind-local.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"active-remote-choice\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var conflict = Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+
+        await target.Engine.ResolveConflictAsync(conflict.Id, ConflictResolution.KeepLocal, null,
+            CancellationToken.None);
+
+        Assert.True(File.Exists(targetArchived));
+        Assert.False(File.Exists(targetActive));
+        var verifier = CreateDevice("cross-kind-local-verifier", key, provider);
+        await verifier.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Assert.True(File.Exists(Path.Combine(verifier.Paths.ArchivedSessions, "cross-kind-local.jsonl")));
+        Assert.False(File.Exists(Path.Combine(verifier.Paths.Sessions, "cross-kind-local.jsonl")));
+    }
+
+    [Fact]
+    public async Task KeepRemoteResolution_MovesActiveLocalHistoryToArchivedRemoteKind()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("cross-kind-remote-source", key, provider);
+        var target = CreateDevice("cross-kind-remote-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "cross-kind-remote");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Directory.CreateDirectory(source.Paths.ArchivedSessions);
+        var sourceActive = Path.Combine(source.Paths.Sessions, "cross-kind-remote.jsonl");
+        var sourceArchived = Path.Combine(source.Paths.ArchivedSessions, "cross-kind-remote.jsonl");
+        File.Move(sourceActive, sourceArchived);
+        await File.AppendAllTextAsync(sourceArchived,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"archived-remote-choice\"}}\n");
+        var targetActive = Path.Combine(target.Paths.Sessions, "cross-kind-remote.jsonl");
+        await File.AppendAllTextAsync(targetActive,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"active-local-choice\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var conflict = Assert.Single(await target.Conflicts.ListAsync(CancellationToken.None));
+
+        await target.Engine.ResolveConflictAsync(conflict.Id, ConflictResolution.KeepRemote, null,
+            CancellationToken.None);
+
+        Assert.False(File.Exists(targetActive));
+        Assert.True(File.Exists(Path.Combine(target.Paths.ArchivedSessions, "cross-kind-remote.jsonl")));
+    }
+
+    [Fact]
+    public async Task Synchronize_reports_union_of_existing_evidence_and_new_distinct_conflict()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("conflict-union-source", key, provider);
+        var target = CreateDevice("conflict-union-target", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "conflict-union-a");
+        await WriteSessionAsync(source.Paths.Sessions, "conflict-union-b");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var sourceA = Path.Combine(source.Paths.Sessions, "conflict-union-a.jsonl");
+        var targetA = Path.Combine(target.Paths.Sessions, "conflict-union-a.jsonl");
+        await File.AppendAllTextAsync(sourceA,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote-a\"}}\n");
+        await File.AppendAllTextAsync(targetA,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local-a\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        Assert.Equal(1, (await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None)).Conflicts);
+        File.Copy(sourceA, targetA, overwrite: true);
+        var sourceB = Path.Combine(source.Paths.Sessions, "conflict-union-b.jsonl");
+        var targetB = Path.Combine(target.Paths.Sessions, "conflict-union-b.jsonl");
+        await File.AppendAllTextAsync(sourceB,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote-b\"}}\n");
+        await File.AppendAllTextAsync(targetB,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"local-b\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        Assert.Equal(2, result.Conflicts);
+        Assert.Equal(2, (await target.Conflicts.ListAsync(CancellationToken.None)).Count);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_WaitsForActiveCryptoOperationBeforeZeroizingAndRejectingReuse()
+    {
+        var provider = new BlockingSnapshotProvider();
+        var device = CreateDevice("dispose-active-engine", RandomNumberGenerator.GetBytes(32), provider);
+        var preview = device.Engine.PreviewAsync(SyncMode.Pull, CancellationToken.None);
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var disposal = device.Engine.DisposeAsync().AsTask();
+
+        Assert.False(disposal.IsCompleted);
+        provider.Release.TrySetResult();
+        await preview;
+        await disposal;
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            device.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task PublicationRetry_PreservesOneRecordForTheSameConflict()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -1420,6 +1535,22 @@ public sealed class SyncFailureTests : IDisposable
         public void RenameSingleObject(LogicalObjectId id) { var ciphertext = _objects.Values.Single(); _objects.Clear(); _objects[id] = ciphertext; }
         public void ReplaceObject(LogicalObjectId oldId, LogicalObjectId newId, byte[] ciphertext) { _objects.Remove(oldId); _objects[newId] = ciphertext; }
         public void ClearRepository() { _index = null; _objects.Clear(); }
+    }
+
+    private sealed class BlockingSnapshotProvider : IStorageProvider
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return new RemoteSnapshot(string.Empty, null, []);
+        }
+
+        public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("No publication expected.");
     }
 
     private sealed class FailingWriteFileSystem : IAtomicFileSystem
