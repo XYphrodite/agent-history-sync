@@ -1,5 +1,15 @@
 # Task 8 Report: Safe CLI Setup and Manual Operations
 
+## Review round 3 correction
+
+The third independent review reported one medium compatibility issue. Existing schema-1 manifests can contain the pre-round-2 non-null fingerprint, which previously overrode recomputation and caused an equivalent conflict to be preserved a second time after upgrade.
+
+Conflict deduplication now derives an allowed candidate set from provenance. The current per-side form is always present; the legacy single-metadata form is present only when both side metadata exactly equal the legacy metadata. A stored fingerprint is treated as untrusted and accepted only after fixed-time equality with a recomputed allowed candidate. Malformed and mismatched stored values cannot affect matching, and active/archived cross-kind conflicts cannot match through the lossy legacy form.
+
+The upgrade regression constructs real schema-1 evidence with the old non-null fingerprint, preserves the equivalent conflict after upgrade, verifies that the original record is returned, retires it, and verifies no duplicate remains. Companion cases cover malformed/mismatched stored values and cross-kind non-conflation. Before the implementation, the focused set was 1 passed and 3 failed with new timestamped conflict IDs; after it, the set passed 4/4 and the full `ConflictStoreTests` class passed 21/21.
+
+Final round-3 verification: build 0 warnings/errors; full elevated suite 239 passed, 0 failed, 0 skipped — Core 107, Integration 112, Git 14, Windows 6. Independent re-review remains pending.
+
 ## Review round 2 corrections
 
 The second independent review reported five important issues. This correction set addresses all five without claiming that the next re-review has passed:
