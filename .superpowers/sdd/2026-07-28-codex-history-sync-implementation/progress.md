@@ -3,6 +3,9 @@
 Branch start: 10a09cf
 Worktree: C:\Repos\codex-history-sync\.worktrees\feature-history-sync
 
+Task 9: implementation complete (canonical fail-closed process detection, exact per-user Task Scheduler ownership, active export-only worker, quiescent bidirectional recovery, notifications, redacted rotating logs, CLI/doctor wiring; independent review pending)
+Task 9: verification (initial contract RED; notification RED 0/1 then GREEN 1/1; scheduler XML RED compile then GREEN 2/2; trusted-root fallback RED 0/1 then GREEN 1/1; final focused 29/29; build 0 warnings/errors; final full elevated 268/268 — Core 107, Integration 124, Git 14, Windows 23)
+
 Task 8: fix round 3/5 implementation complete (schema-1 legacy fingerprint candidate recomputation, untrusted stored-fingerprint validation, and cross-kind non-conflation; re-review pending)
 Task 8: fix round 3 verification (RED 1 passed/3 failed; GREEN 4/4; ConflictStore 21/21; full elevated 239/239 — Core 107, Integration 112, Git 14, Windows 6; build 0 warnings/errors; independent re-review pending)
 Task 8: fix round 2/5 implementation complete (per-side authenticated conflict metadata and cross-kind resolution, serialized engine disposal/key zeroization, exact stable-identity conflict unions, dual status revisions, and atomic evidence retirement; re-review pending)
@@ -43,3 +46,7 @@ Task 7: complete (commits 5c480e0..e2c2f5b, round-5 independent review PASS with
 Task 8: implementation complete (CLI contracts and real composition; focused 28/28; full elevated 217/217 — Core 101, Integration 96, Git 14, Windows 6; independent review pending)
 Task 8: fix round 1/5 implementation complete (real lock/CAS conflict resolution, authenticated read-only planning, disposable fresh-install compatibility, terminal join-key zeroization, pre-secret emptiness gate, and SHA-pinned/rechecked join setup; re-review pending)
 Task 8: fix round 1 verification (focused 38/38; full elevated 227/227 — Core 101, Integration 106, Git 14, Windows 6; build 0 warnings/errors; independent re-review pending)
+Task 8: fix round 2/5 implementation complete (per-side conflict metadata and cross-kind resolution, serialized engine key disposal, exact conflict union, dual revisions, and atomic evidence retirement; commits 509f6a1, d83f415)
+Task 8: fix round 2 verification (full elevated 235/235 — Core 103, Integration 112, Git 14, Windows 6; build 0 warnings/errors; independent re-review found one legacy compatibility issue)
+Task 8: fix round 3/5 implementation complete (legacy schema-1 conflict fingerprint deduplication without cross-kind conflation; commits b812ec2, 71440d6)
+Task 8: complete (commits e2c2f5b..71440d6, round-3 independent review PASS with no findings; controller verification 239/239 — Core 107, Integration 112, Git 14, Windows 6)
