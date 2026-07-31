@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -21,9 +20,44 @@ public static class CliComposition
         if (string.IsNullOrWhiteSpace(localAppData)) throw new InvalidOperationException("Local application data is unavailable.");
         var gateway = new GitHubCliRepositoryGateway();
         var local = new FileCliLocalRepository(localAppData, new DpapiKeyStore());
-        var runtime = new CoreCliSyncRuntime(localAppData, gateway, new ConservativeCodexProcessDetector());
-        return new CliApplication(new DefaultCliServices(gateway, local, runtime, new RepositoryCrypto()), new SystemCliConsole());
+        var scheduler = new AgentScheduler();
+        var configuredCodex = Environment.GetEnvironmentVariable("CODEX_EXE");
+        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(configuredCodex));
+        var runtime = new CoreCliSyncRuntime(localAppData, gateway, detector,
+            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken),
+            null, scheduler);
+        var services = new DefaultCliServices(gateway, local, runtime, new RepositoryCrypto());
+        var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
+            new WindowsNotifier(), new RotatingAgentLogger(localAppData));
+        var agent = new DefaultAgentCliOperations(worker, scheduler, () => Environment.ProcessPath);
+        return new CliApplication(services, new SystemCliConsole(), agent);
     }
+}
+
+public sealed class DefaultAgentCliOperations : IAgentCliOperations
+{
+    private readonly AgentWorker worker;
+    private readonly AgentScheduler scheduler;
+    private readonly Func<string?> executablePath;
+
+    public DefaultAgentCliOperations(AgentWorker worker, AgentScheduler scheduler, Func<string?> executablePath)
+    {
+        this.worker = worker ?? throw new ArgumentNullException(nameof(worker));
+        this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+        this.executablePath = executablePath ?? throw new ArgumentNullException(nameof(executablePath));
+    }
+
+    public Task RunAsync(CancellationToken cancellationToken) => worker.RunAsync(cancellationToken);
+
+    public Task InstallAsync(CancellationToken cancellationToken)
+    {
+        var executable = executablePath();
+        if (string.IsNullOrWhiteSpace(executable))
+            throw new InvalidOperationException("The agent executable path is unavailable.");
+        return scheduler.InstallAsync(executable, cancellationToken);
+    }
+
+    public Task UninstallAsync(CancellationToken cancellationToken) => scheduler.UninstallAsync(cancellationToken);
 }
 
 public sealed class SystemCliConsole : ICliConsole
@@ -252,30 +286,40 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly string localAppData;
     private readonly ICliRepositoryGateway gateway;
     private readonly ICodexProcessDetector processDetector;
+    private readonly IAgentInstallationChecker agentInstallationChecker;
     private readonly Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe;
     private readonly Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
         : this(localAppData, gateway, processDetector,
-            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken), null)
+            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken), null, null)
     {
     }
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
         Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe)
-        : this(localAppData, gateway, processDetector, compatibilityProbe, null)
+        : this(localAppData, gateway, processDetector, compatibilityProbe, null, null)
     {
     }
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
         Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe,
         Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory)
+        : this(localAppData, gateway, processDetector, compatibilityProbe, engineFactory, null)
+    {
+    }
+
+    public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
+        Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe,
+        Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory,
+        IAgentInstallationChecker? agentInstallationChecker)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         this.processDetector = processDetector ?? throw new ArgumentNullException(nameof(processDetector));
         this.compatibilityProbe = compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe));
         this.engineFactory = engineFactory;
+        this.agentInstallationChecker = agentInstallationChecker ?? UnconfiguredAgentInstallationChecker.Instance;
     }
 
     public async Task<CliGateResult> ProbeCompatibilityAsync(CancellationToken cancellationToken)
@@ -348,7 +392,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         catch { }
         checks.Add(new("process-state", processStateChecked));
         checks.Add(new("free-disk-space", HasFreeDiskSpace(paths?.Home ?? localAppData)));
-        checks.Add(new("agent-installation", File.Exists(Path.Combine(localAppData, "CodexHistorySync", "agent.installed"))));
+        var agentInstalled = false;
+        try { agentInstalled = await agentInstallationChecker.IsInstalledAsync(cancellationToken).ConfigureAwait(false); }
+        catch { }
+        checks.Add(new("agent-installation", agentInstalled));
         return new CliDoctorReport(checks);
     }
 
@@ -443,23 +490,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("A pinned preview provider cannot publish.");
     }
-}
 
-public sealed class ConservativeCodexProcessDetector : ICodexProcessDetector
-{
-    public bool IsRunning()
+    private sealed class UnconfiguredAgentInstallationChecker : IAgentInstallationChecker
     {
-        try
-        {
-            var processes = Process.GetProcessesByName("codex");
-            try { return processes.Length != 0; }
-            finally { foreach (var process in processes) process.Dispose(); }
-        }
-        catch { return true; }
-    }
-
-    public async Task WaitForExitAsync(CancellationToken cancellationToken)
-    {
-        while (IsRunning()) await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+        public static UnconfiguredAgentInstallationChecker Instance { get; } = new();
+        public Task<bool> IsInstalledAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 }
