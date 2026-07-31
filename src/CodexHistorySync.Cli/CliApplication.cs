@@ -47,15 +47,24 @@ public interface ICliServices
     Task<CliResolutionResult> ResolveAsync(string conflictId, CliResolution resolution, string? exportDirectory, CancellationToken cancellationToken);
 }
 
+public interface IAgentCliOperations
+{
+    Task RunAsync(CancellationToken cancellationToken);
+    Task InstallAsync(CancellationToken cancellationToken);
+    Task UninstallAsync(CancellationToken cancellationToken);
+}
+
 public sealed class CliApplication
 {
     private readonly ICliServices services;
     private readonly ICliConsole console;
+    private readonly IAgentCliOperations? agentOperations;
 
-    public CliApplication(ICliServices services, ICliConsole console)
+    public CliApplication(ICliServices services, ICliConsole console, IAgentCliOperations? agentOperations = null)
     {
         this.services = services ?? throw new ArgumentNullException(nameof(services));
         this.console = console ?? throw new ArgumentNullException(nameof(console));
+        this.agentOperations = agentOperations;
     }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
@@ -74,6 +83,7 @@ public sealed class CliApplication
                 "doctor" when args.Length == 1 => await RunDoctorAsync(cancellationToken).ConfigureAwait(false),
                 "conflicts" when args.Length == 1 => await RunConflictsAsync(cancellationToken).ConfigureAwait(false),
                 "resolve" => await RunResolveAsync(args, cancellationToken).ConfigureAwait(false),
+                "agent" => await RunAgentAsync(args, cancellationToken).ConfigureAwait(false),
                 _ => Usage()
             };
         }
@@ -211,9 +221,29 @@ public sealed class CliApplication
         return result.RemainingConflicts == 0 ? 0 : 4;
     }
 
+    private async Task<int> RunAgentAsync(string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length != 2 || agentOperations is null) return Usage();
+        switch (args[1])
+        {
+            case "run":
+                await agentOperations.RunAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            case "install":
+                await agentOperations.InstallAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            case "uninstall":
+                await agentOperations.UninstallAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            default:
+                return Usage();
+        }
+        return 0;
+    }
+
     private int Usage()
     {
-        console.WriteError("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve> [options]");
+        console.WriteError("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
         return 2;
     }
 

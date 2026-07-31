@@ -64,7 +64,24 @@ codex-sync doctor
 - free disk space
 - background-agent installation
 
-Before setup, the repository/key checks are expected to fail. Before Task 9 agent installation, the agent check is also expected to fail.
+Before setup, the repository/key checks are expected to fail. Before agent installation, the agent check is also expected to fail.
+
+## Background agent
+
+Install or remove the current executable's per-user logon task:
+
+```powershell
+codex-sync agent install
+codex-sync agent uninstall
+```
+
+The task is named `CodexHistorySync`, runs only for the current Windows user at logon, and has one exact action: the canonical absolute path of the installing executable with arguments `agent run`. Installation and removal query Task Scheduler XML through the Task Scheduler API rather than localized command output. They refuse to replace or remove a same-name task whose executable, arguments, user, or logon trigger does not match.
+
+At logon the agent performs a bidirectional sync if Codex is stopped. While Codex is active it runs push-only synchronization and an authenticated read-only preview; it never requests an import or conflict resolution. When every relevant Codex process exits, the agent continues checking process state through a two-second quiet window before bidirectional synchronization. A process restart resets that window. Failures retry after 30 seconds with exponential backoff capped at 30 minutes, and Ctrl+C is a normal shutdown when `agent run` is launched interactively.
+
+Set `CODEX_EXE` to the absolute Codex executable path when a specific installation must be matched. With a configured path, a same-name process at another readable path is ignored. The built-in fallback recognizes `codex`, `Codex`, and `ChatGPT` process names in known first-party installation roots; these names and roots are constructor options so future releases can extend them. When no executable is configured, the known-name fallback is deliberately conservative. Access-denied process/path inspection is treated as active, which can postpone imports but cannot make an active Codex process appear stopped.
+
+Notifications report only pending-restart counts, unresolved-conflict counts, repeated-failure counts, and recovery. Structured JSON-line logs live under `%LOCALAPPDATA%\CodexHistorySync\logs`, rotate at 10 MiB, and retain at most five files. They contain operation IDs, modes, object counts, elapsed milliseconds, sanitized revision tokens, and fixed error codes. Exception messages, paths, URLs, credentials, keys, and history plaintext are not accepted by the logging surface.
 
 ## Conflicts
 
