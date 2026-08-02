@@ -244,20 +244,42 @@ public sealed class AgentWorker
             {
                 return;
             }
-            catch (Exception exception)
+            catch (CodexBecameActiveException)
             {
-                failures++;
-                await TryLogAsync(new AgentLogEntry(AgentLogKind.Failure, operationId, mode,
-                    0, 0, 0, 0, 0, string.Empty, ErrorCode(exception),
-                    (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds), cancellationToken).ConfigureAwait(false);
-                if (failures >= options.RepeatedFailureThreshold && !repeatedFailureNotified)
-                {
-                    await TryNotifyAsync(new AgentNotification(AgentNotificationKind.RepeatedFailure, failures), cancellationToken)
-                        .ConfigureAwait(false);
-                    repeatedFailureNotified = true;
-                }
                 try
                 {
+                    if (!deferredImportNotified)
+                    {
+                        await TryNotifyAsync(new AgentNotification(AgentNotificationKind.PendingRestart, 1), cancellationToken)
+                            .ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        deferredImportNotified = true;
+                    }
+                    await detector.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+                    await WaitForQuiescenceAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    failures++;
+                    await TryLogAsync(new AgentLogEntry(AgentLogKind.Failure, operationId, mode,
+                        0, 0, 0, 0, 0, string.Empty, ErrorCode(exception),
+                        (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds), cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (failures >= options.RepeatedFailureThreshold && !repeatedFailureNotified)
+                    {
+                        await TryNotifyAsync(new AgentNotification(AgentNotificationKind.RepeatedFailure, failures), cancellationToken)
+                            .ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        repeatedFailureNotified = true;
+                    }
                     await clock.DelayAsync(Backoff(failures), cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

@@ -71,6 +71,43 @@ public sealed class AgentWorkerTests
     }
 
     [Fact]
+    public async Task Late_Codex_activity_is_deferred_without_failure_or_backoff_then_waits_for_quiescence()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var detector = new FakeDetector(false) { ExitWhenWaited = true };
+        var attempts = 0;
+        var sync = new FakeSync
+        {
+            Synchronize = _ =>
+            {
+                attempts++;
+                if (attempts <= 2)
+                {
+                    detector.Start();
+                    throw new CodexBecameActiveException();
+                }
+                cancellation.Cancel();
+                return Result();
+            }
+        };
+        var clock = new FakeClock { CompleteBackoffDelays = true };
+        var notifier = new FakeNotifier();
+        var logger = new FakeLogger();
+        var worker = CreateWorker(detector, sync, clock, notifier, logger);
+
+        await worker.RunAsync(cancellation.Token);
+
+        Assert.Equal([SyncMode.Bidirectional, SyncMode.Bidirectional, SyncMode.Bidirectional], sync.Modes);
+        Assert.Equal(2, detector.WaitCalls);
+        Assert.Equal(1, notifier.Notifications.Count(item => item.Kind == AgentNotificationKind.PendingRestart));
+        Assert.DoesNotContain(notifier.Notifications, item => item.Kind == AgentNotificationKind.RepeatedFailure);
+        Assert.DoesNotContain(logger.Entries, item => item.Kind == AgentLogKind.Failure);
+        Assert.DoesNotContain(clock.Delays, delay => delay >= TimeSpan.FromSeconds(30));
+        Assert.Equal(TimeSpan.FromSeconds(4), TimeSpan.FromTicks(
+            clock.Delays.Where(delay => delay < TimeSpan.FromSeconds(10)).Sum(delay => delay.Ticks)));
+    }
+
+    [Fact]
     public async Task Unresolved_conflicts_generate_one_notification_until_a_clear_cycle()
     {
         using var cancellation = new CancellationTokenSource();
@@ -147,6 +184,21 @@ public sealed class AgentWorkerTests
     }
 
     [Fact]
+    public async Task Cancellation_during_failure_handling_returns_without_backoff_or_another_cycle()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var sync = new FakeSync { Synchronize = _ => throw new IOException("offline") };
+        var clock = new FakeClock { CompleteBackoffDelays = true };
+        var logger = new CancellingLogger(cancellation);
+        var worker = CreateWorker(new FakeDetector(false), sync, clock, new FakeNotifier(), logger);
+
+        await worker.RunAsync(cancellation.Token);
+
+        Assert.Single(sync.Modes);
+        Assert.Empty(clock.Delays);
+    }
+
+    [Fact]
     public async Task Rotating_log_rejects_free_form_fields_and_retains_at_most_five_files()
     {
         var root = Path.Combine(Path.GetTempPath(), "codex-agent-log-" + Guid.NewGuid().ToString("N"));
@@ -213,6 +265,9 @@ public sealed class AgentWorkerTests
         public bool Active { get; private set; } = active;
         public bool ExitWhenWaited { get; set; }
         public int EnumerationCount { get; private set; }
+        public int WaitCalls { get; private set; }
+
+        public void Start() => Active = true;
 
         public bool IsRunning()
         {
@@ -222,6 +277,7 @@ public sealed class AgentWorkerTests
 
         public Task WaitForExitAsync(CancellationToken cancellationToken)
         {
+            WaitCalls++;
             if (ExitWhenWaited)
             {
                 Active = false;
@@ -291,6 +347,15 @@ public sealed class AgentWorkerTests
         {
             Entries.Add(entry);
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CancellingLogger(CancellationTokenSource cancellation) : IAgentLogger
+    {
+        public Task WriteAsync(AgentLogEntry entry, CancellationToken cancellationToken)
+        {
+            cancellation.Cancel();
+            return Task.FromCanceled(cancellationToken);
         }
     }
 

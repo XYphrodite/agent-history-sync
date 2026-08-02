@@ -9,6 +9,11 @@ namespace CodexHistorySync.Core.Codex;
 public enum TombstoneApplyResult { Applied, Conflict }
 public enum ImportApplyResult { Applied, Conflict }
 
+public sealed class CodexBecameActiveException : InvalidOperationException
+{
+    public CodexBecameActiveException() : base("Codex became active before a local history mutation.") { }
+}
+
 public readonly record struct ExpectedHistoryState(bool Exists, ContentHash? ContentHash)
 {
     public static ExpectedHistoryState Absent => new(false, null);
@@ -71,7 +76,7 @@ public sealed class CodexHistoryWriter
             try
             {
                 await _fileSystem.PublishAsync(temporary, destination, incoming.Hash, expected.ContentHash,
-                    () => !_processDetector.IsRunning(), ct).ConfigureAwait(false);
+                    EnsureCodexInactive, ct).ConfigureAwait(false);
             }
             catch (IOException exception) when (exception is not AtomicMutationException)
             {
@@ -93,7 +98,7 @@ public sealed class CodexHistoryWriter
         if (!BackupStore.HashEquals(await BackupStore.HashFileAsync(destination, ct).ConfigureAwait(false), baselineHash)) return TombstoneApplyResult.Conflict;
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         if (!BackupStore.HashEquals(backup.ContentHash, baselineHash)) return TombstoneApplyResult.Conflict;
-        return await _fileSystem.DeleteIfUnchangedAsync(destination, baselineHash, () => !_processDetector.IsRunning(), ct).ConfigureAwait(false)
+        return await _fileSystem.DeleteIfUnchangedAsync(destination, baselineHash, EnsureCodexInactive, ct).ConfigureAwait(false)
             ? TombstoneApplyResult.Applied
             : TombstoneApplyResult.Conflict;
     }
@@ -139,7 +144,7 @@ public sealed class CodexHistoryWriter
         if (!before.Exists)
         {
             if (after.Exists && !await _fileSystem.DeleteIfUnchangedAsync(destination, after.ContentHash!.Value,
-                    () => !_processDetector.IsRunning(), ct).ConfigureAwait(false))
+                    EnsureCodexInactive, ct).ConfigureAwait(false))
                 throw new IOException("The synchronized file changed before rollback deletion.");
             return;
         }
@@ -158,9 +163,15 @@ public sealed class CodexHistoryWriter
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             await _fileSystem.WriteTemporaryAsync(temporary, content, ct).ConfigureAwait(false);
             await _fileSystem.PublishAsync(temporary, destination, before.ContentHash.Value,
-                after.Exists ? after.ContentHash : null, () => !_processDetector.IsRunning(), ct).ConfigureAwait(false);
+                after.Exists ? after.ContentHash : null, EnsureCodexInactive, ct).ConfigureAwait(false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private bool EnsureCodexInactive()
+    {
+        if (_processDetector.IsRunning()) throw new CodexBecameActiveException();
+        return true;
     }
 
     private static async Task<bool> MatchesExpectedStateAsync(string destination, ExpectedHistoryState expected, CancellationToken ct)

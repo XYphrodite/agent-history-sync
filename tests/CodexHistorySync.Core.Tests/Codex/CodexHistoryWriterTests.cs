@@ -50,7 +50,8 @@ public sealed class CodexHistoryWriterTests : IDisposable
         var original = await File.ReadAllBytesAsync(path);
         var incoming = Session("chat", "new");
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Writer.ImportAsync(Object(path, incoming), new MemoryStream(incoming), "import-running", CancellationToken.None));
+        await Assert.ThrowsAsync<CodexBecameActiveException>(() => fixture.Writer.ImportAsync(
+            Object(path, incoming), new MemoryStream(incoming), "import-running", CancellationToken.None));
 
         Assert.Equal(original, await File.ReadAllBytesAsync(path));
         Assert.Equal(2, detector.CheckCount);
@@ -180,7 +181,8 @@ public sealed class CodexHistoryWriterTests : IDisposable
         if (existingDestination) await File.WriteAllBytesAsync(path, original);
         var incoming = Session("chat", "incoming");
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Writer.ImportAsync(Object(path, incoming), new MemoryStream(incoming), "process-race", CancellationToken.None));
+        await Assert.ThrowsAsync<CodexBecameActiveException>(() => fixture.Writer.ImportAsync(
+            Object(path, incoming), new MemoryStream(incoming), "process-race", CancellationToken.None));
 
         if (existingDestination) Assert.Equal(original, await File.ReadAllBytesAsync(path));
         else Assert.False(File.Exists(path));
@@ -195,7 +197,8 @@ public sealed class CodexHistoryWriterTests : IDisposable
         var path = await WriteSessionAsync(fixture.Paths, "delete-process-race.jsonl", "chat", "original");
         var original = await File.ReadAllBytesAsync(path);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Writer.ApplyTombstoneAsync(Object(path, original), new ContentHash(Hash(original)), "delete-process-race", CancellationToken.None));
+        await Assert.ThrowsAsync<CodexBecameActiveException>(() => fixture.Writer.ApplyTombstoneAsync(
+            Object(path, original), new ContentHash(Hash(original)), "delete-process-race", CancellationToken.None));
 
         Assert.Equal(original, await File.ReadAllBytesAsync(path));
     }
