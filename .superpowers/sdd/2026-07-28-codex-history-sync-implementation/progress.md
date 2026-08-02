@@ -5,6 +5,8 @@ Worktree: C:\Repos\codex-history-sync\.worktrees\feature-history-sync
 
 Task 9: implementation complete (canonical fail-closed process detection, exact per-user Task Scheduler ownership, active export-only worker, quiescent bidirectional recovery, notifications, redacted rotating logs, CLI/doctor wiring; independent review pending)
 Task 9: verification (initial contract RED; notification RED 0/1 then GREEN 1/1; scheduler XML RED compile then GREEN 2/2; trusted-root fallback RED 0/1 then GREEN 1/1; final focused 29/29; build 0 warnings/errors; final full elevated 268/268 — Core 107, Integration 124, Git 14, Windows 23)
+Task 9: fix round 1/5 implementation complete (additive configured-path/trusted-root process matching, typed late-Codex-active rollback/defer signal, and cancellation-safe generic failure handling; implementation commit feb83e4; independent re-review pending)
+Task 9: fix round 1 verification (detector RED 0/1 then GREEN 8/8; cancellation RED leaked TaskCanceledException then GREEN AgentWorker 13/13; late-activity RED generic exception/failure path then GREEN 3/3; focused 32/32; build 0 warnings/errors; full unrestricted 271/271 — Core 107, Integration 126, Git 14, Windows 24)
 
 Task 8: fix round 3/5 implementation complete (schema-1 legacy fingerprint candidate recomputation, untrusted stored-fingerprint validation, and cross-kind non-conflation; re-review pending)
 Task 8: fix round 3 verification (RED 1 passed/3 failed; GREEN 4/4; ConflictStore 21/21; full elevated 239/239 — Core 107, Integration 112, Git 14, Windows 6; build 0 warnings/errors; independent re-review pending)

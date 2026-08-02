@@ -49,3 +49,28 @@ The ordinary sandbox run produced the seven previously documented environment-se
 Requirement-by-requirement self-review confirmed active cycles call only push plus authenticated read-only preview, process exit waits cover all current candidates, quiet-window re-enumeration precedes imports, task deletion is fail-closed on inexact ownership, and diagnostic surfaces cannot accept exception messages, paths, URLs, credentials, keys, or plaintext.
 
 Automated tests do not create or delete a real user Task Scheduler entry and do not display a real desktop notification, because those actions would mutate the developer's Windows session. The Task Scheduler COM shape/XML parser and notifier inputs are covered through deterministic seams. Independent review remains pending.
+
+## Review correction round 1
+
+Implementation commit `feb83e4` addresses the three approved Task 9 review findings. Independent re-review is still required; no review approval is claimed.
+
+- Process matching now keeps the configured executable's exact canonical path and the known-name/trusted-root fallback as independent additive matches. A configured `codex.exe` under the primary root no longer suppresses a known `codex` process under a second trusted root, while the same name outside every trusted root remains rejected.
+- The final `CodexHistoryWriter` atomic mutation guard now emits the fixed-message, field-free `CodexBecameActiveException`. Synchronization rolls back the prepared mutation batch before propagating this signal, leaving live history and the saved baseline unchanged and creating no conflict evidence. The automatic worker treats repeated signals as one deferred-import epoch: one pending-restart notice, no failure log or backoff, then process-exit waiting and a continuously checked quiescence window. Manual CLI synchronization may still surface the operational failure.
+- Cancellation requested while failure logging, repeated-failure notification, or backoff is awaited now exits `AgentWorker.RunAsync` normally. Cancellation observed after a helper returns is checked before notification or delay, so no backoff or later synchronization cycle begins.
+
+TDD evidence for this correction:
+
+- The second-trusted-root detector regression failed 0/1 with `Expected: True, Actual: False`, then all detector tests passed 8/8 after separating known fallback names from configured-path candidate names.
+- The failure-handling cancellation regression failed by leaking `TaskCanceledException` from `TryLogAsync`, then the complete `AgentWorkerTests` set passed 13/13 after enclosing all generic-catch awaits in the normal-shutdown cancellation boundary.
+- The mutation-boundary and worker regressions initially failed because the writer emitted the generic atomic-guard `InvalidOperationException` and the worker entered its failure path (`Bidirectional, Push`). After the typed signal and deferred path were added, the correction-focused set passed 3/3. Existing writer boundary tests were updated to require the exact typed signal and passed 4/4.
+
+Fresh verification:
+
+```powershell
+dotnet test CodexHistorySync.sln --filter "CodexProcessDetectorTests|AgentSchedulerTests|AgentWorkerTests" --no-restore --verbosity minimal
+dotnet build CodexHistorySync.sln --no-restore --verbosity minimal
+$env:PSExecutionPolicyPreference='Bypass'
+dotnet test CodexHistorySync.sln --no-restore --verbosity minimal
+```
+
+Result: focused Task 9 tests 32/32 (Windows 18, Integration 14); build 0 warnings/errors; unrestricted full suite 271/271 (Core 107, Integration 126, Git 14, Windows 24). The restricted first full run also identified four stale exact-type assertions, which were corrected; its remaining ACL, symbolic-link, and PowerShell-policy failures were the previously documented environment limitations. Independent re-review remains pending.
