@@ -308,12 +308,15 @@ public sealed class SyncFailureTests : IDisposable
         var baseline = await initialTarget.State.LoadAsync("repository", CancellationToken.None);
         await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "shared-process.jsonl"), "{\"type\":\"message\",\"payload\":{\"text\":\"remote change\"}}\n");
         await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
-        var target = CreateDevice("target-process", key, provider, detector: new StartsDuringImportDetector());
+        var target = CreateDevice("target-process", key, provider, detector: new StartsAtMutationBoundaryDetector());
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+        await Assert.ThrowsAsync<CodexBecameActiveException>(() =>
+            target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
 
         Assert.Equal(original, await File.ReadAllTextAsync(targetPath));
         Assert.Equal(baseline.Objects.ToArray(), (await target.State.LoadAsync("repository", CancellationToken.None)).Objects.ToArray());
+        Assert.Empty(await target.Conflicts.ListAsync(CancellationToken.None));
+        Assert.Empty(Directory.EnumerateDirectories(target.StagingRoot));
     }
 
     [Fact]
@@ -1434,10 +1437,10 @@ public sealed class SyncFailureTests : IDisposable
         }
         public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
-    private sealed class StartsDuringImportDetector : ICodexProcessDetector
+    private sealed class StartsAtMutationBoundaryDetector : ICodexProcessDetector
     {
         private int _checks;
-        public bool IsRunning() => Interlocked.Increment(ref _checks) > 1;
+        public bool IsRunning() => Interlocked.Increment(ref _checks) == 3;
         public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
     private sealed class OfflineProvider : IStorageProvider

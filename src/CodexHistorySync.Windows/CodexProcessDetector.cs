@@ -49,7 +49,7 @@ public sealed class CodexProcessDetector : Core.Codex.ICodexProcessDetector
 {
     private readonly IProcessCatalog catalog;
     private readonly HashSet<string> processNames;
-    private readonly HashSet<string> configuredProcessNames;
+    private readonly HashSet<string> knownProcessNames;
     private readonly string? configuredExecutablePath;
     private readonly string[] trustedRoots;
     private readonly TimeSpan inaccessiblePollInterval;
@@ -62,15 +62,14 @@ public sealed class CodexProcessDetector : Core.Codex.ICodexProcessDetector
         ArgumentNullException.ThrowIfNull(options);
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         configuredExecutablePath = CanonicalizeOptional(options.ConfiguredExecutablePath);
-        processNames = new HashSet<string>(options.EffectiveProcessNames.Where(name => !string.IsNullOrWhiteSpace(name)),
+        knownProcessNames = new HashSet<string>(options.EffectiveProcessNames.Where(name => !string.IsNullOrWhiteSpace(name)),
             StringComparer.OrdinalIgnoreCase);
-        configuredProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        processNames = new HashSet<string>(knownProcessNames, StringComparer.OrdinalIgnoreCase);
         if (configuredExecutablePath is not null)
         {
             var name = Path.GetFileNameWithoutExtension(configuredExecutablePath);
             if (!string.IsNullOrWhiteSpace(name))
             {
-                configuredProcessNames.Add(name);
                 processNames.Add(name);
             }
         }
@@ -139,8 +138,7 @@ public sealed class CodexProcessDetector : Core.Codex.ICodexProcessDetector
             var executable = Path.GetFullPath(process.GetExecutablePath());
             if (configuredExecutablePath is not null &&
                 StringComparer.OrdinalIgnoreCase.Equals(executable, configuredExecutablePath)) return true;
-            if (configuredProcessNames.Contains(process.Name)) return false;
-            return trustedRoots.Any(root => IsWithin(executable, root));
+            return knownProcessNames.Contains(process.Name) && trustedRoots.Any(root => IsWithin(executable, root));
         }
         catch (Exception exception) when (IsInspectionDenied(exception))
         {

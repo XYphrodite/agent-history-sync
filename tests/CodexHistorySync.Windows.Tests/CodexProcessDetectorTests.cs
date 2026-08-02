@@ -6,12 +6,14 @@ namespace CodexHistorySync.Windows.Tests;
 public sealed class CodexProcessDetectorTests
 {
     [Fact]
-    public void Configured_path_ignores_same_name_binary_at_another_path()
+    public void Configured_path_and_known_name_outside_all_trusted_roots_is_ignored()
     {
         var configured = Path.GetFullPath(@"C:\Program Files\Codex\codex.exe");
+        var secondTrustedRoot = Path.GetFullPath(@"C:\Users\Test\AppData\Local\Programs\OpenAI");
         var catalog = new FakeProcessCatalog(new FakeProcess(10, "codex", @"C:\Temp\codex.exe"));
         var detector = new CodexProcessDetector(
-            new CodexProcessDetectorOptions(configured, ["codex"], [Path.GetDirectoryName(configured)!]), catalog);
+            new CodexProcessDetectorOptions(configured, ["codex"],
+                [Path.GetDirectoryName(configured)!, secondTrustedRoot]), catalog);
 
         Assert.False(detector.IsRunning());
     }
@@ -23,6 +25,20 @@ public sealed class CodexProcessDetectorTests
         var catalog = new FakeProcessCatalog(new FakeProcess(10, "codex", @"C:\Program Files\Codex\codex.exe"));
         var detector = new CodexProcessDetector(
             new CodexProcessDetectorOptions(configured, ["codex"], [Path.GetDirectoryName(configured)!]), catalog);
+
+        Assert.True(detector.IsRunning());
+    }
+
+    [Fact]
+    public void Configured_path_and_known_name_in_a_second_trusted_root_are_additive()
+    {
+        var configured = Path.GetFullPath(@"C:\Program Files\Codex\codex.exe");
+        var secondTrustedRoot = Path.GetFullPath(@"C:\Users\Test\AppData\Local\Programs\OpenAI");
+        var catalog = new FakeProcessCatalog(
+            new FakeProcess(10, "codex", Path.Combine(secondTrustedRoot, "codex.exe")));
+        var detector = new CodexProcessDetector(
+            new CodexProcessDetectorOptions(configured, ["codex"],
+                [Path.GetDirectoryName(configured)!, secondTrustedRoot]), catalog);
 
         Assert.True(detector.IsRunning());
     }
