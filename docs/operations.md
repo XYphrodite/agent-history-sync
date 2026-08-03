@@ -118,3 +118,44 @@ After remote, local, and state work all succeed, live evidence is retired by an 
 | 4 | One or more conflicts remain unresolved |
 
 Diagnostics deliberately use stable summaries. Raw exception messages and external command output are not copied to CLI output because they may contain credential-bearing URLs, prompt plaintext, or other sensitive material.
+
+## Backup recovery drill
+
+Backups live outside Codex history under `%LOCALAPPDATA%\CodexHistorySync\repositories\REPOSITORY_ID\backups`. Each record contains `content.bin` and `manifest.json`; the manifest records the absolute original path and SHA-256 content hash. Normal synchronization verifies backup bytes before every restore. There is no backup-restore CLI command in the MVP, so manual disaster recovery is deliberately offline and explicit.
+
+Close Codex, remove only this executable's background task, and select the intended backup record:
+
+```powershell
+codex-sync agent uninstall
+$record = 'C:\Users\USER\AppData\Local\CodexHistorySync\repositories\REPOSITORY_ID\backups\BACKUP_ID'
+$manifest = Get-Content (Join-Path $record 'manifest.json') -Raw | ConvertFrom-Json
+$content = Join-Path $record 'content.bin'
+$actual = (Get-FileHash $content -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $manifest.contentHash.hex.ToLowerInvariant()) { throw 'Backup hash verification failed.' }
+```
+
+Before replacing anything, copy the current target to a separate recovery directory. Restore through a sibling temporary file on the same volume, then replace the destination:
+
+```powershell
+$target = [IO.Path]::GetFullPath($manifest.originalPath)
+$safety = "$target.before-manual-restore"
+Copy-Item -LiteralPath $target -Destination $safety
+$temporary = "$target.restore-$([guid]::NewGuid().ToString('N')).tmp"
+Copy-Item -LiteralPath $content -Destination $temporary
+if ((Get-FileHash $temporary -Algorithm SHA256).Hash.ToLowerInvariant() -ne $actual) { throw 'Staged restore verification failed.' }
+[IO.File]::Replace($temporary, $target, $null)
+```
+
+Start Codex and confirm the restored chat is visible, close Codex, run `codex-sync doctor` and `codex-sync sync`, then reinstall the agent with `codex-sync agent install`. Keep the safety copy until the next successful two-device convergence check. If the target does not exist, use `Move-Item -LiteralPath $temporary -Destination $target` instead of `File.Replace`.
+
+For conflict recovery, export both retained versions before choosing a side:
+
+```powershell
+codex-sync conflicts
+codex-sync resolve CONFLICT_ID --export-both C:\Recovery\new-export-directory
+Get-FileHash C:\Recovery\new-export-directory\*.jsonl -Algorithm SHA256
+codex-sync resolve CONFLICT_ID --keep-local   # or --keep-remote
+codex-sync sync
+```
+
+`--export-both` leaves the conflict unresolved. Same-chat concurrent editing is unsupported: the utility preserves both whole-file versions and never attempts a line or JSON merge.

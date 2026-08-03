@@ -74,6 +74,7 @@ public sealed class CliApplication
         {
             return args.Length == 0 ? Usage() : args[0] switch
             {
+                "--help" or "-h" when args.Length == 1 => Help(),
                 "init" => await RunInitAsync(args, cancellationToken).ConfigureAwait(false),
                 "join" => await RunJoinAsync(args, cancellationToken).ConfigureAwait(false),
                 "sync" when args.Length == 1 => await RunSyncAsync(SyncMode.Bidirectional, cancellationToken).ConfigureAwait(false),
@@ -245,6 +246,12 @@ public sealed class CliApplication
     {
         console.WriteError("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
         return 2;
+    }
+
+    private int Help()
+    {
+        console.WriteLine("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
+        return 0;
     }
 
     private int GateFailure(string name)
