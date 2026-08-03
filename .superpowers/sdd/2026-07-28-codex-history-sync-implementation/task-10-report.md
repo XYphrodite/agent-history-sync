@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation, documentation, security/recovery tests, full Release verification, publication, and local executable smoke/audit are complete through review round 2. The release artifact was rebuilt from the reviewed source tree. No clean-profile result or independent review approval is claimed.
+Implementation, documentation, security/recovery tests, full Release verification, publication, and local executable smoke/audit are complete through review round 3. The release artifact was rebuilt from the corrected source tree. No clean-profile result or independent review approval is claimed.
 
 ## Implemented scope
 
@@ -112,6 +112,15 @@ The disposable two-device engine/recovery acceptance is automated and passing, b
 - The pre-existing review RED test was preserved unchanged. It first failed to compile because `beforeFirstMutation` did not exist. Elevated ownership verification then passed 4/4 with a real reparse point and a real successful read-only leaf deletion, proving the last-gap test is not vacuous. Combined elevated ownership/security/recovery verification passed 10/10 with zero skips.
 - A fresh unrestricted Release run before the final exceptional-path handle-disposal-only correction passed 284/284 (Core 107, Integration 139, Git 14, Windows 24). The attempted repeat after that correction was interrupted by the controller; no result is inferred from the interrupted run.
 - The republished artifact contains one 74,181,370-byte PE executable with SHA-256 `b1c3f586b55f8ec7a4fa03f6863b0fa449f527949e32c90e916c2b799918a0c0`. Help returned 0; unconfigured doctor returned 3 with PASS/FAIL-only output. Redirected-current-profile smoke created only expected Codex argument-helper files under the redirected profile and its verified temporary root was removed. Artifact, tracked-source, disposable-temp, and diff scans were clean.
+
+## Review round 3 last-instruction ordering correction
+
+- `WindowsOwnedTreeDeleter.TryDelete` now performs its final complete `ValidateSnapshot` before invoking `beforeFirstMutation`. If the hook returns, execution proceeds immediately through the already-built in-memory postorder and `DeleteByHandle`; no identity/type/enumeration/marker validation or path mutation occurs after the hook.
+- The exact descendant-swap test now records and asserts `hookInvoked`, attempts the real descendant ancestor rename/junction substitution from that hook, requires `TryDelete` to fail, and proves the external sentinel is untouched. On the pre-fix round-2 implementation the strengthened test passed 4/4 because the retained handles already deny the rename; this was not represented as a new behavioral RED. The correction removes the redundant post-hook validation and establishes the requested no-operation gap directly in production ordering.
+- Elevated ownership verification passed 4/4 with zero skips, including normal deletion of a read-only owned leaf. Combined elevated ownership/security/recovery verification passed 10/10 with zero skips. Full unrestricted Release verification passed 284/284: Core 107, Integration 139, Git 14, Windows 24.
+- The republished output contains exactly one 74,181,370-byte PE executable with `MZ` header and SHA-256 `512664a8153ad3ca738dab30bcdaac521e6b29193a849405baa7d6410d816f47`. `--help` returned 0 and listed every documented command; unconfigured `doctor` returned 3 with nine named PASS/FAIL-only lines.
+- Redirected-current-profile smoke returned the same doctor result, created only Codex's three disposable argument-helper files beneath redirected `CODEX_HOME`, and removed its validated GUID temporary root. Tracked-source and binary scans found no workspace path or credential-bearing URL; the only tracked 32-hex literals were three allowlisted cryptographic salt fixtures. Disposable security/recovery/ownership/agent/smoke/init temp scans were empty and `git diff --check` passed.
+- A true clean Windows profile was not available and remains unverified. Independent review remains pending; no review approval is claimed.
 
 ## Deferred risks
 
