@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation, documentation, security/recovery tests, full Release verification, publication, and local executable smoke/audit are complete. The release artifact was rebuilt from the verified source tree. No clean-profile result or independent review approval is claimed.
+Implementation, documentation, security/recovery tests, full Release verification, publication, and local executable smoke/audit are complete through review round 1. The release artifact was rebuilt from the verified source tree. No clean-profile result or independent review approval is claimed.
 
 ## Implemented scope
 
@@ -85,9 +85,21 @@ The required publication completed from the final verified source tree:
 dotnet publish src/CodexHistorySync.Cli -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true --no-restore -o artifacts/win-x64
 ```
 
-`artifacts/win-x64` contains exactly one file: `codex-sync.exe`, 74,164,986 bytes, with PE `MZ` header and SHA-256 `0deb6e6fc4f1ccb46f616b6bfa3f8c9881504752911ff69eefe235bd39f5a734`. `--help` returned exit code 0 and listed `init`, `join`, `sync`, `pull`, `push`, `status`, `doctor`, `conflicts`, `resolve`, and `agent`. `doctor` returned the expected unconfigured-profile gate code 3 and emitted only named PASS/FAIL checks. Binary scans found no workspace path or fixed passphrase/credential canary; tracked-source scans found no complete credential-bearing URL, workspace path, or fixed 32-hex canary. Disposable security, initialization, and recovery temp-directory scans were empty. `git diff --check` passed.
+`artifacts/win-x64` contains exactly one file: `codex-sync.exe`, 74,169,082 bytes, with PE `MZ` header and SHA-256 `36c1a4f1f2df0b4e3231db61f3b3d7f1043dca04f17216ccd684f012943ddc07`. `--help` returned exit code 0 and listed `init`, `join`, `sync`, `pull`, `push`, `status`, `doctor`, `conflicts`, `resolve`, and `agent`. `doctor` returned the expected unconfigured-profile gate code 3 and emitted only named PASS/FAIL checks. Binary scans found no workspace path or fixed passphrase/credential canary; tracked-source scans found no complete credential-bearing URL, workspace path, or fixed 32-hex canary. Disposable security, initialization, recovery, owned-cleanup, and isolated-smoke temp-directory scans were empty. `git diff --check` passed.
 
 The artifact was exercised on this development Windows profile. A clean Windows 11 profile run remains unverified and must not be inferred from the self-contained publication or local smoke test.
+
+## Review round 1 corrections
+
+- Removed the dedicated clone's blanket `.git` exclusion. The audit now uses a GitHub-shaped sanitized remote over a disposable loopback Git transport, explicitly allowlists structural Git metadata, and scans metadata paths and bytes, config, refs, reflogs, reachable objects, all stored objects, and raw loose/pack/temporary object-store files. Its RED run caught the prior local-path leak in the clone reflog; focused GREEN was 2/2.
+- Replaced raw recursive initialization cleanup with a process-owned temporary directory. Each directory has an unpredictable durable marker token, must be an immediate canonical child with the expected prefix beneath a concrete temp root, is traversed manually without following reparse points, is fully revalidated after a simulated ancestor-swap boundary, and is deleted leaf-first with the marker and root last. Missing/tampered markers, reparse descendants, access/type uncertainty, and ancestor substitution retain the tree. Cleanup remains best effort and cannot replace a successful publication or primary error. RED was the missing ownership API; elevated focused GREEN was 4/4.
+- Added deterministic interruption coverage after staged download plus backup/journal creation and immediately at guarded local replacement. Both cases preserve live bytes and baseline, retain verified backup and cleanup evidence, and prove a recreated engine removes abandoned plaintext staging before the injected offline provider is read. The existing simultaneous disk-full/cleanup-failure drill remains.
+- Added a real local-Git `AgentWorker` acceptance run over two disposable devices. Interleaved cycles report exact upload/download counts; recreated engines and fresh scanner indexes converge after restart; same-chat divergence produces exact provenance, encrypted evidence, notification, and exported hashes; `ExportBoth` remains unresolved; explicit `KeepRemote` retires evidence and both devices converge.
+- Expanded root-scoped ignore rules for generated configuration, DPAPI keys, state, provider clones, backups, conflicts, staging, logs, root `.codex`, and copied-history fixtures. A real `git check-ignore`/`ls-files` test proves sensitive generated paths are ignored while product source and synthetic test fixtures are not hidden. RED was 0/1; GREEN was 1/1.
+
+Fresh combined focused verification passed 11/11. Full unrestricted Release verification passed 284/284 — Core 107, Integration 139, Git 14, Windows 24. The republished artifact contains one 74,169,082-byte PE executable with SHA-256 `36c1a4f1f2df0b4e3231db61f3b3d7f1043dca04f17216ccd684f012943ddc07`; help returned 0 and unconfigured doctor returned 3 with PASS/FAIL-only output. Artifact, source, temp-canary, and diff scans were clean.
+
+Read-only host inspection found no `WindowsSandbox.exe`, Docker, Podman, VMware, VirtualBox, VM compute service, or installed WSL distribution. No feature or account was created. A supplemental current-host smoke redirected `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`, `CODEX_HOME`, `TEMP`, and `TMP`; doctor returned 3 with PASS/FAIL-only output, created only Codex's three disposable argument-helper files beneath the redirected `CODEX_HOME`, and the isolated root was removed. This is not a clean-profile result.
 
 The disposable two-device engine/recovery acceptance is automated and passing, but no real GitHub private repository, real user Task Scheduler task, real desktop notification, or real Codex history was mutated. Private visibility and scheduler ownership are covered through deterministic tests.
 
