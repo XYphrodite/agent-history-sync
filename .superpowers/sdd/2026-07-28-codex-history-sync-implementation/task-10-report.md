@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation, documentation, security/recovery tests, full Release verification, publication, and local executable smoke/audit are complete through review round 1. The release artifact was rebuilt from the verified source tree. No clean-profile result or independent review approval is claimed.
+Implementation, documentation, security/recovery tests, full Release verification, publication, and local executable smoke/audit are complete through review round 2. The release artifact was rebuilt from the reviewed source tree. No clean-profile result or independent review approval is claimed.
 
 ## Implemented scope
 
@@ -103,10 +103,19 @@ Read-only host inspection found no `WindowsSandbox.exe`, Docker, Podman, VMware,
 
 The disposable two-device engine/recovery acceptance is automated and passing, but no real GitHub private repository, real user Task Scheduler task, real desktop notification, or real Codex history was mutated. Private visibility and scheduler ownership are covered through deterministic tests.
 
+## Review round 2 native cleanup correction
+
+- Replaced the remaining path-based validation/deletion gap with a Windows-only handle-relative deleter. Creation stores the root `FILE_ID_INFO`; cleanup opens the root without following reparse points and requires the stored volume/file identity before traversing.
+- Directory enumeration uses `NtQueryDirectoryFile` on directory handles. Every enumerated child name rejects empty, dot, NUL, and separator components, and every child is opened relative to its retained parent handle with `NtCreateFile`, `RootDirectory`, and `FILE_OPEN_REPARSE_POINT`. Reparse points, type changes, identity changes, access failures, malformed native records, and unsupported native entry points fail closed and retain the owned root.
+- Every root, directory, file, and marker handle is retained without `FILE_SHARE_DELETE` through complete identity/type/content snapshots and the exact pre-mutation test hook. This prevents a validated descendant ancestor from being renamed into a junction during the last instruction gap. The unpredictable marker is read and revalidated only through its retained handle.
+- Deletion is leaf-first through `SetFileInformationByHandle(FileDispositionInfoEx)` with `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE`; each successfully dispositioned leaf handle is then closed so its name is unlinked before its parent. No `FileBasicInfo`, attribute normalization, recursive path delete, or other path-based mutation remains. Marker and root are dispositioned last. Non-Windows or unavailable/unsupported native behavior returns false and leaves the owned temporary directory for inspection.
+- The pre-existing review RED test was preserved unchanged. It first failed to compile because `beforeFirstMutation` did not exist. Elevated ownership verification then passed 4/4 with a real reparse point and a real successful read-only leaf deletion, proving the last-gap test is not vacuous. Combined elevated ownership/security/recovery verification passed 10/10 with zero skips.
+- A fresh unrestricted Release run before the final exceptional-path handle-disposal-only correction passed 284/284 (Core 107, Integration 139, Git 14, Windows 24). The attempted repeat after that correction was interrupted by the controller; no result is inferred from the interrupted run.
+- The republished artifact contains one 74,181,370-byte PE executable with SHA-256 `b1c3f586b55f8ec7a4fa03f6863b0fa449f527949e32c90e916c2b799918a0c0`. Help returned 0; unconfigured doctor returned 3 with PASS/FAIL-only output. Redirected-current-profile smoke created only expected Codex argument-helper files under the redirected profile and its verified temporary root was removed. Artifact, tracked-source, disposable-temp, and diff scans were clean.
+
 ## Deferred risks
 
 - DPAPI concurrent save/load/delete stress, replacement ACL retention, injected temp cleanup, and exceptional-path zeroization remain the Task 3 defense-in-depth minor; the existing DPAPI/user-isolation suite passes.
 - Whitespace-only JSONL policy remains explicitly undecided; complete newline-terminated JSON records are required and partial records defer.
-- Windows handle-relative traversal hardening against a privileged last-instruction ancestor swap remains beyond the existing canonical/reparse checks.
 - Clean-profile execution remains unverified; only publication and local smoke are passed.
 - Independent review remains pending; no independent approval is claimed.
