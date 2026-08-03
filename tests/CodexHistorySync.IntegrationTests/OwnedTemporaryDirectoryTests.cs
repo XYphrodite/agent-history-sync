@@ -53,29 +53,41 @@ public sealed class OwnedTemporaryDirectoryTests : IDisposable
     }
 
     [Fact]
-    public void Ancestor_swap_after_validation_is_rejected_before_deletion()
+    public void Descendant_ancestor_swap_in_last_instruction_gap_never_deletes_external_target()
     {
         Directory.CreateDirectory(root);
         var outside = Directory.CreateDirectory(Path.Combine(root, "outside"));
         var outsideFile = Path.Combine(outside.FullName, "keep.txt");
         File.WriteAllText(outsideFile, "keep");
         var owned = OwnedTemporaryDirectory.Create(root, "codex-history-sync-init-");
-        var preserved = owned.RootPath + ".preserved";
+        var descendant = Directory.CreateDirectory(Path.Combine(owned.RootPath, "repository", "objects"));
+        File.WriteAllText(Path.Combine(descendant.FullName, "owned.txt"), "owned");
+        var ancestor = Path.Combine(owned.RootPath, "repository");
+        var preserved = Path.Combine(owned.RootPath, "repository.preserved");
 
         bool Swap()
         {
-            Directory.Move(owned.RootPath, preserved);
-            try { Directory.CreateSymbolicLink(owned.RootPath, outside.FullName); }
+            Directory.Move(ancestor, preserved);
+            try { Directory.CreateSymbolicLink(ancestor, outside.FullName); }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
-                Directory.Move(preserved, owned.RootPath);
+                Directory.Move(preserved, ancestor);
                 throw Xunit.Sdk.SkipException.ForSkip($"Symbolic-link creation is unavailable: {exception.GetType().Name}");
             }
             return true;
         }
 
-        Assert.False(owned.TryDelete(Swap));
-        Assert.Equal("keep", File.ReadAllText(outsideFile));
+        try
+        {
+            Assert.False(owned.TryDelete(afterValidation: null, beforeFirstMutation: Swap));
+            Assert.Equal("keep", File.ReadAllText(outsideFile));
+        }
+        finally
+        {
+            if (Directory.Exists(ancestor) && File.GetAttributes(ancestor).HasFlag(FileAttributes.ReparsePoint))
+                Directory.Delete(ancestor);
+            if (Directory.Exists(preserved)) Directory.Move(preserved, ancestor);
+        }
     }
 
     public void Dispose()

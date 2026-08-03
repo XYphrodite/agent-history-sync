@@ -8,15 +8,17 @@ internal sealed class OwnedTemporaryDirectory
     private readonly string temporaryRoot;
     private readonly string markerToken;
     private readonly string expectedPrefix;
+    private readonly WindowsOwnedTreeDeleter.FileIdentity? rootIdentity;
 
     private OwnedTemporaryDirectory(string temporaryRoot, string rootPath, string expectedPrefix,
-        string markerPath, string markerToken)
+        string markerPath, string markerToken, WindowsOwnedTreeDeleter.FileIdentity? rootIdentity)
     {
         this.temporaryRoot = temporaryRoot;
         RootPath = rootPath;
         this.expectedPrefix = expectedPrefix;
         MarkerPath = markerPath;
         this.markerToken = markerToken;
+        this.rootIdentity = rootIdentity;
     }
 
     public string RootPath { get; }
@@ -42,7 +44,10 @@ internal sealed class OwnedTemporaryDirectory
                 4096, FileOptions.WriteThrough);
             marker.Write(Encoding.ASCII.GetBytes(markerToken));
             marker.Flush(flushToDisk: true);
-            return new OwnedTemporaryDirectory(canonicalTemporaryRoot, rootPath, expectedPrefix, markerPath, markerToken);
+            WindowsOwnedTreeDeleter.FileIdentity? identity =
+                WindowsOwnedTreeDeleter.TryGetIdentity(rootPath, out var captured) ? captured : null;
+            return new OwnedTemporaryDirectory(canonicalTemporaryRoot, rootPath, expectedPrefix, markerPath, markerToken,
+                identity);
         }
         catch
         {
@@ -52,31 +57,14 @@ internal sealed class OwnedTemporaryDirectory
         }
     }
 
-    public bool TryDelete(Func<bool>? afterValidation = null)
+    public bool TryDelete(Func<bool>? afterValidation = null, Func<bool>? beforeFirstMutation = null)
     {
+        if (!OperatingSystem.IsWindows() || rootIdentity is null) return false;
         try
         {
-            ValidateOwnedTree();
-            if (afterValidation is not null && !afterValidation()) return false;
-            var snapshot = ValidateOwnedTree();
-            foreach (var file in snapshot.Files.Where(path => !PathEquals(path, MarkerPath))
-                         .OrderByDescending(path => path.Length))
-            {
-                ValidateConcreteContainedEntry(file, expectDirectory: false);
-                File.SetAttributes(file, FileAttributes.Normal);
-                File.Delete(file);
-            }
-            foreach (var directory in snapshot.Directories.OrderByDescending(path => path.Length))
-            {
-                ValidateConcreteContainedEntry(directory, expectDirectory: true);
-                Directory.Delete(directory, recursive: false);
-            }
-            ValidateMarker();
-            File.SetAttributes(MarkerPath, FileAttributes.Normal);
-            File.Delete(MarkerPath);
-            ValidateRootIdentity();
-            Directory.Delete(RootPath, recursive: false);
-            return true;
+            ValidateRootLocation();
+            return WindowsOwnedTreeDeleter.TryDelete(RootPath, rootIdentity.Value, Path.GetFileName(MarkerPath),
+                markerToken, afterValidation, beforeFirstMutation);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                           SecurityException or InvalidDataException or ArgumentException)
@@ -85,73 +73,16 @@ internal sealed class OwnedTemporaryDirectory
         }
     }
 
-    private TreeSnapshot ValidateOwnedTree()
-    {
-        ValidateRootIdentity();
-        var files = new List<string>();
-        var directories = new List<string>();
-        Collect(new DirectoryInfo(RootPath), files, directories, isRoot: true);
-        ValidateMarker();
-        return new TreeSnapshot(files, directories);
-    }
-
-    private void Collect(DirectoryInfo directory, List<string> files, List<string> directories, bool isRoot)
-    {
-        ValidateConcreteContainedEntry(directory.FullName, expectDirectory: true);
-        foreach (var entry in directory.EnumerateFileSystemInfos())
-        {
-            var fullPath = Path.GetFullPath(entry.FullName);
-            EnsureContained(fullPath);
-            var attributes = entry.Attributes;
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-                throw new InvalidDataException("Reparse points are not owned temporary content.");
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                Collect(new DirectoryInfo(fullPath), files, directories, isRoot: false);
-            }
-            else
-            {
-                files.Add(fullPath);
-            }
-        }
-        if (!isRoot) directories.Add(Path.GetFullPath(directory.FullName));
-    }
-
-    private void ValidateRootIdentity()
+    private void ValidateRootLocation()
     {
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(RootPath));
         var parent = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetDirectoryName(root)!));
-        if (!PathEquals(parent, temporaryRoot)) throw new InvalidDataException("Temporary directory is not an immediate child of its trusted root.");
+        if (!PathEquals(parent, temporaryRoot))
+            throw new InvalidDataException("Temporary directory is not an immediate child of its trusted root.");
         var name = Path.GetFileName(root);
         var suffix = name.StartsWith(expectedPrefix, StringComparison.Ordinal) ? name[expectedPrefix.Length..] : string.Empty;
         if (suffix.Length != 32 || suffix.Any(character => !Uri.IsHexDigit(character)))
             throw new InvalidDataException("Temporary directory name does not match the owned prefix.");
-        ValidateConcreteContainedEntry(root, expectDirectory: true);
-    }
-
-    private void ValidateMarker()
-    {
-        ValidateConcreteContainedEntry(MarkerPath, expectDirectory: false);
-        using var stream = new FileStream(MarkerPath, FileMode.Open, FileAccess.Read, FileShare.None);
-        using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, leaveOpen: false);
-        if (!StringComparer.Ordinal.Equals(reader.ReadToEnd(), markerToken))
-            throw new InvalidDataException("Temporary directory ownership marker does not match this process.");
-    }
-
-    private void ValidateConcreteContainedEntry(string path, bool expectDirectory)
-    {
-        var fullPath = Path.GetFullPath(path);
-        EnsureContained(fullPath);
-        var attributes = File.GetAttributes(fullPath);
-        if (attributes.HasFlag(FileAttributes.ReparsePoint) || attributes.HasFlag(FileAttributes.Directory) != expectDirectory)
-            throw new InvalidDataException("Temporary content changed type or became a reparse point.");
-    }
-
-    private void EnsureContained(string path)
-    {
-        var rootWithSeparator = Path.TrimEndingDirectorySeparator(RootPath) + Path.DirectorySeparatorChar;
-        if (!path.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) && !PathEquals(path, RootPath))
-            throw new InvalidDataException("Temporary content escaped its owned directory.");
     }
 
     private static string CanonicalDirectory(string path)
@@ -169,6 +100,4 @@ internal sealed class OwnedTemporaryDirectory
     private static bool PathEquals(string left, string right) =>
         StringComparer.OrdinalIgnoreCase.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
             Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)));
-
-    private sealed record TreeSnapshot(IReadOnlyList<string> Files, IReadOnlyList<string> Directories);
 }
