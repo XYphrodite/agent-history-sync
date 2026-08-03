@@ -123,9 +123,9 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(encryptedIndex);
-        var temporaryRoot = Path.Combine(Path.GetTempPath(), "codex-history-sync-init-" + Guid.NewGuid().ToString("N"));
+        var ownedTemporary = OwnedTemporaryDirectory.Create(Path.GetTempPath(), "codex-history-sync-init-");
+        var temporaryRoot = ownedTemporary.RootPath;
         var clone = Path.Combine(temporaryRoot, "repository");
-        Directory.CreateDirectory(temporaryRoot);
         try
         {
             await RequireSuccessAsync(await git.RunAsync(["clone", "--no-checkout", "--origin", "origin", remoteUrl, clone], temporaryRoot, cancellationToken),
@@ -147,23 +147,9 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
         }
         finally
         {
-            DeleteOwnedTemporaryDirectoryBestEffort(temporaryRoot);
-        }
-    }
-
-    private static void DeleteOwnedTemporaryDirectoryBestEffort(string path)
-    {
-        try
-        {
-            if (!Directory.Exists(path)) return;
-            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-                File.SetAttributes(file, FileAttributes.Normal);
-            Directory.Delete(path, recursive: true);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-        {
-            // Initialization publication is already authoritative. Cleanup cannot make a successful remote
-            // commit safe to retry, and must not replace an earlier primary failure.
+            // Publication is authoritative. A failed ownership/safety check deliberately leaves the tree for
+            // later or manual recovery and never replaces the primary result.
+            ownedTemporary.TryDelete();
         }
     }
 

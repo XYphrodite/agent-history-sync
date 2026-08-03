@@ -32,7 +32,7 @@ Remote deletions are authenticated tombstones. Local backups created before repl
 - Concurrent edits to the same chat are not merged. Both authenticated versions are preserved as encrypted conflict evidence and require `--keep-local` or `--keep-remote`; `--export-both` is a non-resolving recovery aid.
 - Cleanup is best effort after an authoritative remote initialization. A cleanup error does not replace the primary result or encourage reinitializing an already-published repository.
 
-The release audit uses only synthetic disposable homes. It scans every blob reachable from every ref and historical commit, validates the allowed public manifest separately, authenticates every historical encrypted index and object with the test key, audits the dedicated working clone and typed agent logs, and checks forbidden filenames, marker content, local paths, and credential-bearing URLs. No real Codex history is used.
+The release audit uses only synthetic disposable homes. It scans every blob reachable from every ref and historical commit, validates the allowed public manifest separately, authenticates every historical encrypted index and object with the test key, audits the dedicated working clone and typed agent logs, and checks forbidden filenames, marker content, local paths, and credential-bearing URLs. The clone's explicitly allowed structural `.git` data is limited to Git control files, configuration, index, refs and reflogs, standard hook samples and `info` files, plus loose, packed, and temporary object-store artifacts. Their paths and bytes are audited too; `.git` is not excluded as a whole. No real Codex history is used.
 
 ## Reporting a suspected exposure
 

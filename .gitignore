@@ -7,3 +7,17 @@ artifacts/
 *.user
 *.suo
 
+# Generated Codex History Sync data if LOCALAPPDATA is deliberately redirected into this checkout.
+/CodexHistorySync/config.json
+/CodexHistorySync/keys/
+/CodexHistorySync/logs/
+/CodexHistorySync/repositories/*/state.json
+/CodexHistorySync/repositories/*/git/
+/CodexHistorySync/repositories/*/backups/
+/CodexHistorySync/repositories/*/conflicts/
+/CodexHistorySync/repositories/*/staging/
+
+# Explicit root-only destinations for copied real Codex history fixtures.
+/.codex/
+/.codex-history-fixtures/
+

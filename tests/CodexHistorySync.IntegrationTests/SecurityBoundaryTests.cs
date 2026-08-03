@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -20,6 +23,7 @@ public sealed class SecurityBoundaryTests : IDisposable
         new(1, new LogicalObjectId("__repository_index__"), ObjectKind.RepositoryIndex);
     private static readonly Regex CredentialUrl = new(@"https?://[^\s/:@]+:[^\s/@]+@", RegexOptions.IgnoreCase);
     private readonly string root = Path.Combine(Path.GetTempPath(), $"CodexHistorySync-security-{Guid.NewGuid():N}");
+    private readonly List<Process> childProcesses = [];
 
     [Fact]
     public void Cli_release_uses_documented_executable_identity()
@@ -54,7 +58,9 @@ public sealed class SecurityBoundaryTests : IDisposable
                 RepositoryId, key, crypto, CancellationToken.None);
             await new GitHubCliRepositoryGateway().PublishInitializationAsync(
                 remote, RepositoryId, created.Manifest, emptyIndex, CancellationToken.None);
-            var device = CreateDevice(remote, key);
+            var disposableRemote = $"https://github.com/codex-history-sync/disposable-audit-{suffix}.git";
+            var transportRemote = await StartGitDaemonAsync(root, Path.GetFileName(remote));
+            var device = await CreateDeviceAsync(remote, transportRemote, disposableRemote, key);
             await SeedExcludedFilesAsync(device.Paths, canaries, credentialUrl);
             await WriteSessionAsync(device.Paths.Sessions, "audit-session", canaries[0]);
             await device.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
@@ -69,6 +75,7 @@ public sealed class SecurityBoundaryTests : IDisposable
             var forbidden = canaries.Append(passphrase.AsSpan().ToString()).Append(credentialUrl).ToArray();
             await AuditAllReachableCommitsAsync(remote, passphrase, key, forbidden, crypto);
             await AuditWorkingCloneAsync(device.ClonePath, passphrase, key, forbidden, crypto);
+            await AuditDedicatedGitDirectoryAsync(device.ClonePath, forbidden);
             AuditFiles(Path.Combine(root, "audit-logs"), forbidden);
             Assert.False(Directory.Exists(device.StagingRoot) &&
                          Directory.EnumerateFileSystemEntries(device.StagingRoot).Any());
@@ -80,7 +87,8 @@ public sealed class SecurityBoundaryTests : IDisposable
         }
     }
 
-    private Device CreateDevice(string remote, byte[] key)
+    private async Task<Device> CreateDeviceAsync(string pushRemote, string transportRemote, string disposableRemote,
+        byte[] key)
     {
         var home = Path.Combine(root, "device", "codex");
         Directory.CreateDirectory(home);
@@ -88,14 +96,58 @@ public sealed class SecurityBoundaryTests : IDisposable
         Directory.CreateDirectory(paths.Sessions);
         var local = Path.Combine(root, "device", "local");
         var providerRoot = Path.Combine(root, "device", "provider");
+        var gitTransport = Path.Combine(root, "disposable-git-transport.cmd");
+        var transportUri = new Uri(transportRemote).AbsoluteUri;
+        await File.WriteAllTextAsync(gitTransport,
+            $"@echo off\r\ngit -c \"url.{transportUri}.insteadOf={disposableRemote}\" %*\r\n",
+            new UTF8Encoding(false));
         var backups = new BackupStore(RepositoryId, local, paths);
         var engine = new SyncEngine(RepositoryId, "device-a", paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
             new CodexHistoryWriter(paths, backups, new StoppedDetector()),
             new ConflictStore(RepositoryId, local, paths),
-            new GitStorageProvider(RepositoryId, remote, GitRemoteKind.Local, providerRoot),
+            new GitStorageProvider(RepositoryId, disposableRemote, GitRemoteKind.GitHub, providerRoot,
+                gitExecutable: gitTransport, visibilityVerifier: new PrivateVisibilityVerifier(),
+                pushTransport: new LocalFixturePushTransport(pushRemote)),
             Path.Combine(local, "staging"));
         return new Device(paths, Path.Combine(providerRoot, RepositoryId, "git"), Path.Combine(local, "staging"), engine);
+    }
+
+    private async Task<string> StartGitDaemonAsync(string basePath, string repositoryName)
+    {
+        using var reservation = new TcpListener(IPAddress.Loopback, 0);
+        reservation.Start();
+        var port = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        reservation.Stop();
+
+        var start = new ProcessStartInfo("git") { UseShellExecute = false, CreateNoWindow = true };
+        foreach (var argument in new[]
+                 {
+                     "daemon", "--reuseaddr", "--export-all", $"--base-path={basePath}",
+                     "--listen=127.0.0.1", $"--port={port}", basePath
+                 })
+            start.ArgumentList.Add(argument);
+        var daemon = Process.Start(start) ?? throw new InvalidOperationException("Unable to start disposable Git daemon.");
+        childProcesses.Add(daemon);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (daemon.HasExited)
+                throw new InvalidOperationException($"Disposable Git daemon exited with code {daemon.ExitCode}.");
+            try
+            {
+                using var probe = new TcpClient();
+                await probe.ConnectAsync(IPAddress.Loopback, port).WaitAsync(TimeSpan.FromMilliseconds(250));
+                return $"git://127.0.0.1:{port}/{repositoryName}";
+            }
+            catch (Exception exception) when (exception is SocketException or TimeoutException)
+            {
+                await Task.Delay(25);
+            }
+        }
+
+        throw new TimeoutException("Disposable Git daemon did not become ready.");
     }
 
     private static async Task SeedExcludedFilesAsync(CodexPaths paths, string[] canaries, string credentialUrl)
@@ -183,8 +235,12 @@ public sealed class SecurityBoundaryTests : IDisposable
     private static async Task AuditWorkingCloneAsync(string clone, char[] passphrase, byte[] key,
         string[] forbidden, RepositoryCrypto crypto)
     {
-        foreach (var path in Directory.EnumerateFiles(clone, "*", SearchOption.AllDirectories)
-                     .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}")))
+        var repositoryFiles = Directory.EnumerateFiles(clone, "*", SearchOption.TopDirectoryOnly);
+        var objectDirectory = Path.Combine(clone, "objects");
+        if (Directory.Exists(objectDirectory))
+            repositoryFiles = repositoryFiles.Concat(Directory.EnumerateFiles(objectDirectory, "*", SearchOption.AllDirectories));
+
+        foreach (var path in repositoryFiles)
         {
             var relative = Path.GetRelativePath(clone, path).Replace('\\', '/');
             AssertAllowedRepositoryPath(relative);
@@ -198,6 +254,109 @@ public sealed class SecurityBoundaryTests : IDisposable
             }
             else AssertChs1(bytes);
         }
+    }
+
+    private static async Task AuditDedicatedGitDirectoryAsync(string clone, string[] forbidden)
+    {
+        var gitDirectory = Path.Combine(clone, ".git");
+        Assert.True(Directory.Exists(gitDirectory), "Dedicated clone has no .git directory to audit.");
+
+        foreach (var path in Directory.EnumerateFiles(gitDirectory, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(gitDirectory, path).Replace('\\', '/');
+            AssertNoForbidden(Encoding.UTF8.GetBytes(relative), forbidden);
+            if (relative.StartsWith("objects/", StringComparison.Ordinal)) continue;
+            AssertAllowedGitMetadataPath(relative);
+            AssertNoForbidden(await File.ReadAllBytesAsync(path), forbidden);
+        }
+
+        await AuditReachableGitObjectsAsync(clone, forbidden);
+        await AuditStoredGitObjectsAsync(clone, forbidden);
+        AuditGitObjectStoreFiles(gitDirectory, forbidden);
+    }
+
+    private static async Task AuditReachableGitObjectsAsync(string clone, string[] forbidden)
+    {
+        foreach (var line in Lines(await GitTextAsync(clone, "rev-list", "--objects", "--all")))
+        {
+            AssertNoForbidden(Encoding.UTF8.GetBytes(line), forbidden);
+            var objectId = line.Split(' ', 2)[0];
+            var objectType = await GitTextAsync(clone, "cat-file", "-t", objectId);
+            AssertNoForbidden(await GitBytesAsync(clone, "cat-file", objectType, objectId), forbidden);
+        }
+    }
+
+    private static async Task AuditStoredGitObjectsAsync(string clone, string[] forbidden)
+    {
+        var inventory = await GitTextAsync(clone, "cat-file", "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)");
+        foreach (var line in Lines(inventory))
+        {
+            var fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            Assert.True(fields.Length == 2, $"Unexpected Git object inventory entry: {line}");
+            AssertNoForbidden(await GitBytesAsync(clone, "cat-file", fields[1], fields[0]), forbidden);
+        }
+    }
+
+    private static void AuditGitObjectStoreFiles(string gitDirectory, string[] forbidden)
+    {
+        var objectsDirectory = Path.Combine(gitDirectory, "objects");
+        Assert.True(Directory.Exists(objectsDirectory), "Dedicated clone has no Git object store to audit.");
+        foreach (var path in Directory.EnumerateFiles(objectsDirectory, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(objectsDirectory, path).Replace('\\', '/');
+            AssertAllowedGitObjectStorePath(relative);
+            var bytes = File.ReadAllBytes(path);
+            AssertNoForbidden(bytes, forbidden);
+            AuditInflatableGitObject(bytes, forbidden);
+        }
+    }
+
+    private static void AuditInflatableGitObject(byte[] bytes, string[] forbidden)
+    {
+        try
+        {
+            using var compressed = new MemoryStream(bytes, false);
+            using var inflater = new ZLibStream(compressed, CompressionMode.Decompress);
+            using var expanded = new MemoryStream();
+            inflater.CopyTo(expanded);
+            AssertNoForbidden(expanded.ToArray(), forbidden);
+        }
+        catch (InvalidDataException)
+        {
+            // Pack indexes, packfiles, and incomplete temporary objects are audited through raw bytes;
+            // every complete stored object is independently audited through cat-file above.
+        }
+    }
+
+    private static void AssertAllowedGitMetadataPath(string path)
+    {
+        var allowed = path is
+                "HEAD" or "config" or "description" or "index" or "ORIG_HEAD" or "FETCH_HEAD" or
+                "COMMIT_EDITMSG" or "packed-refs" or "info/exclude" or "codex-history-sync/repository-id" or
+                "refs/heads/main" or "refs/remotes/origin/HEAD" or "refs/remotes/origin/main" or
+                "logs/HEAD" or "logs/refs/heads/main" or "logs/refs/remotes/origin/HEAD" or
+                "logs/refs/remotes/origin/main" or
+                "hooks/applypatch-msg.sample" or "hooks/commit-msg.sample" or
+                "hooks/fsmonitor-watchman.sample" or "hooks/post-update.sample" or
+                "hooks/pre-applypatch.sample" or "hooks/pre-commit.sample" or
+                "hooks/pre-merge-commit.sample" or "hooks/pre-push.sample" or
+                "hooks/pre-rebase.sample" or "hooks/pre-receive.sample" or
+                "hooks/prepare-commit-msg.sample" or "hooks/push-to-checkout.sample" or
+                "hooks/sendemail-validate.sample" or "hooks/update.sample";
+        Assert.True(allowed, $"Unexpected dedicated-clone Git metadata: {path}");
+    }
+
+    private static void AssertAllowedGitObjectStorePath(string path)
+    {
+        var allowed = Regex.IsMatch(path, "^[a-f0-9]{2}/(?:[a-f0-9]{38}|[a-f0-9]{62})$") ||
+                      Regex.IsMatch(path, "^(?:[a-f0-9]{2}/)?tmp[_-].+$", RegexOptions.IgnoreCase) ||
+                      Regex.IsMatch(path, "^pack/pack-[a-f0-9]{40,64}\\.(?:pack|idx|rev|bitmap|mtimes|promisor)$") ||
+                      Regex.IsMatch(path, "^pack/(?:tmp[_-].+|multi-pack-index(?:-[a-f0-9]{40,64}\\.bitmap)?)$",
+                          RegexOptions.IgnoreCase) ||
+                      path is "info/packs" or "info/commit-graph" or "info/commit-graphs/commit-graph-chain" ||
+                      Regex.IsMatch(path, "^info/commit-graphs/graph-[a-f0-9]{40,64}\\.graph$");
+        Assert.True(allowed, $"Unexpected dedicated-clone Git object-store artifact: {path}");
     }
 
     private static void AuditFiles(string directory, string[] forbidden)
@@ -259,6 +418,15 @@ public sealed class SecurityBoundaryTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var process in childProcesses)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+            process.Dispose();
+        }
         if (!Directory.Exists(root)) return;
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             File.SetAttributes(file, FileAttributes.Normal);
@@ -267,6 +435,19 @@ public sealed class SecurityBoundaryTests : IDisposable
 
     private sealed record Device(CodexPaths Paths, string ClonePath, string StagingRoot, SyncEngine Engine);
     private sealed record IndexEntry(string Id, ObjectKind Kind);
+    private sealed class PrivateVisibilityVerifier : IGitHubVisibilityVerifier
+    {
+        public Task<GitHubVisibilityResult> VerifyPrivateAsync(string repository, CancellationToken cancellationToken) =>
+            Task.FromResult(new GitHubVisibilityResult(true, "Synthetic disposable repository is private."));
+    }
+
+    private sealed class LocalFixturePushTransport(string remote) : IGitPushTransport
+    {
+        public Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory,
+            CancellationToken cancellationToken) =>
+            git.RunAsync(["push", remote, "HEAD:main"], workingDirectory, cancellationToken);
+    }
+
     private sealed class StoppedDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;
