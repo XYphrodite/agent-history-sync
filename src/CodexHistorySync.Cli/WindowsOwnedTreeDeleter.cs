@@ -77,7 +77,6 @@ internal static class WindowsOwnedTreeDeleter
             if (afterValidation is not null && !afterValidation()) return false;
             ValidateSnapshot(root, marker, markerToken);
             if (beforeFirstMutation is not null && !beforeFirstMutation()) return false;
-            ValidateSnapshot(root, marker, markerToken);
 
             foreach (var node in PostOrder(root).Where(node => !ReferenceEquals(node, marker)))
                 DeleteByHandle(node.Handle, node.Name);
