@@ -64,9 +64,11 @@ public sealed class OwnedTemporaryDirectoryTests : IDisposable
         File.WriteAllText(Path.Combine(descendant.FullName, "owned.txt"), "owned");
         var ancestor = Path.Combine(owned.RootPath, "repository");
         var preserved = Path.Combine(owned.RootPath, "repository.preserved");
+        var hookInvoked = false;
 
         bool Swap()
         {
+            hookInvoked = true;
             Directory.Move(ancestor, preserved);
             try { Directory.CreateSymbolicLink(ancestor, outside.FullName); }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -80,6 +82,7 @@ public sealed class OwnedTemporaryDirectoryTests : IDisposable
         try
         {
             Assert.False(owned.TryDelete(afterValidation: null, beforeFirstMutation: Swap));
+            Assert.True(hookInvoked);
             Assert.Equal("keep", File.ReadAllText(outsideFile));
         }
         finally
