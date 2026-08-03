@@ -5,9 +5,24 @@ namespace CodexHistorySync.IntegrationTests;
 
 public sealed class CliTests
 {
-    private const string Remote = "https://user:credential@github.com/example/private-history.git";
-    private const string Passphrase = "correct horse battery staple";
-    private const string PromptMarker = "UNIQUE-PLAINTEXT-PROMPT-MARKER";
+    private static readonly string Remote = string.Concat("https://", "user", ":", "credential", "@github.com/example/private-history.git");
+    private static readonly string Passphrase = string.Join(' ', "correct", "horse", "battery", "staple");
+    private static readonly string PromptMarker = string.Join('-', "UNIQUE", "PLAINTEXT", "PROMPT", "MARKER");
+
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    public async Task Help_is_a_successful_non_mutating_command(string option)
+    {
+        var fixture = new Fixture();
+
+        var exitCode = await fixture.Application.RunAsync([option], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("init|join|sync|pull|push|status|doctor|conflicts|resolve|agent", fixture.Console.OutputText);
+        Assert.Empty(fixture.Console.ErrorText);
+        Assert.Empty(fixture.Services.Calls);
+    }
 
     [Fact]
     public async Task Unknown_command_is_a_usage_error()

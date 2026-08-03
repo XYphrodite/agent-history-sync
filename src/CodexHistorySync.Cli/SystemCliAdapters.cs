@@ -126,7 +126,6 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
         var temporaryRoot = Path.Combine(Path.GetTempPath(), "codex-history-sync-init-" + Guid.NewGuid().ToString("N"));
         var clone = Path.Combine(temporaryRoot, "repository");
         Directory.CreateDirectory(temporaryRoot);
-        Exception? primary = null;
         try
         {
             await RequireSuccessAsync(await git.RunAsync(["clone", "--no-checkout", "--origin", "origin", remoteUrl, clone], temporaryRoot, cancellationToken),
@@ -146,15 +145,25 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
             await RequireSuccessAsync(revision, "Unable to resolve initialization revision.").ConfigureAwait(false);
             return new CliPublishedInitialization(manifest.ToArray(), encryptedIndex.ToArray(), revision.StandardOutput.Trim());
         }
-        catch (Exception exception)
-        {
-            primary = exception;
-            throw;
-        }
         finally
         {
-            try { Directory.Delete(temporaryRoot, recursive: true); }
-            catch (Exception cleanup) when (primary is not null && cleanup is IOException or UnauthorizedAccessException) { }
+            DeleteOwnedTemporaryDirectoryBestEffort(temporaryRoot);
+        }
+    }
+
+    private static void DeleteOwnedTemporaryDirectoryBestEffort(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(path, recursive: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // Initialization publication is already authoritative. Cleanup cannot make a successful remote
+            // commit safe to retry, and must not replace an earlier primary failure.
         }
     }
 

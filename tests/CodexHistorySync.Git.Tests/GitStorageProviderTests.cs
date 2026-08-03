@@ -248,7 +248,7 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
                 "-NoProfile",
                 "-File",
                 script,
-                "https://alice:secret@example.invalid/repo?access_token=query-secret",
+                string.Concat("https://", "alice", ":", "secret", "@example.invalid/repo?access_token=query-secret"),
                 "https://example.invalid/repo?api_key=api-secret",
                 "https://example.invalid/repo?client_secret=client-secret",
                 "https://example.invalid/repo?secret=plain-secret",

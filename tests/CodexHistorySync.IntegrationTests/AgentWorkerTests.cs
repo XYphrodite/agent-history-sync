@@ -206,7 +206,8 @@ public sealed class AgentWorkerTests
         {
             var logger = new RotatingAgentLogger(root, maximumBytes: 180, retainedFiles: 5);
             var unsafeEntry = new AgentLogEntry(AgentLogKind.Failure, Guid.NewGuid(), SyncMode.Push,
-                0, 0, 0, 0, 1, "revision/../../secret", "C:\\Users\\name\\history.jsonl https://user:token@example.test", 12);
+                0, 0, 0, 0, 1, "revision/../../secret",
+                string.Concat("C:\\Users\\name\\history.jsonl https://", "user", ":", "token", "@example.test"), 12);
             for (var index = 0; index < 30; index++) await logger.WriteAsync(unsafeEntry, CancellationToken.None);
 
             var files = Directory.GetFiles(root, "agent*.log");

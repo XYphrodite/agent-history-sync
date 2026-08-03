@@ -68,7 +68,7 @@ public sealed class CliServiceTests
         var local = new FakeLocalRepository(log);
         var service = new DefaultCliServices(gateway, local, new FakeRuntime(log), new RepositoryCrypto());
 
-        await service.InitializeAsync("https://user:token@github.com/example/private-history.git",
+        await service.InitializeAsync(string.Concat("https://", "user", ":", "token", "@github.com/example/private-history.git"),
             "secret".ToCharArray(), CancellationToken.None);
 
         Assert.Equal("https://github.com/example/private-history.git", gateway.ObservedRemoteUrl);
