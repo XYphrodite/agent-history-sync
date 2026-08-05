@@ -431,8 +431,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
         var writer = new CodexHistoryWriter(paths, backups, processDetector);
+        // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
-            Path.Combine(localAppData, "CodexHistorySync", "repositories"));
+            Path.Combine(localAppData, "CodexHistorySync", "repositories"),
+            commandTimeout: TimeSpan.FromMinutes(30));
         if (pinnedRevision is not null) provider = new RevisionPinnedProvider(provider, pinnedRevision);
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,

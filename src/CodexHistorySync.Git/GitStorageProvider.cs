@@ -186,6 +186,7 @@ public sealed class GitStorageProvider : IStorageProvider
         {
             EnsureSafeDirectory(_clonePath);
             EnsureOwnedClone();
+            await ConfigureIdentityAsync(ct).ConfigureAwait(false);
             return;
         }
 
@@ -214,6 +215,11 @@ public sealed class GitStorageProvider : IStorageProvider
 
     private async Task ConfigureIdentityAsync(CancellationToken ct)
     {
+        // Large first-time history packs need a bigger HTTP buffer; GitHub often resets the default.
+        var postBuffer = await RunGitAsync(["config", "http.postBuffer", "524288000"], ct).ConfigureAwait(false);
+        if (postBuffer.ExitCode != 0) ThrowGitFailure("Unable to configure the dedicated clone HTTP buffer.", postBuffer);
+        var httpVersion = await RunGitAsync(["config", "http.version", "HTTP/1.1"], ct).ConfigureAwait(false);
+        if (httpVersion.ExitCode != 0) ThrowGitFailure("Unable to configure the dedicated clone HTTP version.", httpVersion);
         var email = await RunGitAsync(["config", "user.email", "codex-history-sync@localhost"], ct).ConfigureAwait(false);
         if (email.ExitCode != 0) ThrowGitFailure("Unable to configure the dedicated clone identity.", email);
         var name = await RunGitAsync(["config", "user.name", "Codex History Sync"], ct).ConfigureAwait(false);
@@ -357,8 +363,13 @@ public sealed class GitStorageProvider : IStorageProvider
         result.StandardError.Contains("couldn't find remote ref", StringComparison.OrdinalIgnoreCase) ||
         result.StandardError.Contains("could not find remote branch", StringComparison.OrdinalIgnoreCase);
 
-    private static void ThrowGitFailure(string message, GitCommandResult result) =>
-        throw new InvalidOperationException($"{message} {GitCommand.Redact(result.StandardError)}".Trim());
+    private static void ThrowGitFailure(string message, GitCommandResult result)
+    {
+        var detail = result.TimedOut
+            ? "The Git command timed out."
+            : GitCommand.Redact(result.StandardError);
+        throw new InvalidOperationException($"{message} {detail}".Trim());
+    }
 
     private static void AssertContained(string child, string parent)
     {

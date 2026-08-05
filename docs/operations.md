@@ -44,6 +44,8 @@ codex-sync push   # publish only; never replace local history
 
 All three commands call the same `SyncEngine` used by automation. Each command disposes its temporary engine after the operation, serializing with any active work and zeroing the engine-owned repository-key copy. Output contains only revisions and object counts. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
 
+GitHub rejects individual blobs larger than 100 MiB. Session files larger than ~95 MiB of plaintext are skipped on upload (`skipped-oversized=N` in the command output) so the rest of the history can still publish. They remain local-only until reduced or moved offline.
+
 ## Status and diagnostics
 
 ```powershell
