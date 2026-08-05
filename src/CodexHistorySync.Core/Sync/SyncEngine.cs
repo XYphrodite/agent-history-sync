@@ -14,7 +14,14 @@ namespace CodexHistorySync.Core.Sync;
 
 public enum SyncMode { Pull, Push, Bidirectional }
 
-public sealed record SyncResult(string RemoteRevision, int Uploaded, int Downloaded, int Deleted, int Conflicts, bool RemoteChangedDuringAttempt);
+public sealed record SyncResult(
+    string RemoteRevision,
+    int Uploaded,
+    int Downloaded,
+    int Deleted,
+    int Conflicts,
+    bool RemoteChangedDuringAttempt,
+    int SkippedOversized = 0);
 public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges,
     IReadOnlySet<string> ConflictIdentities)
 {
@@ -36,6 +43,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
 {
     private const int IndexSchemaVersion = 1;
     private const string IndexObjectId = "__repository_index__";
+    // GitHub hard-rejects blobs over 100 MiB; leave headroom for CHS1 framing/overhead.
+    internal const long MaximumGitHubPlaintextBytes = 95L * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly EnvelopeMetadata IndexMetadata = new(IndexSchemaVersion, new LogicalObjectId(IndexObjectId), ObjectKind.RepositoryIndex);
     private static readonly Regex HashPattern = new("^[a-f0-9]{64}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -129,6 +138,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     var attemptUploads = 0;
                     var attemptDownloaded = 0;
                     var attemptDeleted = 0;
+                    var skippedOversized = 0;
                     var stagedImports = new Dictionary<LogicalObjectId, StagedImport>();
                     var pendingConflicts = new List<PendingConflict>();
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
@@ -156,6 +166,20 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             case SyncActionKind.Upload when mode != SyncMode.Pull:
                             {
                                 var source = locals.Single(item => item.Id == action.ObjectId);
+                                // GitHub rejects individual blobs over 100 MiB; skip rather than failing the whole push.
+                                long sourceLength;
+                                try { sourceLength = new FileInfo(source.SourcePath).Length; }
+                                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                                {
+                                    deferred.Add(action.ObjectId);
+                                    break;
+                                }
+                                if (sourceLength > MaximumGitHubPlaintextBytes)
+                                {
+                                    deferred.Add(action.ObjectId);
+                                    skippedOversized++;
+                                    break;
+                                }
                                 var entry = await StageEncryptedObjectAsync(source.Id, source.Kind, source.Hash, false, source.SourcePath, directory, ct).ConfigureAwait(false);
                                 entries[entry.Id] = entry;
                                 changes.Add(new EncryptedObjectChange(new LogicalObjectId(entry.OpaqueObjectId), entry.StagedPath!, false));
@@ -327,13 +351,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             if (!deferred.Contains(action.ObjectId) && successful.TryGetValue(action.ObjectId, out var version)) next[action.ObjectId] = version;
                         if (!remote.HasAuthenticatedIndex && changes.Count == 0 && baseline.Count == 0)
                             return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
-                                await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced);
+                                await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized);
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
                             next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
                         stateSaved = true;
                         operationCommitted = true;
                         return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
-                            await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced);
+                            await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized);
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
                     {

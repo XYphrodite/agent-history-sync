@@ -100,9 +100,13 @@ public sealed class CliApplication
             console.WriteError("Security or compatibility gate failed.");
             return 3;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            console.WriteError("Operation failed.");
+            // Keep output free of paths/secrets; surface only a stable type token for support.
+            console.WriteError($"Operation failed: {SafeToken(exception.GetType().Name)}.");
+            var message = exception.Message;
+            if (!string.IsNullOrWhiteSpace(message))
+                console.WriteError(SafeToken(message.Length > 160 ? message[..160] : message));
             return 1;
         }
     }
@@ -172,7 +176,7 @@ public sealed class CliApplication
     private async Task<int> RunSyncAsync(SyncMode mode, CancellationToken cancellationToken)
     {
         var result = await services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
-        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts}");
+        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

@@ -21,7 +21,8 @@ public sealed class RepositoryCrypto
     private const byte FormatVersion = 1;
     private const int FixedHeaderSize = 37;
     private const int MaximumObjectIdBytes = 1_024;
-    private const int MaximumPayloadBytes = 128 * 1024 * 1024;
+    // Long Codex VS Code sessions can exceed 128 MiB; keep a hard ceiling for memory safety.
+    private const int MaximumPayloadBytes = 512 * 1024 * 1024;
     private static readonly byte[] Magic = "CHS1"u8.ToArray();
     private static readonly byte[] ObjectKeyLabel = "CodexHistorySync/object-key/v1"u8.ToArray();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
