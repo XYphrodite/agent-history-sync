@@ -120,11 +120,17 @@ The disposable two-device engine/recovery acceptance is automated and passing, b
 - Elevated ownership verification passed 4/4 with zero skips, including normal deletion of a read-only owned leaf. Combined elevated ownership/security/recovery verification passed 10/10 with zero skips. Full unrestricted Release verification passed 284/284: Core 107, Integration 139, Git 14, Windows 24.
 - The republished output contains exactly one 74,181,370-byte PE executable with `MZ` header and SHA-256 `512664a8153ad3ca738dab30bcdaac521e6b29193a849405baa7d6410d816f47`. `--help` returned 0 and listed every documented command; unconfigured `doctor` returned 3 with nine named PASS/FAIL-only lines.
 - Redirected-current-profile smoke returned the same doctor result, created only Codex's three disposable argument-helper files beneath redirected `CODEX_HOME`, and removed its validated GUID temporary root. Tracked-source and binary scans found no workspace path or credential-bearing URL; the only tracked 32-hex literals were three allowlisted cryptographic salt fixtures. Disposable security/recovery/ownership/agent/smoke/init temp scans were empty and `git diff --check` passed.
-- A true clean Windows profile was not available and remains unverified. Independent review remains pending; no review approval is claimed.
+- A true clean Windows profile was not available and remains unverified. The user explicitly chose to skip creation of a temporary Windows account on 2026-08-05; this is an accepted external-test waiver, not a successful clean-profile result.
+
+## Controller completion disposition
+
+- Independent round-3 review passed with no findings after verifying the true final-validation-to-first-mutation gap and the non-vacuous normal-deletion test.
+- Controller Release verification passed 284/284: Core 107, Integration 139, Git 14, Windows 24.
+- Controller smoke verified the single 74,181,370-byte `codex-sync.exe`, SHA-256 `512664a8153ad3ca738dab30bcdaac521e6b29193a849405baa7d6410d816f47`, `--help` exit 0, and unconfigured `doctor` exit 3 with named PASS/FAIL-only output.
+- Task 10 is complete subject to the explicitly accepted clean-profile waiver above.
 
 ## Deferred risks
 
 - DPAPI concurrent save/load/delete stress, replacement ACL retention, injected temp cleanup, and exceptional-path zeroization remain the Task 3 defense-in-depth minor; the existing DPAPI/user-isolation suite passes.
 - Whitespace-only JSONL policy remains explicitly undecided; complete newline-terminated JSON records are required and partial records defer.
-- Clean-profile execution remains unverified; only publication and local smoke are passed.
-- Independent review remains pending; no independent approval is claimed.
+- Clean-profile execution remains unverified by explicit user choice; publication and local/redirected-profile smoke are passed.
