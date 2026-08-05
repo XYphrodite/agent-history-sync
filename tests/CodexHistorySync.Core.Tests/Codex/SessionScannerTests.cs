@@ -111,17 +111,49 @@ public sealed class SessionScannerTests
     }
 
     [Fact]
-    public async Task ScanAsyncSkipsLaterSessionWithDuplicateLogicalId()
+    public async Task ScanDetailedAsync_ReportsDuplicateLogicalIdAcrossActiveAndArchivedRootsAsFatalAndUncertain()
     {
-        // Accepting both copies would make a logical object resolve nondeterministically.
+        // Silently choosing either kind would make planning and tombstone publication nondeterministic.
         await using var fixture = await CodexHomeFixture.CreateAsync();
-        var first = await fixture.WriteSessionAsync("sessions", "first.jsonl", "duplicate-thread");
+        await fixture.WriteSessionAsync("sessions", "first.jsonl", "duplicate-thread");
         await fixture.WriteSessionAsync("archived_sessions", "second.jsonl", "duplicate-thread");
 
-        var found = await new SessionScanner(TimeSpan.Zero).ScanAsync(CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+        var result = await new SessionScanner(TimeSpan.Zero).ScanDetailedAsync(
+            CodexPaths.Resolve(fixture.Home), CancellationToken.None);
 
-        var session = Assert.Single(found);
-        Assert.Equal(Path.GetFullPath(first), session.SourcePath);
+        Assert.True(result.HasFatalErrors);
+        Assert.Contains(new LogicalObjectId("duplicate-thread"), result.DuplicateIds);
+        Assert.DoesNotContain(result.Objects, item => item.Id == new LogicalObjectId("duplicate-thread"));
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ArchivedSession));
+    }
+
+    [Fact]
+    public async Task ScanDetailedAsync_ReportsDuplicateLogicalIdWithinSameRootAsFatalAndUncertain()
+    {
+        // Silently choosing one same-kind file would discard user history from the scan boundary.
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        await fixture.WriteSessionAsync("sessions", "first.jsonl", "duplicate-thread");
+        await fixture.WriteSessionAsync("sessions", "nested\\second.jsonl", "duplicate-thread");
+
+        var result = await new SessionScanner(TimeSpan.Zero).ScanDetailedAsync(
+            CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+
+        Assert.True(result.HasFatalErrors);
+        Assert.Contains(new LogicalObjectId("duplicate-thread"), result.DuplicateIds);
+        Assert.DoesNotContain(result.Objects, item => item.Id == new LogicalObjectId("duplicate-thread"));
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
+    }
+
+    [Fact]
+    public async Task ScanAsync_ThrowsWhenDuplicateLogicalIdsExist()
+    {
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        await fixture.WriteSessionAsync("sessions", "first.jsonl", "duplicate-thread");
+        await fixture.WriteSessionAsync("archived_sessions", "second.jsonl", "duplicate-thread");
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new SessionScanner(TimeSpan.Zero).ScanAsync(CodexPaths.Resolve(fixture.Home), CancellationToken.None));
     }
 
     [Fact]

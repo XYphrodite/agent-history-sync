@@ -401,6 +401,7 @@ public sealed class AgentWorkerTests
         public Task<CliInitializationResult> InitializeAsync(string remoteUrl, ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<CliAuthenticatedRepository> AuthenticateRepositoryAsync(string remoteUrl, ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<CliGateResult> ProbeCompatibilityAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<CompatibilityResult> ProbeCompatibilitySessionAsync(string sourceSession, string codexExecutable, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<CliJoinPlan> PlanJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<SyncResult> ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task AbortJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken) => throw new NotSupportedException();

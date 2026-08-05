@@ -7,8 +7,10 @@ namespace CodexHistorySync.Core.Codex;
 
 public sealed record SessionScanResult(
     IReadOnlyList<LocalObject> Objects,
-    IReadOnlySet<ObjectKind> UncertainKinds)
+    IReadOnlySet<ObjectKind> UncertainKinds,
+    IReadOnlySet<LogicalObjectId> DuplicateIds)
 {
+    public bool HasFatalErrors => DuplicateIds.Count != 0;
     public bool IsAbsenceConfirmed(ObjectKind kind) => !UncertainKinds.Contains(kind);
 }
 
@@ -41,27 +43,37 @@ public sealed class SessionScanner
     }
 
     public async Task<IReadOnlyList<LocalObject>> ScanAsync(CodexPaths paths, CancellationToken cancellationToken)
-        => (await ScanDetailedAsync(paths, cancellationToken).ConfigureAwait(false)).Objects;
+    {
+        var result = await ScanDetailedAsync(paths, cancellationToken).ConfigureAwait(false);
+        if (result.HasFatalErrors)
+            throw new InvalidDataException("Local history contains duplicate logical object IDs.");
+        return result.Objects;
+    }
 
     public async Task<SessionScanResult> ScanDetailedAsync(CodexPaths paths, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
         var objects = new List<LocalObject>();
-        var ids = new HashSet<LogicalObjectId>();
+        var objectsById = new Dictionary<LogicalObjectId, LocalObject>();
         var uncertainKinds = new HashSet<ObjectKind>();
-        if (!await ScanDirectoryAsync(paths.Sessions, ObjectKind.ActiveSession, ids, objects, cancellationToken).ConfigureAwait(false))
+        var duplicateIds = new HashSet<LogicalObjectId>();
+        if (!await ScanDirectoryAsync(paths.Sessions, ObjectKind.ActiveSession, objectsById, objects, uncertainKinds,
+                duplicateIds, cancellationToken).ConfigureAwait(false))
             uncertainKinds.Add(ObjectKind.ActiveSession);
-        if (!await ScanDirectoryAsync(paths.ArchivedSessions, ObjectKind.ArchivedSession, ids, objects, cancellationToken).ConfigureAwait(false))
+        if (!await ScanDirectoryAsync(paths.ArchivedSessions, ObjectKind.ArchivedSession, objectsById, objects,
+                uncertainKinds, duplicateIds, cancellationToken).ConfigureAwait(false))
             uncertainKinds.Add(ObjectKind.ArchivedSession);
-        return new SessionScanResult(objects, uncertainKinds);
+        return new SessionScanResult(objects, uncertainKinds, duplicateIds);
     }
 
     private async Task<bool> ScanDirectoryAsync(
         string directory,
         ObjectKind kind,
-        HashSet<LogicalObjectId> ids,
+        Dictionary<LogicalObjectId, LocalObject> objectsById,
         List<LocalObject> objects,
+        HashSet<ObjectKind> uncertainKinds,
+        HashSet<LogicalObjectId> duplicateIds,
         CancellationToken cancellationToken)
     {
         if (!Directory.Exists(directory)) return false;
@@ -93,7 +105,16 @@ public sealed class SessionScanner
 
             var session = await ReadStableSessionAsync(candidate, kind, cancellationToken);
             if (session is null) complete = false;
-            else if (ids.Add(session.Id)) objects.Add(session);
+            else if (objectsById.TryAdd(session.Id, session)) objects.Add(session);
+            else
+            {
+                // Never silently prefer the first path: drop both sides from Objects and fail closed.
+                duplicateIds.Add(session.Id);
+                uncertainKinds.Add(objectsById[session.Id].Kind);
+                uncertainKinds.Add(session.Kind);
+                if (objectsById.Remove(session.Id, out var prior))
+                    objects.Remove(prior);
+            }
         }
         return complete;
     }

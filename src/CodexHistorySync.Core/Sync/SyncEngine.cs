@@ -106,6 +106,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             for (var attempt = 1; attempt <= 5; attempt++)
             {
                 var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                EnsureScanUsable(scan);
                 var locals = scan.Objects;
                 var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
                 var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
@@ -193,6 +194,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         {
                             _hooks.OnBeforeLocalPublicationPrecondition();
                             var publicationScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                            EnsureScanUsable(publicationScan);
                             if (tombstones.Any(action => !IsAbsenceConfirmed(publicationScan, action))) continue;
                         }
                         var result = await _provider.TryPublishAsync(new PublishRequest(snapshot.Revision,
@@ -215,6 +217,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
                         {
                             var staged = stagedImports[action.ObjectId];
+                            if (staged.RelocateFrom is not null)
+                                mutationPlans.Add(new HistoryMutationPlan(staged.RelocateFrom,
+                                    ExpectedHistoryState.Present(staged.RelocateFrom.Hash),
+                                    ExpectedHistoryState.Absent));
                             mutationPlans.Add(new HistoryMutationPlan(staged.Incoming, staged.ExpectedState,
                                 ExpectedHistoryState.Present(staged.Incoming.Hash)));
                         }
@@ -235,25 +241,60 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         {
                             if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
                             {
-                                await mutationBatch!.BeginApplyAsync(action.ObjectId, ct).ConfigureAwait(false);
-                                if (await ApplyStagedImportAsync(stagedImports[action.ObjectId], operationId, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
+                                var staged = stagedImports[action.ObjectId];
+                                if (staged.RelocateFrom is not null)
                                 {
-                                    await mutationBatch.MarkSkippedAsync(action.ObjectId, ct).ConfigureAwait(false);
-                                    successful.Remove(action.ObjectId);
-                                    deferred.Add(action.ObjectId);
-                                    var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
-                                    var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId);
-                                    var conflict = action with
+                                    await mutationBatch!.BeginApplyAsync(staged.RelocateFrom, ct).ConfigureAwait(false);
+                                    if (await _historyWriter.ApplyTombstoneAsync(staged.RelocateFrom, staged.RelocateFrom.Hash,
+                                            operationId, ct).ConfigureAwait(false) == TombstoneApplyResult.Conflict)
                                     {
-                                        Kind = SyncActionKind.Conflict,
-                                        Local = current is null
-                                            ? new ObjectVersion(action.ObjectId, action.Remote!.Kind, EmptyHash(), "local:deleted", true)
-                                            : new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
-                                    };
-                                    await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
-                                    continue;
+                                        await mutationBatch.MarkSkippedAsync(staged.RelocateFrom, ct).ConfigureAwait(false);
+                                        await mutationBatch.MarkSkippedAsync(staged.Incoming, ct).ConfigureAwait(false);
+                                        successful.Remove(action.ObjectId);
+                                        deferred.Add(action.ObjectId);
+                                        var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                        var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId);
+                                        var conflict = action with
+                                        {
+                                            Kind = SyncActionKind.Conflict,
+                                            Local = current is null
+                                                ? new ObjectVersion(action.ObjectId, action.Remote!.Kind, EmptyHash(), "local:deleted", true)
+                                                : new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
+                                        };
+                                        await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+                                        continue;
+                                    }
+                                    await mutationBatch.MarkAppliedAsync(staged.RelocateFrom, ct).ConfigureAwait(false);
+                                    await mutationBatch.BeginApplyAsync(staged.Incoming, ct).ConfigureAwait(false);
+                                    if (await ApplyStagedImportAsync(staged, operationId, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
+                                    {
+                                        // Old kind was already removed; roll the dual mutation back before converting.
+                                        throw new IOException("Local history changed during cross-kind download.");
+                                    }
+                                    await mutationBatch.MarkAppliedAsync(staged.Incoming, ct).ConfigureAwait(false);
                                 }
-                                await mutationBatch.MarkAppliedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                else
+                                {
+                                    await mutationBatch!.BeginApplyAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                    if (await ApplyStagedImportAsync(staged, operationId, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
+                                    {
+                                        await mutationBatch.MarkSkippedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                        successful.Remove(action.ObjectId);
+                                        deferred.Add(action.ObjectId);
+                                        var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                        var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId);
+                                        var conflict = action with
+                                        {
+                                            Kind = SyncActionKind.Conflict,
+                                            Local = current is null
+                                                ? new ObjectVersion(action.ObjectId, action.Remote!.Kind, EmptyHash(), "local:deleted", true)
+                                                : new ObjectVersion(current.Id, current.Kind, current.Hash, "local:" + current.Hash.Hex, false)
+                                        };
+                                        await PublishConflictAsync(await PrepareConflictAsync(conflict, refreshed, remote, ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+                                        continue;
+                                    }
+                                    await mutationBatch.MarkAppliedAsync(action.ObjectId, ct).ConfigureAwait(false);
+                                }
                                 attemptDownloaded++;
                             }
                             else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null)
@@ -334,6 +375,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         {
             ThrowIfDisposed();
             var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+            EnsureScanUsable(scan);
             var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
             var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
@@ -370,6 +412,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 return new SyncConflictResolutionResult(await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), true);
 
             var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+            EnsureScanUsable(scan);
             ValidateConflictLocal(conflict, scan, resolution);
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
             var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
@@ -469,6 +512,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 try
                 {
                     var finalScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                    EnsureScanUsable(finalScan);
                     ValidateSelectedLocal(selectedMetadata, finalScan, deleted, hash);
                     var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
                     next[id] = selectedVersion;
@@ -920,7 +964,19 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             ObjectKind.ArchivedSession => _paths.ArchivedSessions,
             _ => throw new InvalidDataException("Only session history can be imported.")
         };
-        var path = existing?.SourcePath ?? Path.Combine(root, action.ObjectId.Value + ".jsonl");
+        // Destination always follows the remote kind root. A different local kind is tombstoned first
+        // (RelocateFrom) so we never rewrite active bytes into the archived tree or the reverse.
+        LocalObject? relocateFrom = null;
+        string path;
+        if (existing is null)
+            path = Path.Combine(root, action.ObjectId.Value + ".jsonl");
+        else if (existing.Kind == version.Kind)
+            path = existing.SourcePath;
+        else
+        {
+            relocateFrom = existing;
+            path = Path.Combine(root, action.ObjectId.Value + ".jsonl");
+        }
         var stagedDirectory = Path.Combine(directory, "downloads");
         Directory.CreateDirectory(stagedDirectory);
         var stagedPath = Path.Combine(stagedDirectory, Guid.NewGuid().ToString("N") + ".jsonl");
@@ -938,10 +994,18 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         ValidateSessionJsonl(staged, action.ObjectId, ct);
         var incoming = new LocalObject(action.ObjectId, version.Kind, path, version.PlaintextHash,
             staged.LongLength, DateTimeOffset.UtcNow);
-        var expected = action.Local is { IsDeleted: false } local
-            ? ExpectedHistoryState.Present(local.PlaintextHash)
-            : ExpectedHistoryState.Absent;
-        return new StagedImport(incoming, stagedPath, expected);
+        var expected = relocateFrom is not null
+            ? ExpectedHistoryState.Absent
+            : action.Local is { IsDeleted: false } local
+                ? ExpectedHistoryState.Present(local.PlaintextHash)
+                : ExpectedHistoryState.Absent;
+        return new StagedImport(incoming, stagedPath, expected, relocateFrom);
+    }
+
+    private static void EnsureScanUsable(SessionScanResult scan)
+    {
+        if (scan.HasFatalErrors)
+            throw new InvalidDataException("Local history contains duplicate logical object IDs.");
     }
 
     private async Task<ImportApplyResult> ApplyStagedImportAsync(StagedImport staged, string operationId, CancellationToken ct)
@@ -1098,7 +1162,11 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         IReadOnlyDictionary<LogicalObjectId, ObjectVersion> Versions,
         IReadOnlyDictionary<LogicalObjectId, byte[]> Plaintext,
         IReadOnlyDictionary<string, byte[]> Encrypted);
-    private sealed record StagedImport(LocalObject Incoming, string Path, ExpectedHistoryState ExpectedState);
+    private sealed record StagedImport(
+        LocalObject Incoming,
+        string Path,
+        ExpectedHistoryState ExpectedState,
+        LocalObject? RelocateFrom = null);
     private sealed record PendingConflict(ConflictProvenance Provenance, byte[] LocalEncrypted, byte[] RemoteEncrypted);
     private sealed class NoopSyncEngineHooks : ISyncEngineHooks
     {

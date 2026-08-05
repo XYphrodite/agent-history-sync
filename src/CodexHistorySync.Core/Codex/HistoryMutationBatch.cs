@@ -103,6 +103,8 @@ internal sealed class HistoryMutationBatch
         SetStatusAsync(target, MutationStatus.Applying, ct);
     internal Task MarkAppliedAsync(LocalObject target, CancellationToken ct) =>
         SetStatusAsync(target, MutationStatus.Applied, ct);
+    internal Task MarkSkippedAsync(LocalObject target, CancellationToken ct) =>
+        SetStatusAsync(target, MutationStatus.Skipped, ct);
 
     internal async Task RollbackAsync(CancellationToken ct)
     {

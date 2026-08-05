@@ -138,7 +138,15 @@ public sealed class CodexProcessDetector : Core.Codex.ICodexProcessDetector
             var executable = Path.GetFullPath(process.GetExecutablePath());
             if (configuredExecutablePath is not null &&
                 StringComparer.OrdinalIgnoreCase.Equals(executable, configuredExecutablePath)) return true;
-            return knownProcessNames.Contains(process.Name) && trustedRoots.Any(root => IsWithin(executable, root));
+            if (!knownProcessNames.Contains(process.Name)) return false;
+            if (trustedRoots.Any(root => IsWithin(executable, root)) || IsVerifiedVsCodeExtensionExecutable(executable))
+                return true;
+
+            // A readable executable path is not proof that a known Codex process is safe to ignore. Codex is
+            // shipped through multiple first-party channels, so unknown locations fail closed. Names introduced
+            // only by ConfiguredExecutablePath do not take this fallback and therefore do not create same-name
+            // false positives.
+            return true;
         }
         catch (Exception exception) when (IsInspectionDenied(exception))
         {
@@ -155,6 +163,25 @@ public sealed class CodexProcessDetector : Core.Codex.ICodexProcessDetector
         var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var canonicalPath = Path.GetFullPath(path);
         return canonicalPath.StartsWith(canonicalRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsVerifiedVsCodeExtensionExecutable(string executable)
+    {
+        var userProfile = CodexExecutableLocator.DefaultUserProfile();
+        foreach (var root in CodexExecutableLocator.VsCodeExtensionRoots(userProfile))
+        {
+            if (!IsWithin(executable, root)) continue;
+            var relative = Path.GetRelativePath(root, executable);
+            var segments = relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length == 4 &&
+                CodexExecutableLocator.IsFirstPartyWindowsExtension(Path.Combine(root, segments[0])) &&
+                segments[1].Equals("bin", StringComparison.OrdinalIgnoreCase) &&
+                segments[2].Equals("windows-x86_64", StringComparison.OrdinalIgnoreCase) &&
+                segments[3].Equals("codex.exe", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     private static string? CanonicalizeOptional(string? path) =>

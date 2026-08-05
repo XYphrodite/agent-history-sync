@@ -49,6 +49,7 @@ All three commands call the same `SyncEngine` used by automation. Each command d
 ```powershell
 codex-sync status
 codex-sync doctor
+codex-sync doctor --compatibility-session <inactive archived JSONL> --codex-exe <codex executable>
 ```
 
 `status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus both the current authenticated remote revision and the last successfully synchronized revision. Its conflict count is the exact identity-deduplicated union of persisted evidence and conflicts in the current plan; an unreadable evidence store makes status fail closed. Equal counts do not hide divergent objects.
@@ -66,6 +67,10 @@ codex-sync doctor
 
 Before setup, the repository/key checks are expected to fail. Before agent installation, the agent check is also expected to fail.
 
+The optional `doctor --compatibility-session` form is the documented Codex JSONL reindex gate. It requires both `--compatibility-session` and `--codex-exe`, runs only the disposable-profile compatibility probe, never prints the session path or executable path, and returns exit code `0` on PASS or `3` on FAIL. See `docs/compatibility.md` for recorded results.
+
+Set `CODEX_EXE` to force a specific Codex binary for process detection and the join-time compatibility probe. When unset, the CLI resolves the first-party Windows VS Code extension install (`openai.chatgpt-*-win32-x64\bin\windows-x86_64\codex.exe`) and then `codex.exe` on `PATH`.
+
 ## Background agent
 
 Install or remove the current executable's per-user logon task:
@@ -79,7 +84,7 @@ The task is named `CodexHistorySync`, runs only for the current Windows user at 
 
 At logon the agent performs a bidirectional sync if Codex is stopped. While Codex is active it runs push-only synchronization and an authenticated read-only preview; it never requests an import or conflict resolution. When every relevant Codex process exits, the agent continues checking process state through a two-second quiet window before bidirectional synchronization. A process restart resets that window. Failures retry after 30 seconds with exponential backoff capped at 30 minutes, and Ctrl+C is a normal shutdown when `agent run` is launched interactively.
 
-Set `CODEX_EXE` to the absolute Codex executable path when a specific installation must be matched. With a configured path, a same-name process at another readable path is ignored. The built-in fallback recognizes `codex`, `Codex`, and `ChatGPT` process names in known first-party installation roots; these names and roots are constructor options so future releases can extend them. When no executable is configured, the known-name fallback is deliberately conservative. Access-denied process/path inspection is treated as active, which can postpone imports but cannot make an active Codex process appear stopped.
+Set `CODEX_EXE` to the absolute Codex executable path when a specific installation must be matched. With a configured path, only that executable and known first-party names under trusted roots (including the VS Code extension layout) count as Codex; a same custom name alone at an arbitrary path is ignored. Known names `codex`, `Codex`, and `ChatGPT` at an unrecognized readable path fail closed as active so imports are postponed rather than racing an unknown Codex channel. Access-denied process/path inspection is also treated as active.
 
 Notifications report only pending-restart counts, unresolved-conflict counts, repeated-failure counts, and recovery. Structured JSON-line logs live under `%LOCALAPPDATA%\CodexHistorySync\logs`, rotate at 10 MiB, and retain at most five files. They contain operation IDs, modes, object counts, elapsed milliseconds, sanitized revision tokens, and fixed error codes. Exception messages, paths, URLs, credentials, keys, and history plaintext are not accepted by the logging surface.
 

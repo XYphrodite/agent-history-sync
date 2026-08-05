@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Sync;
 
 namespace CodexHistorySync.Cli;
@@ -37,6 +38,8 @@ public interface ICliServices
     Task<CliInitializationResult> InitializeAsync(string remoteUrl, ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken);
     Task<CliAuthenticatedRepository> AuthenticateRepositoryAsync(string remoteUrl, ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken);
     Task<CliGateResult> ProbeCompatibilityAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken);
+    Task<CompatibilityResult> ProbeCompatibilitySessionAsync(string sourceSession, string codexExecutable,
+        CancellationToken cancellationToken);
     Task<CliJoinPlan> PlanJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken);
     Task<SyncResult> ApplyJoinAsync(CliAuthenticatedRepository repository, CliJoinPlan plan, CancellationToken cancellationToken);
     Task AbortJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken);
@@ -81,7 +84,7 @@ public sealed class CliApplication
                 "pull" when args.Length == 1 => await RunSyncAsync(SyncMode.Pull, cancellationToken).ConfigureAwait(false),
                 "push" when args.Length == 1 => await RunSyncAsync(SyncMode.Push, cancellationToken).ConfigureAwait(false),
                 "status" when args.Length == 1 => await RunStatusAsync(cancellationToken).ConfigureAwait(false),
-                "doctor" when args.Length == 1 => await RunDoctorAsync(cancellationToken).ConfigureAwait(false),
+                "doctor" => await RunDoctorAsync(args, cancellationToken).ConfigureAwait(false),
                 "conflicts" when args.Length == 1 => await RunConflictsAsync(cancellationToken).ConfigureAwait(false),
                 "resolve" => await RunResolveAsync(args, cancellationToken).ConfigureAwait(false),
                 "agent" => await RunAgentAsync(args, cancellationToken).ConfigureAwait(false),
@@ -181,12 +184,41 @@ public sealed class CliApplication
         return result.Conflicts == 0 ? 0 : 4;
     }
 
-    private async Task<int> RunDoctorAsync(CancellationToken cancellationToken)
+    private async Task<int> RunDoctorAsync(string[] args, CancellationToken cancellationToken)
     {
+        if (args.Length != 1)
+        {
+            if (!TryParseCompatibilityDoctorArguments(args, out var sourceSession, out var codexExecutable))
+                return Usage();
+            var compatibility = await services.ProbeCompatibilitySessionAsync(sourceSession!, codexExecutable!, cancellationToken)
+                .ConfigureAwait(false);
+            console.WriteLine($"codex-compatibility: {(compatibility.IsCompatible ? "PASS" : "FAIL")} " +
+                $"version={SafeToken(compatibility.CodexVersion)} diagnostic={SafeToken(compatibility.Diagnostic)}");
+            return compatibility.IsCompatible ? 0 : 3;
+        }
+
         var report = await services.RunDoctorAsync(cancellationToken).ConfigureAwait(false);
         foreach (var check in report.Checks)
             console.WriteLine($"{SafeToken(check.Name)}: {(check.Passed ? "PASS" : "FAIL")}");
         return report.Checks.All(check => check.Passed) ? 0 : 3;
+    }
+
+    private static bool TryParseCompatibilityDoctorArguments(string[] args, out string? sourceSession,
+        out string? codexExecutable)
+    {
+        sourceSession = null;
+        codexExecutable = null;
+        if (args.Length != 5) return false;
+        for (var index = 1; index < args.Length; index += 2)
+        {
+            var option = args[index];
+            var value = args[index + 1];
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            if (option == "--compatibility-session" && sourceSession is null) sourceSession = value;
+            else if (option == "--codex-exe" && codexExecutable is null) codexExecutable = value;
+            else return false;
+        }
+        return sourceSession is not null && codexExecutable is not null;
     }
 
     private async Task<int> RunConflictsAsync(CancellationToken cancellationToken)
@@ -251,6 +283,7 @@ public sealed class CliApplication
     private int Help()
     {
         console.WriteLine("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
+        console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         return 0;
     }
 
