@@ -785,6 +785,68 @@ public sealed class SyncFailureTests : IDisposable
         Assert.True(File.Exists(Path.Combine(target.Paths.ArchivedSessions, "cross-kind-remote.jsonl")));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RemoteKindChange_DownloadMovesHistoryAtomicallyToTheMatchingRoot(bool remoteArchived)
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var suffix = remoteArchived ? "to-archived" : "to-active";
+        var id = "remote-kind-move-" + suffix;
+        var source = CreateDevice("remote-kind-source-" + suffix, key, provider);
+        var target = CreateDevice("remote-kind-target-" + suffix, key, provider);
+        var initialRoot = remoteArchived ? source.Paths.Sessions : source.Paths.ArchivedSessions;
+        var remoteRoot = remoteArchived ? source.Paths.ArchivedSessions : source.Paths.Sessions;
+        await WriteSessionAsync(initialRoot, id);
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var sourceBefore = Path.Combine(initialRoot, id + ".jsonl");
+        var sourceAfter = Path.Combine(remoteRoot, id + ".jsonl");
+        Directory.CreateDirectory(remoteRoot);
+        File.Move(sourceBefore, sourceAfter);
+        await File.AppendAllTextAsync(sourceAfter,
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote kind changed\"}}\n");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+
+        var targetBefore = Path.Combine(remoteArchived ? target.Paths.Sessions : target.Paths.ArchivedSessions,
+            id + ".jsonl");
+        var targetAfter = Path.Combine(remoteArchived ? target.Paths.ArchivedSessions : target.Paths.Sessions,
+            id + ".jsonl");
+        Assert.Equal(1, result.Downloaded);
+        Assert.Equal(0, result.Conflicts);
+        Assert.False(File.Exists(targetBefore));
+        Assert.True(File.Exists(targetAfter));
+        var expectedKind = remoteArchived ? ObjectKind.ArchivedSession : ObjectKind.ActiveSession;
+        Assert.Equal(expectedKind, Assert.Single(await ScanAsync(target)).Kind);
+        Assert.Equal(expectedKind,
+            Assert.Single((await target.State.LoadAsync("repository", CancellationToken.None)).Objects).Kind);
+        var repeated = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Assert.Equal(0, repeated.Downloaded);
+        Assert.Equal(0, repeated.Conflicts);
+    }
+
+    [Fact]
+    public async Task Synchronize_FailsClosedWhenLocalHistoryHasDuplicateLogicalIds()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var device = CreateDevice("duplicate-local-scan", key, provider);
+        await WriteSessionAsync(device.Paths.Sessions, "duplicate-local");
+        await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        Directory.CreateDirectory(device.Paths.ArchivedSessions);
+        File.Copy(
+            Path.Combine(device.Paths.Sessions, "duplicate-local.jsonl"),
+            Path.Combine(device.Paths.ArchivedSessions, "duplicate-local.jsonl"));
+
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            device.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Contains("duplicate", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task Synchronize_reports_union_of_existing_evidence_and_new_distinct_conflict()
     {
@@ -918,6 +980,35 @@ public sealed class SyncFailureTests : IDisposable
 
         Assert.Equal(0, provider.PublishCalls);
         Assert.False(File.Exists(device.State.GetStatePath("repository")));
+    }
+
+    [Fact]
+    public async Task DuplicateLocalLogicalId_AbortsBeforeProviderWriteLocalMutationOrBaselineAdvance()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var device = CreateDevice("duplicate-local-id", key, provider);
+        await WriteSessionAsync(device.Paths.Sessions, "duplicate-local-id");
+        await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var active = Path.Combine(device.Paths.Sessions, "duplicate-local-id.jsonl");
+        var activeBefore = await File.ReadAllBytesAsync(active);
+        Directory.CreateDirectory(device.Paths.ArchivedSessions);
+        var archived = Path.Combine(device.Paths.ArchivedSessions, "duplicate-local-copy.jsonl");
+        await File.WriteAllTextAsync(archived,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"duplicate-local-id\"}}\n" +
+            "{\"type\":\"message\",\"payload\":{\"text\":\"ambiguous copy\"}}\n", new UTF8Encoding(false));
+        var archivedBefore = await File.ReadAllBytesAsync(archived);
+        var statePath = device.State.GetStatePath("repository");
+        var stateBefore = await File.ReadAllBytesAsync(statePath);
+        var publishesBefore = provider.PublishCalls;
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            device.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None));
+
+        Assert.Equal(publishesBefore, provider.PublishCalls);
+        Assert.Equal(activeBefore, await File.ReadAllBytesAsync(active));
+        Assert.Equal(archivedBefore, await File.ReadAllBytesAsync(archived));
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(statePath));
     }
 
     [Fact]

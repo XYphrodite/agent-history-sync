@@ -1,4 +1,5 @@
 using CodexHistorySync.Cli;
+using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Sync;
 
 namespace CodexHistorySync.IntegrationTests;
@@ -205,6 +206,63 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Doctor_compatibility_session_passes_exact_inputs_without_persistent_doctor_work()
+    {
+        var fixture = new Fixture();
+        var session = Path.GetFullPath(@"C:\Archive\sensitive-session.jsonl");
+        var codexExecutable = Path.GetFullPath(@"C:\Users\Test\.vscode\extensions\openai.chatgpt-0.146.0-win32-x64\bin\windows-x86_64\codex.exe");
+        fixture.Services.CompatibilityResult = new CompatibilityResult(true, "codex_vscode/0.146.0", "The imported JSONL thread was listed from the disposable Codex home.");
+
+        var exitCode = await fixture.Application.RunAsync(
+            ["doctor", "--compatibility-session", session, "--codex-exe", codexExecutable], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(session, fixture.Services.CompatibilitySession);
+        Assert.Equal(codexExecutable, fixture.Services.CompatibilityExecutable);
+        Assert.Equal(["compatibility-session"], fixture.Services.Calls);
+        Assert.Contains("codex_vscode_0.146.0", fixture.Console.OutputText);
+        Assert.Contains("PASS", fixture.Console.OutputText);
+        Assert.DoesNotContain(session, fixture.Console.AllText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(codexExecutable, fixture.Console.AllText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Doctor_compatibility_session_returns_gate_exit_code_for_incompatibility()
+    {
+        var fixture = new Fixture();
+        fixture.Services.CompatibilityResult = new CompatibilityResult(false, "unknown", "The compatibility session was not found.");
+
+        var exitCode = await fixture.Application.RunAsync(
+            ["doctor", "--codex-exe", @"C:\Codex\codex.exe", "--compatibility-session", @"C:\Archive\session.jsonl"],
+            CancellationToken.None);
+
+        Assert.Equal(3, exitCode);
+        Assert.Contains("FAIL", fixture.Console.OutputText);
+        Assert.Empty(fixture.Console.ErrorText);
+    }
+
+    public static TheoryData<string[]> InvalidCompatibilityDoctorArguments => new()
+    {
+        new[] { "doctor", "--compatibility-session", @"C:\Archive\session.jsonl" },
+        new[] { "doctor", "--codex-exe", @"C:\Codex\codex.exe" },
+        new[] { "doctor", "--compatibility-session", @"C:\Archive\session.jsonl", "--codex-exe", @"C:\Codex\codex.exe", "extra" },
+        new[] { "doctor", "--compatibility-session", "", "--codex-exe", @"C:\Codex\codex.exe" },
+        new[] { "doctor", "--compatibility-session", @"C:\Archive\session.jsonl", "--compatibility-session", @"C:\Archive\other.jsonl" }
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidCompatibilityDoctorArguments))]
+    public async Task Doctor_compatibility_session_rejects_incomplete_duplicate_or_unknown_arguments(string[] args)
+    {
+        var fixture = new Fixture();
+
+        var exitCode = await fixture.Application.RunAsync(args, CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
     public async Task Conflicts_lists_provenance_without_plaintext_and_returns_four()
     {
         var fixture = new Fixture();
@@ -329,6 +387,7 @@ public sealed class CliTests
         public List<string> Calls { get; } = [];
         public CliGateResult SetupGate { get; set; } = new(true, "private-visibility");
         public CliGateResult CompatibilityGate { get; set; } = new(true, "codex-compatibility");
+        public CompatibilityResult CompatibilityResult { get; set; } = new(true, "test", "compatible");
         public SyncResult SyncResult { get; set; } = new("revision-1", 0, 0, 0, 0, false);
         public SyncResult JoinResult { get; set; } = new("revision-1", 0, 0, 0, 0, false);
         public CliStatusReport Status { get; set; } = new(0, 0, 0, 0, "none", "none");
@@ -340,6 +399,8 @@ public sealed class CliTests
         public string? ExportDirectory { get; private set; }
         public string? ObservedPassphrase { get; private set; }
         public bool JoinApplied { get; private set; }
+        public string? CompatibilitySession { get; private set; }
+        public string? CompatibilityExecutable { get; private set; }
 
         public Task<CliGateResult> VerifyPrivateRepositoryAsync(string remoteUrl, CancellationToken cancellationToken)
         {
@@ -372,6 +433,15 @@ public sealed class CliTests
         {
             Calls.Add("compatibility");
             return Task.FromResult(CompatibilityGate);
+        }
+
+        public Task<CompatibilityResult> ProbeCompatibilitySessionAsync(string sourceSession, string codexExecutable,
+            CancellationToken cancellationToken)
+        {
+            Calls.Add("compatibility-session");
+            CompatibilitySession = sourceSession;
+            CompatibilityExecutable = codexExecutable;
+            return Task.FromResult(CompatibilityResult);
         }
 
         public Task<CliJoinPlan> PlanJoinAsync(CliAuthenticatedRepository repository, CancellationToken cancellationToken)

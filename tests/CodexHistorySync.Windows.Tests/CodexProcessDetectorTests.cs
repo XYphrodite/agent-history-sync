@@ -6,11 +6,11 @@ namespace CodexHistorySync.Windows.Tests;
 public sealed class CodexProcessDetectorTests
 {
     [Fact]
-    public void Configured_path_and_known_name_outside_all_trusted_roots_is_ignored()
+    public void Configured_path_does_not_trust_an_arbitrary_process_with_only_the_same_custom_name()
     {
-        var configured = Path.GetFullPath(@"C:\Program Files\Codex\codex.exe");
+        var configured = Path.GetFullPath(@"C:\Program Files\Codex\codex-custom.exe");
         var secondTrustedRoot = Path.GetFullPath(@"C:\Users\Test\AppData\Local\Programs\OpenAI");
-        var catalog = new FakeProcessCatalog(new FakeProcess(10, "codex", @"C:\Temp\codex.exe"));
+        var catalog = new FakeProcessCatalog(new FakeProcess(10, "codex-custom", @"C:\Temp\codex-custom.exe"));
         var detector = new CodexProcessDetector(
             new CodexProcessDetectorOptions(configured, ["codex"],
                 [Path.GetDirectoryName(configured)!, secondTrustedRoot]), catalog);
@@ -67,14 +67,26 @@ public sealed class CodexProcessDetectorTests
     }
 
     [Fact]
-    public void Known_first_party_name_outside_trusted_roots_is_ignored()
+    public void Known_codex_name_at_an_unrecognized_accessible_path_fails_closed_as_active()
     {
         var trustedRoot = Path.GetFullPath(@"C:\Program Files\Codex");
         var catalog = new FakeProcessCatalog(new FakeProcess(10, "codex", @"C:\Temp\codex.exe"));
         var detector = new CodexProcessDetector(
             new CodexProcessDetectorOptions(null, ["codex"], [trustedRoot]), catalog);
 
-        Assert.False(detector.IsRunning());
+        Assert.True(detector.IsRunning());
+    }
+
+    [Fact]
+    public void Default_options_recognize_the_first_party_vscode_extension_executable_shape()
+    {
+        var executable = Path.Combine(CodexExecutableLocator.DefaultUserProfile(),
+            ".vscode", "extensions", "openai.chatgpt-0.146.0-win32-x64", "bin", "windows-x86_64", "codex.exe");
+        var catalog = new FakeProcessCatalog(new FakeProcess(10, "codex", executable));
+
+        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(), catalog);
+
+        Assert.True(detector.IsRunning());
     }
 
     [Fact]

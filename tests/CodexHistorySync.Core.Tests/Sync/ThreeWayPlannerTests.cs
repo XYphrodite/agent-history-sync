@@ -46,6 +46,38 @@ public sealed class ThreeWayPlannerTests
     }
 
     [Fact]
+    public void CreatePlan_DownloadsRemoteOnlyCrossKindChange()
+    {
+        var baseline = Version("shared");
+        var localActive = baseline;
+        var remoteArchived = new ObjectVersion(ObjectId, ObjectKind.ArchivedSession, new ContentHash("changed"),
+            "changed", false);
+
+        var plan = ThreeWayPlanner.CreatePlan(
+            Versions(localActive),
+            Versions(remoteArchived),
+            Versions(baseline));
+
+        Assert.Equal(SyncActionKind.Download, Assert.Single(plan.Actions).Kind);
+    }
+
+    [Fact]
+    public void CreatePlan_UploadsLocalOnlyCrossKindChange()
+    {
+        var baseline = Version("shared");
+        var localArchived = new ObjectVersion(ObjectId, ObjectKind.ArchivedSession, new ContentHash("changed"),
+            "changed", false);
+        var remoteActive = baseline;
+
+        var plan = ThreeWayPlanner.CreatePlan(
+            Versions(localArchived),
+            Versions(remoteActive),
+            Versions(baseline));
+
+        Assert.Equal(SyncActionKind.Upload, Assert.Single(plan.Actions).Kind);
+    }
+
+    [Fact]
     public void CreatePlan_OrdersActionsByLogicalObjectId()
     {
         var plan = ThreeWayPlanner.CreatePlan(

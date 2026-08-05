@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.State;
@@ -339,6 +340,10 @@ public sealed class DefaultCliServices : ICliServices
             return await runtime.RunDoctorAsync(null, ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    public Task<CompatibilityResult> ProbeCompatibilitySessionAsync(string sourceSession, string codexExecutable,
+        CancellationToken cancellationToken) =>
+        new CodexCompatibilityProbe().ProbeAsync(codexExecutable, sourceSession, cancellationToken);
 
     public async Task<IReadOnlyList<CliConflictInfo>> ListConflictsAsync(CancellationToken cancellationToken)
     {

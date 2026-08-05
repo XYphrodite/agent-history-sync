@@ -21,10 +21,10 @@ public static class CliComposition
         var gateway = new GitHubCliRepositoryGateway();
         var local = new FileCliLocalRepository(localAppData, new DpapiKeyStore());
         var scheduler = new AgentScheduler();
-        var configuredCodex = Environment.GetEnvironmentVariable("CODEX_EXE");
-        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(configuredCodex));
+        var codexExecutable = new CodexExecutableLocator().Resolve() ?? Path.GetFullPath("codex.exe");
+        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(codexExecutable));
         var runtime = new CoreCliSyncRuntime(localAppData, gateway, detector,
-            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync("codex", fixture, cancellationToken),
+            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync(codexExecutable, fixture, cancellationToken),
             null, scheduler);
         var services = new DefaultCliServices(gateway, local, runtime, new RepositoryCrypto());
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
