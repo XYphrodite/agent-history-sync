@@ -22,6 +22,8 @@ Only complete, stable active and archived JSONL session files are synchronized. 
 
 Attachment discovery is intentionally disabled in the MVP. The security audit places a unique canary in the synthetic attachment directory and proves it does not reach any Git blob. Attachments may be added only after Codex exposes a documented typed reference that can be validated without guessing paths or scanning arbitrary files.
 
+Remote Git history is intentionally non-append-only: each publish force-updates `main` to one orphan commit under compare-and-swap (`force-with-lease`). GitHub may retain unreachable objects until its garbage collection runs; operators who need immediate reclaim can re-create the private repository.
+
 Remote deletions are authenticated tombstones. Local backups created before replacement or deletion are retained for 30 days by default. Tombstones remain in repository history; rewriting Git history is outside the MVP.
 
 ## Failure boundary
