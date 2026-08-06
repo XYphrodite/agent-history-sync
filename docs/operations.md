@@ -46,7 +46,14 @@ All three commands call the same `SyncEngine` used by automation. Each command d
 
 Each successful publish rewrites `main` to a **single orphan commit** (force-with-lease against the CAS baseline). Previous commits become unreachable so GitHub can reclaim old encrypted blobs; the repository is a snapshot store, not an append-only audit log.
 
-Before hashing and upload, each session JSONL is reduced deterministically: bulk runtime records (`compacted`, `turn_context`, `world_state`, and inter-agent metadata) are dropped; embedded photos (`input_image` / `data:image…` / common base64 image payloads) are replaced with `[image omitted]`. Chat-bearing text records (`session_meta`, `response_item`, `event_msg`) are kept. Local Codex files on disk are not modified; only the synchronized view is smaller.
+Before hashing and upload, each session JSONL is reduced deterministically to a compact rediscovery view:
+
+- drop bulk runtime records (`compacted`, `turn_context`, `world_state`, inter-agent metadata, `event_msg`);
+- drop heavy tool I/O payload types (`function_call_output`, `custom_tool_call_output`, `patch_apply_*`, `reasoning`, …);
+- replace embedded photos with `[image omitted]`;
+- truncate remaining long strings to 2 KiB with a length marker.
+
+`session_meta` and user/assistant message text are kept. Local Codex files on disk are not modified; only the synchronized view is smaller.
 
 GitHub still rejects individual blobs larger than 100 MiB. After reduction, payloads larger than ~95 MiB are skipped on upload (`skipped-oversized=N`) and remain local-only.
 
