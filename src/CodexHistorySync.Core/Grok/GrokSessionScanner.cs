@@ -31,6 +31,8 @@ public sealed class GrokSessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
+        var activeIds = LoadActiveSessionIds(paths.Home);
+
         IEnumerable<string> chatFiles;
         try
         {
@@ -52,6 +54,9 @@ public sealed class GrokSessionScanner
             if (!CodexPaths.IsPathWithin(chatPath, paths.Sessions)) continue;
             var sessionDir = Path.GetDirectoryName(chatPath);
             if (string.IsNullOrWhiteSpace(sessionDir)) continue;
+            var sessionId = Path.GetFileName(Path.TrimEndingDirectorySeparator(sessionDir));
+            // Skip sessions currently open in a live Grok CLI process.
+            if (activeIds.Contains(sessionId)) { complete = false; continue; }
 
             var item = await ReadStableAsync(sessionDir, cancellationToken).ConfigureAwait(false);
             if (item is null) { complete = false; continue; }
@@ -104,6 +109,30 @@ public sealed class GrokSessionScanner
         var info = new FileInfo(path);
         info.Refresh();
         return new FileObservation(info.Length, info.LastWriteTimeUtc);
+    }
+
+    private static HashSet<string> LoadActiveSessionIds(string grokHome)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var path = Path.Combine(grokHome, "active_sessions.json");
+        if (!File.Exists(path)) return result;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return result;
+            foreach (var item in document.RootElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                if (!item.TryGetProperty("session_id", out var id) || id.ValueKind != JsonValueKind.String) continue;
+                var value = id.GetString();
+                if (!string.IsNullOrWhiteSpace(value)) result.Add(value);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Fail open: still scan; stage-time hash check will defer races.
+        }
+        return result;
     }
 
     private readonly record struct FileObservation(long Length, DateTime LastWriteTimeUtc);
