@@ -1,8 +1,8 @@
-# Codex History Sync Operations
+# Agent History Sync Operations
 
 ## Prerequisites
 
-Codex History Sync currently runs on Windows. Install `git`, GitHub CLI (`gh`), and Codex, then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The repository must already exist, be private, and be empty for `init`.
+Agent History Sync runs on Windows. Install `git`, GitHub CLI (`gh`), and the agents you sync (Codex and/or Grok CLI), then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The **data** repository must already exist, be private, and be empty for `init` (recommended name: `agent-history-sync-data`).
 
 Passphrases are accepted only from an interactive console with hidden input. They are never accepted as command-line arguments, written to configuration, or printed. Keep the passphrase in a password manager: the DPAPI cache is tied to the current Windows user and cannot recover a forgotten passphrase on another device.
 
