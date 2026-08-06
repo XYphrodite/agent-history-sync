@@ -166,15 +166,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             case SyncActionKind.Upload when mode != SyncMode.Pull:
                             {
                                 var source = locals.Single(item => item.Id == action.ObjectId);
-                                // GitHub rejects individual blobs over 100 MiB; skip rather than failing the whole push.
-                                long sourceLength;
-                                try { sourceLength = new FileInfo(source.SourcePath).Length; }
-                                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                                {
-                                    deferred.Add(action.ObjectId);
-                                    break;
-                                }
-                                if (sourceLength > MaximumGitHubPlaintextBytes)
+                                // Length is already the normalized (sync) size from SessionScanner.
+                                if (source.Length > MaximumGitHubPlaintextBytes)
                                 {
                                     deferred.Add(action.ObjectId);
                                     skippedOversized++;
@@ -1079,7 +1072,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private async Task<IndexEntry> StageEncryptedObjectAsync(LogicalObjectId id, ObjectKind kind, ContentHash hash,
         bool deleted, string? sourcePath, string directory, CancellationToken ct)
     {
-        var plaintext = sourcePath is null ? Array.Empty<byte>() : await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
+        byte[] plaintext;
+        if (sourcePath is null) plaintext = Array.Empty<byte>();
+        else
+        {
+            var raw = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
+            plaintext = SessionJsonlNormalizer.Normalize(raw);
+        }
         if (!StringComparer.Ordinal.Equals(Sha256(plaintext).Hex, hash.Hex)) throw new InvalidDataException("Local object changed after stable scanning.");
         await using var input = new MemoryStream(plaintext, false);
         await using var output = new MemoryStream();

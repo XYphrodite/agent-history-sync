@@ -131,15 +131,19 @@ public sealed class SessionScanner
             var bytes = await ReadFileAsync(path, second.Length, cancellationToken);
             if (bytes is null || bytes.Length == 0 || bytes[^1] != (byte)'\n') return null;
 
-            var id = ReadSessionId(bytes);
+            // Hash/sync the reduced view so compaction snapshots do not dominate size or identity.
+            var normalized = SessionJsonlNormalizer.Normalize(bytes);
+            if (normalized.Length == 0 || normalized[^1] != (byte)'\n') return null;
+
+            var id = ReadSessionId(normalized);
             if (id is null) return null;
 
             return new LocalObject(
                 id.Value,
                 kind,
                 Path.GetFullPath(path),
-                new ContentHash(Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()),
-                second.Length,
+                new ContentHash(Convert.ToHexString(SHA256.HashData(normalized)).ToLowerInvariant()),
+                normalized.LongLength,
                 new DateTimeOffset(second.LastWriteTimeUtc, TimeSpan.Zero));
         }
         catch (IOException)
