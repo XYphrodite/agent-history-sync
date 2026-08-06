@@ -20,13 +20,34 @@ public interface IGitPublicationHook
 
 public interface IGitPushTransport
 {
-    Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken);
+    Task<GitCommandResult> PushAsync(
+        GitCommand git,
+        string workingDirectory,
+        string expectedRemoteRevision,
+        CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Publishes a single-snapshot history: each successful push replaces <c>main</c> with an orphan
+/// commit via force-with-lease so prior encrypted blobs become unreachable on the remote.
+/// </summary>
 public sealed class GitPushTransport : IGitPushTransport
 {
-    public Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken) =>
-        git.RunAsync(["push", "origin", "HEAD:main"], workingDirectory, cancellationToken);
+    public Task<GitCommandResult> PushAsync(
+        GitCommand git,
+        string workingDirectory,
+        string expectedRemoteRevision,
+        CancellationToken cancellationToken)
+    {
+        // Empty expected revision = first publish to an empty remote (or CAS already matched empty).
+        if (string.IsNullOrEmpty(expectedRemoteRevision))
+            return git.RunAsync(["push", "--force", "origin", "HEAD:main"], workingDirectory, cancellationToken);
+
+        return git.RunAsync(
+            ["push", "--force-with-lease=refs/heads/main:" + expectedRemoteRevision, "origin", "HEAD:main"],
+            workingDirectory,
+            cancellationToken);
+    }
 }
 
 public sealed class GitStorageProvider : IStorageProvider
@@ -157,10 +178,14 @@ public sealed class GitStorageProvider : IStorageProvider
 
             var commit = await RunGitAsync(["commit", "--no-gpg-sign", "-m", request.CommitMessage], ct).ConfigureAwait(false);
             if (commit.ExitCode != 0) ThrowGitFailure("Unable to commit encrypted objects in the dedicated clone.", commit);
-            var candidateRevision = await ResolveRevisionAsync("HEAD", ct).ConfigureAwait(false);
+
+            // Rewrite as a parentless commit so force-push leaves only the current tree on main.
+            var candidateRevision = await ReplaceHistoryWithOrphanSnapshotAsync(request.CommitMessage, ct)
+                .ConfigureAwait(false);
             if (_publicationHook is not null) await _publicationHook.BeforePushAsync(ct).ConfigureAwait(false);
 
-            var push = await _pushTransport.PushAsync(_git, _clonePath, ct).ConfigureAwait(false);
+            var push = await _pushTransport.PushAsync(_git, _clonePath, request.ExpectedRevision, ct)
+                .ConfigureAwait(false);
             if (push.ExitCode == 0)
                 return new PublishResult(true, candidateRevision);
 
@@ -224,6 +249,25 @@ public sealed class GitStorageProvider : IStorageProvider
         if (email.ExitCode != 0) ThrowGitFailure("Unable to configure the dedicated clone identity.", email);
         var name = await RunGitAsync(["config", "user.name", "Codex History Sync"], ct).ConfigureAwait(false);
         if (name.ExitCode != 0) ThrowGitFailure("Unable to configure the dedicated clone identity.", name);
+    }
+
+    private async Task<string> ReplaceHistoryWithOrphanSnapshotAsync(string commitMessage, CancellationToken ct)
+    {
+        var tree = await RunGitAsync(["rev-parse", "HEAD^{tree}"], ct).ConfigureAwait(false);
+        if (tree.ExitCode != 0) ThrowGitFailure("Unable to resolve the publish tree.", tree);
+        var treeSha = tree.StandardOutput.Trim();
+        if (treeSha.Length == 0) throw new InvalidDataException("The publish tree is empty.");
+
+        var orphan = await RunGitAsync(["commit-tree", treeSha, "-m", commitMessage], ct).ConfigureAwait(false);
+        if (orphan.ExitCode != 0) ThrowGitFailure("Unable to create the single-snapshot publish commit.", orphan);
+        var orphanSha = orphan.StandardOutput.Trim();
+        if (orphanSha.Length == 0) throw new InvalidDataException("The single-snapshot publish commit is missing.");
+
+        var update = await RunGitAsync(["update-ref", "refs/heads/main", orphanSha], ct).ConfigureAwait(false);
+        if (update.ExitCode != 0) ThrowGitFailure("Unable to point main at the single-snapshot commit.", update);
+        var reset = await RunGitAsync(["reset", "--hard", orphanSha], ct).ConfigureAwait(false);
+        if (reset.ExitCode != 0) ThrowGitFailure("Unable to check out the single-snapshot commit.", reset);
+        return orphanSha;
     }
 
     private async Task<string> FetchRevisionAsync(CancellationToken ct)

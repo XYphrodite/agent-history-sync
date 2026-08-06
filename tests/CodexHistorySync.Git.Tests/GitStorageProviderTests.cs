@@ -437,9 +437,16 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     {
         public string? AcceptedRevision { get; private set; }
 
-        public async Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken)
+        public async Task<GitCommandResult> PushAsync(
+            GitCommand git,
+            string workingDirectory,
+            string expectedRemoteRevision,
+            CancellationToken cancellationToken)
         {
-            var accepted = await git.RunAsync(["push", "origin", "HEAD:main"], workingDirectory, cancellationToken);
+            var args = string.IsNullOrEmpty(expectedRemoteRevision)
+                ? new[] { "push", "--force", "origin", "HEAD:main" }
+                : new[] { "push", "--force-with-lease=refs/heads/main:" + expectedRemoteRevision, "origin", "HEAD:main" };
+            var accepted = await git.RunAsync(args, workingDirectory, cancellationToken);
             Assert.Equal(0, accepted.ExitCode);
             var revision = await git.RunAsync(["rev-parse", "HEAD"], workingDirectory, cancellationToken);
             AcceptedRevision = revision.StandardOutput.Trim();
@@ -449,11 +456,33 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
 
     private sealed class RejectWithoutRemoteChangePushTransport : IGitPushTransport
     {
-        public Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory, CancellationToken cancellationToken) =>
+        public Task<GitCommandResult> PushAsync(
+            GitCommand git,
+            string workingDirectory,
+            string expectedRemoteRevision,
+            CancellationToken cancellationToken) =>
             Task.FromResult(new GitCommandResult(
                 1,
                 string.Empty,
                 "branch policy denied https://example.invalid/repository?token=push-secret",
                 TimedOut: false));
+    }
+
+    [Fact]
+    public async Task TryPublishAsync_ReplacesRemoteHistoryWithASingleOrphanCommit()
+    {
+        var provider = CreateProvider("snapshot-history");
+        var firstRevision = (await provider.ReadSnapshotAsync(CancellationToken.None)).Revision;
+        var first = await provider.TryPublishAsync(await RequestAsync(firstRevision, 'a', "first"), CancellationToken.None);
+        Assert.True(first.Published);
+
+        var second = await provider.TryPublishAsync(await RequestAsync(first.CurrentRevision, 'b', "second"), CancellationToken.None);
+        Assert.True(second.Published);
+
+        Assert.Equal(1, int.Parse((await GitAsync(_root, "--git-dir", _remote, "rev-list", "--count", "main")).Trim()));
+        var parents = (await GitAsync(_root, "--git-dir", _remote, "rev-list", "--parents", "-n", "1", "main")).Trim()
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Single(parents); // sha only, no parent shas
+        Assert.Equal(second.CurrentRevision, parents[0]);
     }
 }
