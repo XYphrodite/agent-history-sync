@@ -6,7 +6,9 @@ public enum ObjectKind
     ArchivedSession,
     Attachment,
     Tombstone,
-    RepositoryIndex
+    RepositoryIndex,
+    /// <summary>Grok CLI session package (chat_history + summary under ~/.grok/sessions).</summary>
+    GrokSession
 }
 
 public readonly record struct LogicalObjectId(string Value);

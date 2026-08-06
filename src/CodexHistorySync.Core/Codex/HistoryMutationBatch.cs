@@ -159,7 +159,8 @@ internal sealed class HistoryMutationBatch
             if (string.IsNullOrWhiteSpace(entry.Id) || Path.IsPathRooted(entry.Id) || entry.Id.Contains('/') ||
                 entry.Id.Contains('\\') || entry.Id is "." or "..")
                 throw new InvalidDataException("The local mutation journal contains an invalid or duplicate object ID.");
-            if (entry.Kind is not (ObjectKind.ActiveSession or ObjectKind.ArchivedSession) || !Enum.IsDefined(entry.Status))
+            if (entry.Kind is not (ObjectKind.ActiveSession or ObjectKind.ArchivedSession or ObjectKind.GrokSession) ||
+                !Enum.IsDefined(entry.Status))
                 throw new InvalidDataException("The local mutation journal contains invalid object metadata.");
             ValidateState(entry.BeforeExists, entry.BeforeHash);
             ValidateState(entry.AfterExists, entry.AfterHash);

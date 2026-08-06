@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
@@ -53,6 +54,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly string _repositoryId;
     private readonly string _deviceId;
     private readonly CodexPaths _paths;
+    private readonly GrokPaths? _grokPaths;
+    private readonly GrokSessionScanner? _grokScanner;
     private readonly byte[] _masterKey;
     private readonly SessionScanner _scanner;
     private readonly RepositoryCrypto _crypto;
@@ -69,14 +72,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
 
     public SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
-        ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory)
+        ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory,
+        GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
-            provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner()) { }
+            provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory, ISyncEngineHooks hooks,
-        IOperationDirectoryCleaner operationCleaner)
+        IOperationDirectoryCleaner operationCleaner, GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -85,6 +89,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _repositoryId = repositoryId;
         _deviceId = deviceId;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
+        _grokPaths = grokPaths;
+        _grokScanner = grokScanner ?? (grokPaths is null ? null : new GrokSessionScanner());
         _masterKey = masterKey.ToArray();
         _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
         _crypto = crypto ?? throw new ArgumentNullException(nameof(crypto));
@@ -94,11 +100,45 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
-        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory));
+        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths);
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
         _mutex = RepositoryMutexes.GetOrAdd(RepositorySyncLock.CanonicalStateIdentity(_stateStore.GetStatePath(repositoryId)),
             _ => new SemaphoreSlim(1, 1));
+    }
+
+    private async Task<SessionScanResult> ScanLocalAsync(CancellationToken ct)
+    {
+        var codex = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+        if (_grokPaths is null || _grokScanner is null) return codex;
+
+        var grok = await _grokScanner.ScanDetailedAsync(_grokPaths, ct).ConfigureAwait(false);
+        var objects = new List<LocalObject>(codex.Objects.Count + grok.Objects.Count);
+        objects.AddRange(codex.Objects);
+        var byId = objects.ToDictionary(item => item.Id);
+        var duplicates = new HashSet<LogicalObjectId>(codex.DuplicateIds);
+        var uncertain = new HashSet<ObjectKind>(codex.UncertainKinds);
+        foreach (var item in grok.DuplicateIds) duplicates.Add(item);
+        foreach (var kind in grok.UncertainKinds) uncertain.Add(kind);
+        foreach (var item in grok.Objects)
+        {
+            if (byId.TryAdd(item.Id, item)) objects.Add(item);
+            else
+            {
+                duplicates.Add(item.Id);
+                uncertain.Add(item.Kind);
+                uncertain.Add(byId[item.Id].Kind);
+                if (byId.Remove(item.Id, out var prior)) objects.Remove(prior);
+            }
+        }
+        return new SessionScanResult(objects, uncertain, duplicates);
+    }
+
+    private async Task<IReadOnlyList<LocalObject>> ScanLocalObjectsAsync(CancellationToken ct)
+    {
+        var result = await ScanLocalAsync(ct).ConfigureAwait(false);
+        EnsureScanUsable(result);
+        return result.Objects;
     }
 
     public async Task<SyncResult> SynchronizeAsync(SyncMode mode, CancellationToken ct)
@@ -114,7 +154,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             var raced = false;
             for (var attempt = 1; attempt <= 5; attempt++)
             {
-                var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                var scan = await ScanLocalAsync(ct).ConfigureAwait(false);
                 EnsureScanUsable(scan);
                 var locals = scan.Objects;
                 var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
@@ -210,7 +250,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         if (tombstones.Length != 0)
                         {
                             _hooks.OnBeforeLocalPublicationPrecondition();
-                            var publicationScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                            var publicationScan = await ScanLocalAsync(ct).ConfigureAwait(false);
                             EnsureScanUsable(publicationScan);
                             if (tombstones.Any(action => !IsAbsenceConfirmed(publicationScan, action))) continue;
                         }
@@ -269,7 +309,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                         await mutationBatch.MarkSkippedAsync(staged.Incoming, ct).ConfigureAwait(false);
                                         successful.Remove(action.ObjectId);
                                         deferred.Add(action.ObjectId);
-                                        var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                        var refreshed = await ScanLocalObjectsAsync(ct).ConfigureAwait(false);
                                         var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId);
                                         var conflict = action with
                                         {
@@ -298,7 +338,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                         await mutationBatch.MarkSkippedAsync(action.ObjectId, ct).ConfigureAwait(false);
                                         successful.Remove(action.ObjectId);
                                         deferred.Add(action.ObjectId);
-                                        var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                        var refreshed = await ScanLocalObjectsAsync(ct).ConfigureAwait(false);
                                         var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId);
                                         var conflict = action with
                                         {
@@ -323,7 +363,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                     await mutationBatch.MarkSkippedAsync(action.ObjectId, ct).ConfigureAwait(false);
                                     successful.Remove(action.ObjectId);
                                     deferred.Add(action.ObjectId);
-                                    var refreshed = await _scanner.ScanAsync(_paths, ct).ConfigureAwait(false);
+                                    var refreshed = await ScanLocalObjectsAsync(ct).ConfigureAwait(false);
                                     var current = refreshed.SingleOrDefault(item => item.Id == action.ObjectId)
                                         ?? throw new InvalidDataException("The concurrent local tombstone conflict could not be scanned stably.");
                                     var conflict = action with
@@ -391,7 +431,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         try
         {
             ThrowIfDisposed();
-            var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+            var scan = await ScanLocalAsync(ct).ConfigureAwait(false);
             EnsureScanUsable(scan);
             var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
@@ -428,7 +468,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             if (resolution == ConflictResolution.ExportBoth)
                 return new SyncConflictResolutionResult(await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), true);
 
-            var scan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+            var scan = await ScanLocalAsync(ct).ConfigureAwait(false);
             EnsureScanUsable(scan);
             ValidateConflictLocal(conflict, scan, resolution);
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
@@ -473,7 +513,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 {
                     var destination = currentLocal is not null && currentLocal.Kind == kind
                         ? currentLocal.SourcePath
-                        : Path.Combine(kind switch
+                        : kind == ObjectKind.GrokSession
+                            ? ResolveGrokDestination(id, plaintext)
+                            : Path.Combine(kind switch
                     {
                         ObjectKind.ActiveSession => _paths.Sessions,
                         ObjectKind.ArchivedSession => _paths.ArchivedSessions,
@@ -528,7 +570,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
 
                 try
                 {
-                    var finalScan = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
+                    var finalScan = await ScanLocalAsync(ct).ConfigureAwait(false);
                     EnsureScanUsable(finalScan);
                     ValidateSelectedLocal(selectedMetadata, finalScan, deleted, hash);
                     var next = baseline.ToDictionary(pair => pair.Key, pair => pair.Value);
@@ -669,8 +711,17 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         {
             if (plaintext.Length != 0) throw new InvalidDataException("A deleted conflict side contains plaintext.");
         }
-        else ValidateSessionJsonl(plaintext, metadata.ObjectId, ct);
+        else ValidateHistoryPayload(metadata.Kind, plaintext, metadata.ObjectId, ct);
         return plaintext;
+    }
+
+    private string ResolveGrokDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_grokPaths is null) throw new InvalidOperationException("Grok paths are not configured.");
+        var package = GrokSessionPackage.Parse(plaintext);
+        if (!string.Equals(GrokSessionPackage.ToLogicalId(package.SessionId), id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Grok conflict payload id does not match the logical object id.");
+        return GrokSessionPackage.ChatHistoryPath(_grokPaths.SessionDirectory(package.Cwd, package.SessionId));
     }
 
     private async Task<ObjectVersion> PublishResolvedRemoteAsync(RemoteSnapshot snapshot,
@@ -975,29 +1026,46 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         var version = action.Remote!;
         var existing = locals.SingleOrDefault(item => item.Id == action.ObjectId);
-        var root = version.Kind switch
-        {
-            ObjectKind.ActiveSession => _paths.Sessions,
-            ObjectKind.ArchivedSession => _paths.ArchivedSessions,
-            _ => throw new InvalidDataException("Only session history can be imported.")
-        };
-        // Destination always follows the remote kind root. A different local kind is tombstoned first
-        // (RelocateFrom) so we never rewrite active bytes into the archived tree or the reverse.
+        var plaintext = remote.Plaintext[action.ObjectId];
+        ValidateHistoryPayload(version.Kind, plaintext, action.ObjectId, ct);
+
         LocalObject? relocateFrom = null;
         string path;
-        if (existing is null)
-            path = Path.Combine(root, action.ObjectId.Value + ".jsonl");
-        else if (existing.Kind == version.Kind)
-            path = existing.SourcePath;
+        if (version.Kind == ObjectKind.GrokSession)
+        {
+            if (_grokPaths is null) throw new InvalidOperationException("Grok paths are not configured.");
+            var package = GrokSessionPackage.Parse(plaintext);
+            path = GrokSessionPackage.ChatHistoryPath(_grokPaths.SessionDirectory(package.Cwd, package.SessionId));
+            if (existing is not null && existing.Kind != ObjectKind.GrokSession)
+                relocateFrom = existing;
+            else if (existing is not null)
+                path = existing.SourcePath;
+        }
         else
         {
-            relocateFrom = existing;
-            path = Path.Combine(root, action.ObjectId.Value + ".jsonl");
+            var root = version.Kind switch
+            {
+                ObjectKind.ActiveSession => _paths.Sessions,
+                ObjectKind.ArchivedSession => _paths.ArchivedSessions,
+                _ => throw new InvalidDataException("Only session history can be imported.")
+            };
+            // Destination always follows the remote kind root. A different local kind is tombstoned first
+            // (RelocateFrom) so we never rewrite active bytes into the archived tree or the reverse.
+            if (existing is null)
+                path = Path.Combine(root, action.ObjectId.Value + ".jsonl");
+            else if (existing.Kind == version.Kind)
+                path = existing.SourcePath;
+            else
+            {
+                relocateFrom = existing;
+                path = Path.Combine(root, action.ObjectId.Value + ".jsonl");
+            }
         }
+
         var stagedDirectory = Path.Combine(directory, "downloads");
         Directory.CreateDirectory(stagedDirectory);
-        var stagedPath = Path.Combine(stagedDirectory, Guid.NewGuid().ToString("N") + ".jsonl");
-        var plaintext = remote.Plaintext[action.ObjectId];
+        var stagedPath = Path.Combine(stagedDirectory, Guid.NewGuid().ToString("N") +
+            (version.Kind == ObjectKind.GrokSession ? ".grokpkg" : ".jsonl"));
         await using (var output = new FileStream(stagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920,
             FileOptions.Asynchronous | FileOptions.WriteThrough))
         {
@@ -1008,7 +1076,6 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         var staged = await File.ReadAllBytesAsync(stagedPath, ct).ConfigureAwait(false);
         if (!StringComparer.Ordinal.Equals(Sha256(staged).Hex, version.PlaintextHash.Hex))
             throw new InvalidDataException("Staged download does not match its authenticated plaintext hash.");
-        ValidateSessionJsonl(staged, action.ObjectId, ct);
         var incoming = new LocalObject(action.ObjectId, version.Kind, path, version.PlaintextHash,
             staged.LongLength, DateTimeOffset.UtcNow);
         var expected = relocateFrom is not null
@@ -1030,6 +1097,20 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         await using var content = new FileStream(staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 81_920,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         return await _historyWriter.ImportAsync(staged.Incoming, content, operationId, staged.ExpectedState, ct).ConfigureAwait(false);
+    }
+
+    private static void ValidateHistoryPayload(ObjectKind kind, byte[] bytes, LogicalObjectId expectedId,
+        CancellationToken ct)
+    {
+        if (kind == ObjectKind.GrokSession)
+        {
+            var package = GrokSessionPackage.Parse(bytes);
+            if (!string.Equals(GrokSessionPackage.ToLogicalId(package.SessionId), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Grok session package id does not match its logical object ID.");
+            return;
+        }
+
+        ValidateSessionJsonl(bytes, expectedId, ct);
     }
 
     private static void ValidateSessionJsonl(byte[] bytes, LogicalObjectId expectedId, CancellationToken ct)
@@ -1074,6 +1155,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         byte[] plaintext;
         if (sourcePath is null) plaintext = Array.Empty<byte>();
+        else if (kind == ObjectKind.GrokSession)
+        {
+            var sessionDirectory = Path.GetDirectoryName(sourcePath)
+                ?? throw new InvalidDataException("Grok chat_history path has no directory.");
+            plaintext = GrokSessionPackage.BuildFromDirectory(sessionDirectory);
+        }
         else
         {
             var raw = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);

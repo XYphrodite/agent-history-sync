@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
@@ -24,27 +25,28 @@ public sealed class CodexHistoryWriter
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly CodexPaths _paths;
+    private readonly GrokPaths? _grokPaths;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
     private readonly IAtomicFileSystem _fileSystem;
 
     internal readonly record struct RollbackCapture(string Path, string? BackupId);
 
-    public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector, IAtomicFileSystem? fileSystem = null)
+    public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
+        IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _backups = backups ?? throw new ArgumentNullException(nameof(backups));
         _processDetector = processDetector ?? throw new ArgumentNullException(nameof(processDetector));
         _fileSystem = fileSystem ?? new AtomicFileSystem();
+        _grokPaths = grokPaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming));
-        var expected = File.Exists(destination)
-            ? ExpectedHistoryState.Present(await BackupStore.HashFileAsync(destination, ct).ConfigureAwait(false))
-            : ExpectedHistoryState.Absent;
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths);
+        var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
     }
@@ -55,10 +57,15 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming));
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
+
+        if (incoming.Kind == ObjectKind.GrokSession)
+            return await ImportGrokPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         var temporary = BackupStore.SiblingTemporaryPath(destination);
         try
@@ -67,7 +74,7 @@ public sealed class CodexHistoryWriter
             await ValidateJsonlAsync(temporary, incoming.Id, ct).ConfigureAwait(false);
             var stagedHash = await BackupStore.HashFileAsync(temporary, ct).ConfigureAwait(false);
             if (!BackupStore.HashEquals(stagedHash, incoming.Hash)) throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
-            if (!await MatchesExpectedStateAsync(destination, expected, ct).ConfigureAwait(false)) return ImportApplyResult.Conflict;
+            if (!await MatchesExpectedStateAsync(destination, incoming.Kind, expected, ct).ConfigureAwait(false)) return ImportApplyResult.Conflict;
             if (expected.Exists)
             {
                 var displaced = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
@@ -90,17 +97,64 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local));
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
-        if (!BackupStore.HashEquals(await BackupStore.HashFileAsync(destination, ct).ConfigureAwait(false), baselineHash)) return TombstoneApplyResult.Conflict;
+        var current = await ContentHashAsync(destination, local.Kind, ct).ConfigureAwait(false);
+        if (current is null || !BackupStore.HashEquals(current.Value, baselineHash)) return TombstoneApplyResult.Conflict;
+        if (local.Kind == ObjectKind.GrokSession)
+        {
+            // Package hash is not the raw chat_history file hash; best-effort backup of chat text only.
+            if (File.Exists(destination))
+                await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+            EnsureCodexInactive();
+            File.Delete(destination);
+            var summary = Path.Combine(Path.GetDirectoryName(destination)!, "summary.json");
+            if (File.Exists(summary)) File.Delete(summary);
+            return TombstoneApplyResult.Applied;
+        }
+
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         if (!BackupStore.HashEquals(backup.ContentHash, baselineHash)) return TombstoneApplyResult.Conflict;
         return await _fileSystem.DeleteIfUnchangedAsync(destination, baselineHash, EnsureCodexInactive, ct).ConfigureAwait(false)
             ? TombstoneApplyResult.Applied
             : TombstoneApplyResult.Conflict;
+    }
+
+    private async Task<ImportApplyResult> ImportGrokPackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_grokPaths is null) throw new InvalidOperationException("Grok paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = GrokSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        var package = GrokSessionPackage.Parse(packageBytes);
+        if (!string.Equals(GrokSessionPackage.ToLogicalId(package.SessionId), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Grok session package id does not match the logical object id.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.GrokSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+
+        try
+        {
+            EnsureCodexInactive();
+            GrokSessionPackage.Materialize(package, _grokPaths);
+            var after = await ContentHashAsync(destination, ObjectKind.GrokSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Grok session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
     }
 
     private async Task WaitIfRunningAsync(CancellationToken ct)
@@ -112,34 +166,34 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan));
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
-        if (!await MatchesExpectedStateAsync(destination, plan.Before, ct).ConfigureAwait(false))
+        if (!await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
             throw new IOException("Local history changed before the mutation batch could be captured.");
         if (!plan.Before.Exists) return new RollbackCapture(destination, null);
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         if (!BackupStore.HashEquals(backup.ContentHash, plan.Before.ContentHash!.Value) ||
-            !await MatchesExpectedStateAsync(destination, plan.Before, ct).ConfigureAwait(false))
+            !await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
             throw new IOException("Local history changed while the mutation batch was being captured.");
         return new RollbackCapture(destination, backup.Id);
     }
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path));
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path));
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
-        if (await MatchesExpectedStateAsync(destination, before, ct).ConfigureAwait(false)) return;
-        if (!await MatchesExpectedStateAsync(destination, after, ct).ConfigureAwait(false))
+        if (await MatchesExpectedStateAsync(destination, kind, before, ct).ConfigureAwait(false)) return;
+        if (!await MatchesExpectedStateAsync(destination, kind, after, ct).ConfigureAwait(false))
             throw new IOException("Local history changed after an interrupted synchronized mutation; automatic rollback was refused.");
         if (!before.Exists)
         {
@@ -174,11 +228,41 @@ public sealed class CodexHistoryWriter
         return true;
     }
 
-    private static async Task<bool> MatchesExpectedStateAsync(string destination, ExpectedHistoryState expected, CancellationToken ct)
+    private async Task<ExpectedHistoryState> CurrentStateAsync(string destination, ObjectKind kind, CancellationToken ct)
     {
-        if (!expected.Exists) return !File.Exists(destination);
-        return File.Exists(destination) && BackupStore.HashEquals(
-            await BackupStore.HashFileAsync(destination, ct).ConfigureAwait(false), expected.ContentHash!.Value);
+        var hash = await ContentHashAsync(destination, kind, ct).ConfigureAwait(false);
+        return hash is null ? ExpectedHistoryState.Absent : ExpectedHistoryState.Present(hash.Value);
+    }
+
+    private async Task<bool> MatchesExpectedStateAsync(string destination, ObjectKind kind, ExpectedHistoryState expected,
+        CancellationToken ct)
+    {
+        var current = await ContentHashAsync(destination, kind, ct).ConfigureAwait(false);
+        if (!expected.Exists) return current is null;
+        return current is not null && BackupStore.HashEquals(current.Value, expected.ContentHash!.Value);
+    }
+
+    private static async Task<ContentHash?> ContentHashAsync(string destination, ObjectKind kind, CancellationToken ct)
+    {
+        if (kind == ObjectKind.GrokSession)
+        {
+            if (!File.Exists(destination)) return null;
+            var directory = Path.GetDirectoryName(destination)
+                ?? throw new InvalidDataException("Grok chat_history path has no directory.");
+            try
+            {
+                var package = GrokSessionPackage.BuildFromDirectory(directory);
+                return GrokSessionPackage.HashPackage(package);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
+                                                  or JsonException or DecoderFallbackException or ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        if (!File.Exists(destination)) return null;
+        return await BackupStore.HashFileAsync(destination, ct).ConfigureAwait(false);
     }
 
     private static async Task ValidateJsonlAsync(string path, LogicalObjectId expectedId, CancellationToken ct)
