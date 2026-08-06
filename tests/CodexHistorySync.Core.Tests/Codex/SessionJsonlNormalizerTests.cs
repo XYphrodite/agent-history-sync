@@ -53,4 +53,26 @@ public sealed class SessionJsonlNormalizerTests
         Assert.Equal(Convert.ToHexString(SHA256.HashData(first)), Convert.ToHexString(SHA256.HashData(second)));
         Assert.True(first.Length < source.Length);
     }
+
+    [Fact]
+    public void Normalize_ReplacesInputImageBlocksAndDataUris()
+    {
+        var source = Utf8.GetBytes(
+            """
+            {"type":"session_meta","payload":{"id":"thread-1"}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"see photo"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB","detail":"high"}]}}
+            {"type":"response_item","payload":{"type":"custom_tool_call_output","output":"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD"}}
+
+            """);
+
+        var text = Utf8.GetString(SessionJsonlNormalizer.Normalize(source));
+
+        Assert.Contains("see photo", text, StringComparison.Ordinal);
+        Assert.Contains("[image omitted]", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("data:image/png", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("data:image/jpeg", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("iVBORw0KGgo", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("/9j/", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("input_image", text, StringComparison.Ordinal);
+    }
 }
