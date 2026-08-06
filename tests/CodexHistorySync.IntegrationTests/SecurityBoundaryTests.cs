@@ -443,9 +443,19 @@ public sealed class SecurityBoundaryTests : IDisposable
 
     private sealed class LocalFixturePushTransport(string remote) : IGitPushTransport
     {
-        public Task<GitCommandResult> PushAsync(GitCommand git, string workingDirectory,
-            CancellationToken cancellationToken) =>
-            git.RunAsync(["push", remote, "HEAD:main"], workingDirectory, cancellationToken);
+        public Task<GitCommandResult> PushAsync(
+            GitCommand git,
+            string workingDirectory,
+            string expectedRemoteRevision,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(expectedRemoteRevision))
+                return git.RunAsync(["push", "--force", remote, "HEAD:main"], workingDirectory, cancellationToken);
+            return git.RunAsync(
+                ["push", "--force-with-lease=refs/heads/main:" + expectedRemoteRevision, remote, "HEAD:main"],
+                workingDirectory,
+                cancellationToken);
+        }
     }
 
     private sealed class StoppedDetector : ICodexProcessDetector
