@@ -256,21 +256,40 @@ internal static class PathSafety
         return canonical;
     }
 
-    public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName)
+    public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
                 throw new ArgumentException("The storage path must not overlap synchronized Codex paths.", parameterName);
+        if (grokPaths is not null)
+        {
+            foreach (var synchronizedPath in new[] { grokPaths.Home, grokPaths.Sessions })
+                if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
+                    throw new ArgumentException("The storage path must not overlap synchronized Grok paths.", parameterName);
+        }
     }
 
-    public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName)
+    public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
+        Grok.GrokPaths? grokPaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
+        if (kind == ObjectKind.GrokSession)
+        {
+            if (grokPaths is null)
+                throw new ArgumentException("Grok paths are required for Grok session destinations.", parameterName);
+            if (!CodexPaths.IsPathWithin(canonical, grokPaths.Sessions) ||
+                StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(grokPaths.Sessions)))
+                throw new ArgumentException("The destination is outside the synchronized Grok sessions directory.", parameterName);
+            if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetFileName(canonical), "chat_history.jsonl"))
+                throw new ArgumentException("Grok session destinations must be chat_history.jsonl.", parameterName);
+            return canonical;
+        }
+
         var root = kind switch
         {
             ObjectKind.ActiveSession => paths.Sessions,
             ObjectKind.ArchivedSession => paths.ArchivedSessions,
-            _ => throw new ArgumentException("Only active and archived sessions can be written as JSONL history.", parameterName)
+            _ => throw new ArgumentException("Only active, archived, and Grok sessions can be written as history.", parameterName)
         };
         if (!CodexPaths.IsPathWithin(canonical, root) || StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(root)))
             throw new ArgumentException("The destination is outside its synchronized Codex directory.", parameterName);

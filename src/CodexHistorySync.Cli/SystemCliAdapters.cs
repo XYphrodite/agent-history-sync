@@ -425,12 +425,13 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     {
         if (requireKey && key.Length != RepositoryCrypto.MasterKeySize) throw new CliGateException("The repository key is unavailable.");
         var paths = CodexPaths.Resolve(null);
+        var grokPaths = CodexHistorySync.Core.Grok.GrokPaths.TryResolve(null);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
-        var backups = new BackupStore(configuration.RepositoryId, localAppData, paths);
+        var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
-        var writer = new CodexHistoryWriter(paths, backups, processDetector);
+        var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
             Path.Combine(localAppData, "CodexHistorySync", "repositories"),
@@ -438,7 +439,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         if (pinnedRevision is not null) provider = new RevisionPinnedProvider(provider, pinnedRevision);
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
-            configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging);
+            configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
+            grokPaths: grokPaths);
         return new Components(paths, scanner, conflicts, engine);
     }
 

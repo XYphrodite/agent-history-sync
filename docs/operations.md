@@ -55,6 +55,16 @@ Before hashing and upload, each session JSONL is reduced deterministically to a 
 
 `session_meta` and user/assistant message text are kept. Local Codex files on disk are not modified; only the synchronized view is smaller.
 
+## Grok CLI sessions
+
+When `%USERPROFILE%\.grok\sessions` exists, `codex-sync` also inventories Grok CLI sessions. Each session is stored as one encrypted package under logical id `g-<uuid>` containing:
+
+- normalized `chat_history.jsonl` (system/tool lines dropped; long content truncated);
+- `summary.json` when present.
+
+Terminal logs, locks, sqlite, and recap caches under the session folder are **not** synchronized. On import, packages are written back to  
+`%USERPROFILE%\.grok\sessions\<url-encoded-cwd>\<uuid>\`.
+
 GitHub still rejects individual blobs larger than 100 MiB. After reduction, payloads larger than ~95 MiB are skipped on upload (`skipped-oversized=N`) and remain local-only.
 
 ## Status and diagnostics
