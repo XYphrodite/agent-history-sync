@@ -9,31 +9,46 @@ public sealed class SessionJsonlNormalizerTests
     private static readonly UTF8Encoding Utf8 = new(false);
 
     [Fact]
-    public void Normalize_DropsCompactedAndEphemeralRuntimeRecords()
+    public void Normalize_DropsBulkRuntimeAndToolOutputRecords()
     {
         var source = Utf8.GetBytes(
             """
             {"type":"session_meta","payload":{"id":"thread-1"}}
-            {"type":"response_item","payload":{"role":"user","content":[{"type":"text","text":"hi"}]}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}
+            {"type":"response_item","payload":{"type":"function_call_output","output":"HUGE TOOL OUTPUT"}}
+            {"type":"response_item","payload":{"type":"custom_tool_call_output","output":"MORE OUTPUT"}}
+            {"type":"response_item","payload":{"type":"reasoning","content":"think"}}
             {"type":"compacted","payload":{"replacement_history":"HUGE"}}
+            {"type":"event_msg","payload":{"type":"token_count"}}
             {"type":"turn_context","payload":{"x":1}}
-            {"type":"world_state","payload":{"y":2}}
-            {"type":"event_msg","payload":{"kind":"info"}}
-            {"type":"inter_agent_communication_metadata","payload":{}}
 
             """);
 
-        var normalized = SessionJsonlNormalizer.Normalize(source);
-        var text = Utf8.GetString(normalized);
+        var text = Utf8.GetString(SessionJsonlNormalizer.Normalize(source));
 
         Assert.Contains("session_meta", text, StringComparison.Ordinal);
-        Assert.Contains("response_item", text, StringComparison.Ordinal);
-        Assert.Contains("event_msg", text, StringComparison.Ordinal);
+        Assert.Contains("\"hi\"", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("function_call_output", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("custom_tool_call_output", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoning", text, StringComparison.Ordinal);
         Assert.DoesNotContain("compacted", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_msg", text, StringComparison.Ordinal);
         Assert.DoesNotContain("turn_context", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("world_state", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("inter_agent_communication_metadata", text, StringComparison.Ordinal);
         Assert.EndsWith("\n", text);
+    }
+
+    [Fact]
+    public void Normalize_TruncatesLongRetainedStrings()
+    {
+        var longText = new string('x', SessionJsonlNormalizer.MaximumRetainedStringChars + 500);
+        var source = Utf8.GetBytes(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" +
+            longText + "\"}]}}\n");
+
+        var text = Utf8.GetString(SessionJsonlNormalizer.Normalize(source));
+
+        Assert.Contains("[...truncated 500 chars]", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(longText, text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -43,7 +58,7 @@ public sealed class SessionJsonlNormalizerTests
             """
             {"type":"session_meta","payload":{"id":"thread-1"}}
             {"type":"compacted","payload":{"replacement_history":"aaaaaaaa"}}
-            {"type":"response_item","payload":{"role":"assistant","content":[]}}
+            {"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}
 
             """);
 
@@ -61,7 +76,7 @@ public sealed class SessionJsonlNormalizerTests
             """
             {"type":"session_meta","payload":{"id":"thread-1"}}
             {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"see photo"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB","detail":"high"}]}}
-            {"type":"response_item","payload":{"type":"custom_tool_call_output","output":"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD"}}
+            {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD"}]}}
 
             """);
 
