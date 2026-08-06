@@ -213,11 +213,21 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                     skippedOversized++;
                                     break;
                                 }
-                                var entry = await StageEncryptedObjectAsync(source.Id, source.Kind, source.Hash, false, source.SourcePath, directory, ct).ConfigureAwait(false);
-                                entries[entry.Id] = entry;
-                                changes.Add(new EncryptedObjectChange(new LogicalObjectId(entry.OpaqueObjectId), entry.StagedPath!, false));
-                                successful[action.ObjectId] = Version(entry);
-                                attemptUploads++;
+                                try
+                                {
+                                    var entry = await StageEncryptedObjectAsync(source.Id, source.Kind, source.Hash, false, source.SourcePath, directory, ct).ConfigureAwait(false);
+                                    entries[entry.Id] = entry;
+                                    changes.Add(new EncryptedObjectChange(new LogicalObjectId(entry.OpaqueObjectId), entry.StagedPath!, false));
+                                    successful[action.ObjectId] = Version(entry);
+                                    attemptUploads++;
+                                }
+                                catch (InvalidDataException exception) when (
+                                    exception.Message.Contains("changed after stable scanning", StringComparison.Ordinal) ||
+                                    exception.Message.Contains("Grok session", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    // Live Grok/Codex sessions can mutate between scan and stage; defer them.
+                                    deferred.Add(action.ObjectId);
+                                }
                                 break;
                             }
                             case SyncActionKind.PublishTombstone when mode != SyncMode.Pull:
