@@ -18,7 +18,10 @@
   GitHub owner/name of the source repository.
 
 .PARAMETER AddToPath
-  Prepend InstallDir to the current user's PATH if missing.
+  Prepend InstallDir to the current user's PATH without asking.
+
+.PARAMETER NoPath
+  Do not add InstallDir to PATH and do not ask.
 
 .PARAMETER SkipHash
   Do not require/verify the .sha256 asset (not recommended).
@@ -36,8 +39,13 @@ param(
     [string] $InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\CodexHistorySync"),
     [string] $Repo = "XYphrodite/agent-history-sync",
     [switch] $AddToPath,
+    [switch] $NoPath,
     [switch] $SkipHash
 )
+
+if ($AddToPath -and $NoPath) {
+    throw "Use only one of -AddToPath or -NoPath."
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -142,17 +150,53 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item -LiteralPath $tempExe -Destination $existing -Force
 
+    $shouldAddToPath = $false
     if ($AddToPath) {
+        $shouldAddToPath = $true
+    }
+    elseif ($NoPath) {
+        $shouldAddToPath = $false
+        Write-Host "PATH will not be modified (-NoPath)."
+    }
+    elseif ([Environment]::UserInteractive) {
+        Write-Host ""
+        Write-Host "Install directory: $InstallDir"
+        Write-Host "Adding it to your user PATH lets you run 'codex-sync' without the full path."
+        $answer = Read-Host "Add install directory to user PATH? [Y/n]"
+        if ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$') {
+            $shouldAddToPath = $true
+        }
+        else {
+            Write-Host "Skipped PATH update."
+        }
+    }
+    else {
+        Write-Host "Non-interactive host: PATH not modified (pass -AddToPath or -NoPath)."
+    }
+
+    if ($shouldAddToPath) {
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         if (-not $userPath) { $userPath = "" }
-        $parts = $userPath -split ";" | Where-Object { $_ -and $_.Trim() -ne "" }
+        $parts = @($userPath -split ";" | Where-Object { $_ -and $_.Trim() -ne "" })
         $normalizedInstall = [IO.Path]::GetFullPath($InstallDir).TrimEnd("\")
-        $already = $parts | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd("\") -ieq $normalizedInstall }
+        $already = $false
+        foreach ($part in $parts) {
+            try {
+                if ([IO.Path]::GetFullPath($part).TrimEnd("\") -ieq $normalizedInstall) {
+                    $already = $true
+                    break
+                }
+            }
+            catch {
+                # Ignore malformed PATH entries.
+            }
+        }
         if (-not $already) {
             Write-Step "Adding install directory to user PATH"
             $newPath = if ($userPath.Trim()) { "$normalizedInstall;$userPath" } else { $normalizedInstall }
             [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
             $env:Path = "$normalizedInstall;" + $env:Path
+            Write-Host "PATH updated for new terminals. This session: use full path or open a new PowerShell."
         }
         else {
             Write-Host "Install directory already on user PATH."
@@ -168,10 +212,13 @@ try {
     Write-Host ""
     Write-Host "Installed Agent History Sync $tag" -ForegroundColor Green
     Write-Host "  Binary: $existing"
+    if ($shouldAddToPath) {
+        Write-Host "  PATH:   user PATH includes install dir (new terminals)"
+    }
     Write-Host "  Next:"
     Write-Host "    & `"$existing`" doctor"
     Write-Host "    & `"$existing`" status"
-    Write-Host "    & `"$existing`" init https://github.com/OWNER/agent-history-sync-data.git"
+    Write-Host "    & `"$existing`" join https://github.com/XYphrodite/agent-history-sync-data.git"
 }
 finally {
     if ($null -ne $tempRoot -and (Test-Path -LiteralPath $tempRoot)) {

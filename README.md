@@ -32,12 +32,14 @@ Release binary name remains `codex-sync.exe` (stable install path). Prerequisite
 
 ```powershell
 # Latest release → %LOCALAPPDATA%\Programs\CodexHistorySync\codex-sync.exe
+# Asks interactively whether to add the install dir to your user PATH.
 irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1 | iex
 ```
 
 ```powershell
-# Pin a version and add to user PATH
+# Pin a version; force PATH yes/no without prompting
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.2.0 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.2.0 -NoPath
 ```
 
 **From a local build:**
@@ -128,12 +130,14 @@ Deleting `%LOCALAPPDATA%\CodexHistorySync` removes keys, config, conflict eviden
 
 ```powershell
 # Последний релиз → %LOCALAPPDATA%\Programs\CodexHistorySync\codex-sync.exe
+# Спросит, добавлять ли каталог в user PATH.
 irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1 | iex
 ```
 
 ```powershell
-# Конкретная версия + PATH пользователя
+# Конкретная версия; PATH без вопроса
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.2.0 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.2.0 -NoPath
 ```
 
 **Из локальной сборки:**
