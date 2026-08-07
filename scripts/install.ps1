@@ -90,6 +90,7 @@ function Expand-Sha256File {
     throw "Could not parse SHA-256 from $Path"
 }
 
+$tempRoot = $null
 try {
     $release = Get-GitHubRelease -Repository $Repo -Tag $Version
     $tag = $release.tag_name
@@ -173,7 +174,7 @@ try {
     Write-Host "    & `"$existing`" init https://github.com/OWNER/agent-history-sync-data.git"
 }
 finally {
-    if ($tempRoot -and (Test-Path -LiteralPath $tempRoot)) {
+    if ($null -ne $tempRoot -and (Test-Path -LiteralPath $tempRoot)) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
