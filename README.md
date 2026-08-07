@@ -28,12 +28,28 @@ Release binary name remains `codex-sync.exe` (stable install path). Prerequisite
 
 ### Install
 
+**From GitHub Releases (recommended):**
+
+```powershell
+# Latest release → %LOCALAPPDATA%\Programs\CodexHistorySync\codex-sync.exe
+irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1 | iex
+```
+
+```powershell
+# Pin a version and add to user PATH
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.2.0 -AddToPath
+```
+
+**From a local build:**
+
 ```powershell
 $install = Join-Path $env:LOCALAPPDATA 'Programs\CodexHistorySync'
 New-Item -ItemType Directory -Force $install | Out-Null
 Copy-Item .\codex-sync.exe (Join-Path $install 'codex-sync.exe')
 & (Join-Path $install 'codex-sync.exe') --help
 ```
+
+**Publish a new release** (maintainers): push an annotated tag `vX.Y.Z` (or run `.\scripts\publish-release.ps1 -Version X.Y.Z`). GitHub Actions builds `win-x64` and attaches `codex-sync.exe` + SHA-256.
 
 ### Initialize and join
 
@@ -108,12 +124,28 @@ Deleting `%LOCALAPPDATA%\CodexHistorySync` removes keys, config, conflict eviden
 
 ### Установка
 
+**Из GitHub Releases (рекомендуется):**
+
+```powershell
+# Последний релиз → %LOCALAPPDATA%\Programs\CodexHistorySync\codex-sync.exe
+irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1 | iex
+```
+
+```powershell
+# Конкретная версия + PATH пользователя
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.2.0 -AddToPath
+```
+
+**Из локальной сборки:**
+
 ```powershell
 $install = Join-Path $env:LOCALAPPDATA 'Programs\CodexHistorySync'
 New-Item -ItemType Directory -Force $install | Out-Null
 Copy-Item .\codex-sync.exe (Join-Path $install 'codex-sync.exe')
 & (Join-Path $install 'codex-sync.exe') --help
 ```
+
+**Новый релиз** (для maintainers): тег `vX.Y.Z` или `.\scripts\publish-release.ps1 -Version X.Y.Z` — Actions соберёт `win-x64` и приложит `codex-sync.exe` + SHA-256.
 
 ### Init и join
 
