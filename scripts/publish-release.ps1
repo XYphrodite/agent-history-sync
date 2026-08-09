@@ -22,7 +22,7 @@ if ($Version.StartsWith("v")) {
     $Version = $Version.Substring(1)
 }
 if ($Version -notmatch '^\d+\.\d+\.\d+([.-].+)?$') {
-    throw "Version must look like 0.2.0 (got '$Version')"
+    throw "Version must look like 0.3.0 (got '$Version')"
 }
 
 $tag = "v$Version"
