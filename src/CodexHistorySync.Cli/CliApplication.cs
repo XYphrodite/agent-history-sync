@@ -4,7 +4,7 @@ using CodexHistorySync.Core.Sync;
 
 namespace CodexHistorySync.Cli;
 
-public sealed record CliGateResult(bool Passed, string Name);
+public sealed record CliGateResult(bool Passed, string Name, string? Diagnostic = null);
 public sealed record CliInitializationResult(string RepositoryId);
 public sealed record CliAuthenticatedRepository(string RepositoryId, string RemoteRevision);
 public sealed record CliJoinPlan(int Local, int Remote, int Pending, int Conflicts);
@@ -104,9 +104,6 @@ public sealed class CliApplication
         {
             // Keep output free of paths/secrets; surface only a stable type token for support.
             console.WriteError($"Operation failed: {SafeToken(exception.GetType().Name)}.");
-            var message = exception.Message;
-            if (!string.IsNullOrWhiteSpace(message))
-                console.WriteError(SafeToken(message.Length > 160 ? message[..160] : message));
             return 1;
         }
     }
@@ -154,7 +151,13 @@ public sealed class CliApplication
             if (passphrase.Length == 0) return Usage();
             repository = await services.AuthenticateRepositoryAsync(args[1], passphrase, cancellationToken).ConfigureAwait(false);
             var compatibility = await services.ProbeCompatibilityAsync(repository, cancellationToken).ConfigureAwait(false);
-            if (!compatibility.Passed) return GateFailure(compatibility.Name);
+            if (!compatibility.Passed) return GateFailure(compatibility.Name, compatibility.Diagnostic);
+            if (!string.IsNullOrWhiteSpace(compatibility.Diagnostic) &&
+                compatibility.Diagnostic.StartsWith("skipped-no-codex", StringComparison.Ordinal))
+            {
+                console.WriteLine("warning: codex-compatibility skipped (Codex executable not found). " +
+                    "Install the OpenAI Codex IDE extension or set CODEX_EXE so Codex can reindex imported sessions.");
+            }
             var plan = await services.PlanJoinAsync(repository, cancellationToken).ConfigureAwait(false);
             console.WriteLine($"Join plan: local={plan.Local} remote={plan.Remote} pending={plan.Pending} conflicts={plan.Conflicts}.");
             if (!apply)
@@ -291,9 +294,11 @@ public sealed class CliApplication
         return 0;
     }
 
-    private int GateFailure(string name)
+    private int GateFailure(string name, string? diagnostic = null)
     {
         console.WriteError($"Gate failed: {SafeToken(name)}.");
+        if (!string.IsNullOrWhiteSpace(diagnostic))
+            console.WriteError($"diagnostic: {SafeToken(diagnostic)}");
         return 3;
     }
 

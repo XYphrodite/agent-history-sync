@@ -163,13 +163,32 @@ public sealed class CliTests
     {
         var fixture = new Fixture();
         fixture.Console.Secrets.Enqueue(Passphrase.ToCharArray());
-        fixture.Services.CompatibilityGate = new CliGateResult(false, "codex-compatibility");
+        fixture.Services.CompatibilityGate = new CliGateResult(false, "codex-compatibility",
+            "The imported JSONL thread was not listed by Codex.");
 
         var exitCode = await fixture.Application.RunAsync(["join", Remote, "--apply"], CancellationToken.None);
 
         Assert.Equal(3, exitCode);
         Assert.Equal(["verify-private", "authenticate", "compatibility", "abort"], fixture.Services.Calls);
         Assert.False(fixture.Services.JoinApplied);
+        Assert.Contains("Gate failed: codex-compatibility", fixture.Console.ErrorText);
+        Assert.Contains("diagnostic:", fixture.Console.ErrorText);
+    }
+
+    [Fact]
+    public async Task Join_warns_and_continues_when_codex_is_missing()
+    {
+        var fixture = new Fixture();
+        fixture.Console.Secrets.Enqueue(Passphrase.ToCharArray());
+        fixture.Services.CompatibilityGate = new CliGateResult(true, "codex-compatibility",
+            "skipped-no-codex: Codex executable was not found. Install the OpenAI Codex VS Code extension or set CODEX_EXE.");
+
+        var exitCode = await fixture.Application.RunAsync(["join", Remote], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(["verify-private", "authenticate", "compatibility", "plan", "abort"], fixture.Services.Calls);
+        Assert.Contains("warning: codex-compatibility skipped", fixture.Console.OutputText);
+        Assert.Contains("Join plan:", fixture.Console.OutputText);
     }
 
     [Fact]

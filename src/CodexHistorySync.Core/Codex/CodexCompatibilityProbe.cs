@@ -21,6 +21,7 @@ public sealed class CodexCompatibilityProbe
     public async Task<CompatibilityResult> ProbeAsync(string codexExe, string sourceSession, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(codexExe)) return Incompatible("unknown", "A Codex executable path is required.");
+        if (!File.Exists(codexExe)) return Incompatible("unknown", "Codex executable was not found. Install the OpenAI Codex VS Code extension or set CODEX_EXE.");
         if (!File.Exists(sourceSession)) return Incompatible("unknown", "The compatibility session was not found.");
         if (!IsAllowedSessionFile(sourceSession)) return Incompatible("unknown", "The compatibility session file is not allowed.");
         var disposableHome = Path.Combine(Path.GetTempPath(), $"codex-history-sync-{Guid.NewGuid():N}");
