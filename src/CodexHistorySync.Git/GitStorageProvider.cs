@@ -253,7 +253,7 @@ public sealed class GitStorageProvider : IStorageProvider
 
     private async Task<string> ReplaceHistoryWithOrphanSnapshotAsync(string commitMessage, CancellationToken ct)
     {
-        var tree = await RunGitAsync(["rev-parse", "HEAD^{tree}"], ct).ConfigureAwait(false);
+        var tree = await RunGitAsync(["write-tree"], ct).ConfigureAwait(false);
         if (tree.ExitCode != 0) ThrowGitFailure("Unable to resolve the publish tree.", tree);
         var treeSha = tree.StandardOutput.Trim();
         if (treeSha.Length == 0) throw new InvalidDataException("The publish tree is empty.");
