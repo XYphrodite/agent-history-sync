@@ -40,16 +40,46 @@ public sealed class CodexCompatibilityProbeTests
     }
 
     [Fact]
+    public async Task MissingCodexExecutableReturnsClearDiagnosticWithoutLaunch()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"codex-compat-fixture-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fixtureDirectory);
+        var sourceSession = Path.Combine(fixtureDirectory, "rollout.jsonl");
+        await File.WriteAllTextAsync(sourceSession,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-for-test\"}}" + Environment.NewLine);
+        var missingCodex = Path.Combine(fixtureDirectory, "missing-codex.exe");
+
+        try
+        {
+            var result = await new CodexCompatibilityProbe().ProbeAsync(missingCodex, sourceSession, CancellationToken.None);
+
+            Assert.False(result.IsCompatible);
+            Assert.Equal("unknown", result.CodexVersion);
+            Assert.Contains("Codex executable was not found", result.Diagnostic, StringComparison.Ordinal);
+            Assert.Contains("CODEX_EXE", result.Diagnostic, StringComparison.Ordinal);
+            Assert.DoesNotContain(missingCodex, result.Diagnostic, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(sourceSession, result.Diagnostic, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task MalformedJsonlReturnsAnIncompatibleDiagnostic()
     {
         var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"codex-compat-fixture-{Guid.NewGuid():N}");
         Directory.CreateDirectory(fixtureDirectory);
         var sourceSession = Path.Combine(fixtureDirectory, "rollout.jsonl");
         await File.WriteAllTextAsync(sourceSession, "not JSON" + Environment.NewLine);
+        // Placeholder path that exists so the probe can reach the JSONL reader (must not be launched).
+        var codexPlaceholder = Path.Combine(fixtureDirectory, "unused-codex.exe");
+        await File.WriteAllTextAsync(codexPlaceholder, "placeholder");
 
         try
         {
-            var result = await new CodexCompatibilityProbe().ProbeAsync("unused", sourceSession, CancellationToken.None);
+            var result = await new CodexCompatibilityProbe().ProbeAsync(codexPlaceholder, sourceSession, CancellationToken.None);
 
             Assert.False(result.IsCompatible);
             Assert.Equal("unknown", result.CodexVersion);

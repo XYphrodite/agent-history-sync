@@ -65,4 +65,42 @@ public sealed class CodexExecutableLocatorTests
 
         Assert.Null(resolved);
     }
+
+    [Fact]
+    public void Cursor_extension_install_is_resolved()
+    {
+        var userProfile = Path.GetFullPath(@"C:\Users\Test");
+        var extensionRoot = Path.Combine(userProfile, ".cursor", "extensions");
+        var extension = Path.Combine(extensionRoot, "openai.chatgpt-0.150.0-win32-x64");
+        var executable = Path.Combine(extension, "bin", "windows-x86_64", "codex.exe");
+        var locator = new CodexExecutableLocator(
+            null,
+            userProfile,
+            string.Empty,
+            path => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(path), executable),
+            root => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(root), extensionRoot) ? [extension] : []);
+
+        var resolved = locator.Resolve();
+
+        Assert.Equal(executable, resolved, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void VSCodium_vscode_oss_extension_install_is_resolved()
+    {
+        var userProfile = Path.GetFullPath(@"C:\Users\Test");
+        var extensionRoot = Path.Combine(userProfile, ".vscode-oss", "extensions");
+        var extension = Path.Combine(extensionRoot, "openai.chatgpt-0.150.0-win32-x64");
+        var executable = Path.Combine(extension, "bin", "windows-x86_64", "codex.exe");
+        var locator = new CodexExecutableLocator(
+            null,
+            userProfile,
+            string.Empty,
+            path => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(path), executable),
+            root => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(root), extensionRoot) ? [extension] : []);
+
+        var resolved = locator.Resolve();
+
+        Assert.Equal(executable, resolved, StringComparer.OrdinalIgnoreCase);
+    }
 }

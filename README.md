@@ -19,7 +19,7 @@ Each successful publish rewrites `main` to a **single orphan commit** (snapshot 
 
 The public command is `agent-sync`, and the release binary is `agent-sync.exe`. Prerequisites: Git, GitHub CLI (`gh`), and the agents you use.
 
-For compatibility with existing installations, local application data deliberately remains under `%LOCALAPPDATA%\CodexHistorySync`; upgrading does not migrate or rename that directory.
+For compatibility with existing installations, the installer deliberately keeps `agent-sync.exe` under `%LOCALAPPDATA%\Programs\CodexHistorySync`, while application state remains under `%LOCALAPPDATA%\CodexHistorySync`. These are separate directories; upgrading does not migrate or rename either one.
 
 ### Repositories
 
@@ -119,7 +119,7 @@ Deleting `%LOCALAPPDATA%\CodexHistorySync` removes keys, config, conflict eviden
 
 Публичная команда называется `agent-sync`, а релизный файл — `agent-sync.exe`. Нужны: Git, GitHub CLI (`gh`) и сами агенты.
 
-Для совместимости с существующими установками локальные данные намеренно остаются в `%LOCALAPPDATA%\CodexHistorySync`; при обновлении этот каталог не переносится и не переименовывается.
+Для совместимости с существующими установками `agent-sync.exe` намеренно остаётся в `%LOCALAPPDATA%\Programs\CodexHistorySync`, а данные приложения — в `%LOCALAPPDATA%\CodexHistorySync`. Это разные каталоги; при обновлении ни один из них не переносится и не переименовывается.
 
 ### Репозитории
 

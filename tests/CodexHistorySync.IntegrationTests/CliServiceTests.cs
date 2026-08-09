@@ -208,6 +208,36 @@ public sealed class CliServiceTests
     }
 
     [Fact]
+    public async Task Compatibility_probe_soft_skips_when_codex_executable_is_missing()
+    {
+        var runtime = new CoreCliSyncRuntime(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+            new FakeGateway([]), new RecordingProcessDetector(), (_, _) => Task.FromResult(
+                new CompatibilityResult(false, "unknown",
+                    "Codex executable was not found. Install the OpenAI Codex VS Code extension or set CODEX_EXE.")));
+
+        var result = await runtime.ProbeCompatibilityAsync(CancellationToken.None);
+
+        Assert.True(result.Passed);
+        Assert.Equal("codex-compatibility", result.Name);
+        Assert.StartsWith("skipped-no-codex:", result.Diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Compatibility_probe_remains_a_hard_failure_when_codex_reindex_fails()
+    {
+        const string diagnostic = "The imported JSONL thread was not listed by Codex.";
+        var runtime = new CoreCliSyncRuntime(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+            new FakeGateway([]), new RecordingProcessDetector(), (_, _) => Task.FromResult(
+                new CompatibilityResult(false, "test", diagnostic)));
+
+        var result = await runtime.ProbeCompatibilityAsync(CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Equal("codex-compatibility", result.Name);
+        Assert.Equal(diagnostic, result.Diagnostic);
+    }
+
+    [Fact]
     public async Task Real_runtime_disposes_temporary_engine_and_zeroes_only_its_key_copy()
     {
         var root = Path.Combine(Path.GetTempPath(), "codex-history-runtime-disposal-" + Guid.NewGuid().ToString("N"));

@@ -4,7 +4,7 @@
 
 Agent History Sync runs on Windows. Install `git`, GitHub CLI (`gh`), and the agents you sync (Codex and/or Grok CLI), then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The **data** repository must already exist, be private, and be empty for `init` (recommended name: `agent-history-sync-data`).
 
-The public command is `agent-sync`. For compatibility with existing installations, local application data deliberately remains under `%LOCALAPPDATA%\CodexHistorySync`; upgrading does not migrate or rename that directory.
+The public command is `agent-sync`. For compatibility with existing installations, the installer deliberately keeps `agent-sync.exe` under `%LOCALAPPDATA%\Programs\CodexHistorySync`, while application state remains under `%LOCALAPPDATA%\CodexHistorySync`. These are separate directories; upgrading does not migrate or rename either one.
 
 Passphrases are accepted only from an interactive console with hidden input. They are never accepted as command-line arguments, written to configuration, or printed. Keep the passphrase in a password manager: the DPAPI cache is tied to the current Windows user and cannot recover a forgotten passphrase on another device.
 

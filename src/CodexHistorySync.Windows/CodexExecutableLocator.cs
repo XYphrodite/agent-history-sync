@@ -44,8 +44,11 @@ public sealed class CodexExecutableLocator
                          .Where(IsFirstPartyWindowsExtension)
                          .OrderByDescending(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
             {
-                var executable = Path.GetFullPath(Path.Combine(extension, "bin", "windows-x86_64", "codex.exe"));
-                if (fileExists(executable)) return executable;
+                foreach (var relative in CandidateRelativeExecutables)
+                {
+                    var executable = Path.GetFullPath(Path.Combine(extension, relative));
+                    if (fileExists(executable)) return executable;
+                }
             }
         }
 
@@ -68,11 +71,25 @@ public sealed class CodexExecutableLocator
         return null;
     }
 
+    private static readonly string[] CandidateRelativeExecutables =
+    [
+        Path.Combine("bin", "windows-x86_64", "codex.exe"),
+        Path.Combine("bin", "windows-aarch64", "codex.exe"),
+        Path.Combine("bin", "codex.exe")
+    ];
+
     internal static IReadOnlyList<string> VsCodeExtensionRoots(string userProfile) =>
         string.IsNullOrWhiteSpace(userProfile)
             ? []
-            : [Path.Combine(userProfile, ".vscode", "extensions"),
-                Path.Combine(userProfile, ".vscode-insiders", "extensions")];
+            :
+            [
+                Path.Combine(userProfile, ".vscode", "extensions"),
+                Path.Combine(userProfile, ".vscode-insiders", "extensions"),
+                Path.Combine(userProfile, ".cursor", "extensions"),
+                Path.Combine(userProfile, ".cursor-insiders", "extensions"),
+                Path.Combine(userProfile, ".windsurf", "extensions"),
+                Path.Combine(userProfile, ".vscode-oss", "extensions")
+            ];
 
     internal static string DefaultUserProfile() => SelectUserProfile(
         Environment.GetEnvironmentVariable("USERPROFILE"),
