@@ -51,7 +51,9 @@ public interface IAgentInstallationChecker
 
 public sealed class AgentScheduler : IAgentInstallationChecker
 {
-    public const string TaskName = "CodexHistorySync";
+    public const string TaskName = "AgentHistorySync";
+    /// <summary>Pre-0.3.0 task name; removed on install/uninstall when owned by this user and executable.</summary>
+    public const string LegacyTaskName = "CodexHistorySync";
     private readonly IAgentTaskStore store;
     private readonly Func<string?> currentExecutable;
     private readonly Func<string> currentUserId;
@@ -73,35 +75,60 @@ public sealed class AgentScheduler : IAgentInstallationChecker
 
     public async Task InstallAsync(string executablePath, CancellationToken cancellationToken = default)
     {
-        var expected = OwnedRegistration(CanonicalExecutable(executablePath));
+        var canonical = CanonicalExecutable(executablePath);
+        var expected = OwnedRegistration(TaskName, canonical);
         var existing = await store.GetAsync(TaskName, cancellationToken).ConfigureAwait(false);
         if (existing is not null && !IsOwned(existing, expected))
-            throw new InvalidOperationException("A task named CodexHistorySync exists but is not owned by this executable and user.");
+            throw new InvalidOperationException("A task named AgentHistorySync exists but is not owned by this executable and user.");
+        await TryRemoveOwnedTaskAsync(LegacyTaskName, LegacyExecutable(canonical), cancellationToken).ConfigureAwait(false);
         await store.RegisterAsync(expected, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task UninstallAsync(CancellationToken cancellationToken = default)
     {
-        var expected = OwnedRegistration(CanonicalExecutable(currentExecutable()
-            ?? throw new InvalidOperationException("The current executable path is unavailable.")));
-        var existing = await store.GetAsync(TaskName, cancellationToken).ConfigureAwait(false);
-        if (existing is null) return;
-        if (!IsOwned(existing, expected))
-            throw new InvalidOperationException("The CodexHistorySync task is not owned by this executable and user.");
-        await store.DeleteAsync(TaskName, cancellationToken).ConfigureAwait(false);
+        var executable = CanonicalExecutable(currentExecutable()
+            ?? throw new InvalidOperationException("The current executable path is unavailable."));
+        await RemoveOwnedTaskOrThrowAsync(TaskName, executable, cancellationToken).ConfigureAwait(false);
+        await TryRemoveOwnedTaskAsync(LegacyTaskName, LegacyExecutable(executable), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> IsInstalledAsync(CancellationToken cancellationToken = default)
     {
         var executable = currentExecutable();
         if (string.IsNullOrWhiteSpace(executable)) return false;
-        var expected = OwnedRegistration(CanonicalExecutable(executable));
-        var existing = await store.GetAsync(TaskName, cancellationToken).ConfigureAwait(false);
+        var canonical = CanonicalExecutable(executable);
+        if (await IsOwnedTaskAsync(TaskName, canonical, cancellationToken).ConfigureAwait(false)) return true;
+        return await IsOwnedTaskAsync(LegacyTaskName, LegacyExecutable(canonical), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task RemoveOwnedTaskOrThrowAsync(string name, string executablePath, CancellationToken cancellationToken)
+    {
+        var expected = OwnedRegistration(name, executablePath);
+        var existing = await store.GetAsync(name, cancellationToken).ConfigureAwait(false);
+        if (existing is null) return;
+        if (!IsOwned(existing, expected))
+            throw new InvalidOperationException($"The {name} task is not owned by this executable and user.");
+        await store.DeleteAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task TryRemoveOwnedTaskAsync(string name, string executablePath, CancellationToken cancellationToken)
+    {
+        var expected = OwnedRegistration(name, executablePath);
+        var existing = await store.GetAsync(name, cancellationToken).ConfigureAwait(false);
+        if (existing is null) return;
+        if (!IsOwned(existing, expected)) return;
+        await store.DeleteAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> IsOwnedTaskAsync(string name, string executablePath, CancellationToken cancellationToken)
+    {
+        var expected = OwnedRegistration(name, executablePath);
+        var existing = await store.GetAsync(name, cancellationToken).ConfigureAwait(false);
         return existing is not null && IsOwned(existing, expected);
     }
 
-    private AgentTaskRegistration OwnedRegistration(string executablePath) =>
-        new(TaskName, executablePath, "agent run", currentUserId(), true);
+    private AgentTaskRegistration OwnedRegistration(string name, string executablePath) =>
+        new(name, executablePath, "agent run", currentUserId(), true);
 
     private static bool IsOwned(AgentTaskRegistration actual, AgentTaskRegistration expected) =>
         actual.ExactShape && actual.LogonTrigger &&
@@ -116,6 +143,10 @@ public sealed class AgentScheduler : IAgentInstallationChecker
         if (!Path.IsPathFullyQualified(path)) throw new ArgumentException("The agent executable path must be absolute.", nameof(path));
         return Path.GetFullPath(path);
     }
+
+    private static string LegacyExecutable(string executablePath) =>
+        Path.Combine(Path.GetDirectoryName(executablePath)
+            ?? throw new InvalidOperationException("The agent executable directory is unavailable."), "codex-sync.exe");
 
     [SupportedOSPlatform("windows")]
     private static string CurrentUserSid() => WindowsIdentity.GetCurrent().User?.Value

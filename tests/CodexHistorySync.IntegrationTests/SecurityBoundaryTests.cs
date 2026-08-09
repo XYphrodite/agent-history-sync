@@ -28,7 +28,7 @@ public sealed class SecurityBoundaryTests : IDisposable
     [Fact]
     public void Cli_release_uses_documented_executable_identity()
     {
-        Assert.Equal("codex-sync", typeof(CliApplication).Assembly.GetName().Name);
+        Assert.Equal("agent-sync", typeof(CliApplication).Assembly.GetName().Name);
     }
 
     [Fact]
