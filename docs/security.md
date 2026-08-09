@@ -1,6 +1,8 @@
 # Security Model
 
-Codex History Sync encrypts every repository index and history object independently with AES-256-GCM. The public setup manifest contains the repository identifier, Argon2id parameters, salt, and a key-derived authenticator. It does not contain the passphrase or repository key. Every encrypted file begins with the `CHS1` envelope header; authenticated metadata binds its schema, logical object identifier, and object kind.
+Agent History Sync encrypts every repository index and history object independently with AES-256-GCM. The public setup manifest contains the repository identifier, Argon2id parameters, salt, and a key-derived authenticator. It does not contain the passphrase or repository key. Every encrypted file begins with the `CHS1` envelope header; authenticated metadata binds its schema, logical object identifier, and object kind.
+
+The public rename does not change existing storage: `%LOCALAPPDATA%\CodexHistorySync`, the `CHS1` envelope, manifest names, and authenticated formats are deliberately retained for compatibility.
 
 ## Threat model and visible metadata
 
@@ -38,4 +40,4 @@ The release audit uses only synthetic disposable homes. It scans every blob reac
 
 ## Reporting a suspected exposure
 
-Stop the agent with `codex-sync agent uninstall`, close Codex, and revoke repository access. Preserve the encrypted repository and local recovery directories without posting them publicly. Treat a lost passphrase differently from an exposed passphrase: a lost passphrase cannot be recovered; an exposed passphrase requires migration to a newly keyed private repository.
+Stop the agent with `agent-sync agent uninstall`, close Codex, and revoke repository access. Preserve the encrypted repository and local recovery directories without posting them publicly. Treat a lost passphrase differently from an exposed passphrase: a lost passphrase cannot be recovered; an exposed passphrase requires migration to a newly keyed private repository.

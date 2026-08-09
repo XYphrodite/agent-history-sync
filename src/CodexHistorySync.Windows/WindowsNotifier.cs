@@ -40,10 +40,10 @@ public sealed class WindowsNotifier : IAgentNotifier
 
     private static string Message(AgentNotification notification) => notification.Kind switch
     {
-        AgentNotificationKind.PendingRestart => $"Codex History Sync: {notification.Count} incoming change(s) will be imported after Codex exits.",
-        AgentNotificationKind.UnresolvedConflict => $"Codex History Sync: {notification.Count} conflict(s) require resolution.",
-        AgentNotificationKind.RepeatedFailure => $"Codex History Sync: automatic synchronization has failed {notification.Count} times.",
-        AgentNotificationKind.Recovered => "Codex History Sync: automatic synchronization recovered.",
+        AgentNotificationKind.PendingRestart => $"Agent History Sync: {notification.Count} incoming change(s) will be imported after Codex exits.",
+        AgentNotificationKind.UnresolvedConflict => $"Agent History Sync: {notification.Count} conflict(s) require resolution.",
+        AgentNotificationKind.RepeatedFailure => $"Agent History Sync: automatic synchronization has failed {notification.Count} times.",
+        AgentNotificationKind.Recovered => "Agent History Sync: automatic synchronization recovered.",
         _ => throw new ArgumentOutOfRangeException(nameof(notification))
     };
 }
