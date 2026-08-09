@@ -280,13 +280,13 @@ public sealed class CliApplication
 
     private int Usage()
     {
-        console.WriteError("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
         return 2;
     }
 
     private int Help()
     {
-        console.WriteLine("Usage: codex-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         return 0;
     }
