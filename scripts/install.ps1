@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Install Agent History Sync (codex-sync.exe) from GitHub Releases.
+  Install Agent History Sync (agent-sync.exe) from GitHub Releases.
 
 .DESCRIPTION
   Downloads the win-x64 single-file binary from
@@ -104,18 +104,18 @@ try {
     $tag = $release.tag_name
     Write-Step "Using release $tag"
 
-    $exeUrl = Get-AssetUrl -Release $release -Name "codex-sync.exe"
+    $exeUrl = Get-AssetUrl -Release $release -Name "agent-sync.exe"
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("agent-history-sync-install-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
-    $tempExe = Join-Path $tempRoot "codex-sync.exe"
-    $tempSha = Join-Path $tempRoot "codex-sync.exe.sha256"
+    $tempExe = Join-Path $tempRoot "agent-sync.exe"
+    $tempSha = Join-Path $tempRoot "agent-sync.exe.sha256"
 
-    Write-Step "Downloading codex-sync.exe"
+    Write-Step "Downloading agent-sync.exe"
     Invoke-WebRequest -Uri $exeUrl -OutFile $tempExe -UseBasicParsing
 
     if (-not $SkipHash) {
         try {
-            $shaUrl = Get-AssetUrl -Release $release -Name "codex-sync.exe.sha256"
+            $shaUrl = Get-AssetUrl -Release $release -Name "agent-sync.exe.sha256"
             Write-Step "Downloading and verifying SHA-256"
             Invoke-WebRequest -Uri $shaUrl -OutFile $tempSha -UseBasicParsing
             $expected = Expand-Sha256File -Path $tempSha
@@ -128,14 +128,14 @@ try {
         catch {
             if ($SkipHash) { throw }
             Write-Warning "Checksum asset missing or invalid: $($_.Exception.Message)"
-            throw "Refusing to install without a valid codex-sync.exe.sha256 (pass -SkipHash to override)."
+            throw "Refusing to install without a valid agent-sync.exe.sha256 (pass -SkipHash to override)."
         }
     }
     else {
         Write-Warning "Skipping SHA-256 verification (-SkipHash)."
     }
 
-    $existing = Join-Path $InstallDir "codex-sync.exe"
+    $existing = Join-Path $InstallDir "agent-sync.exe"
     if (Test-Path -LiteralPath $existing) {
         Write-Step "Existing binary found; uninstalling agent task if owned by this path (best effort)"
         try {
@@ -161,7 +161,7 @@ try {
     elseif ([Environment]::UserInteractive) {
         Write-Host ""
         Write-Host "Install directory: $InstallDir"
-        Write-Host "Adding it to your user PATH lets you run 'codex-sync' without the full path."
+        Write-Host "Adding it to your user PATH lets you run 'agent-sync' without the full path."
         $answer = Read-Host "Add install directory to user PATH? [Y/n]"
         if ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$') {
             $shouldAddToPath = $true

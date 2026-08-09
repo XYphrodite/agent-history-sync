@@ -4,10 +4,10 @@
   Create a git tag and push it to trigger the GitHub Actions release workflow.
 
 .PARAMETER Version
-  SemVer without leading v, e.g. 0.2.0  → tag v0.2.0
+  SemVer without leading v, e.g. 0.3.0  → tag v0.3.0
 
 .EXAMPLE
-  .\scripts\publish-release.ps1 -Version 0.2.0
+  .\scripts\publish-release.ps1 -Version 0.3.0
 #>
 [CmdletBinding()]
 param(
@@ -41,7 +41,7 @@ if ($branch -ne "main") {
 
 Write-Host "Creating annotated tag $tag"
 git tag -a $tag -m "Release $tag"
-Write-Host "Pushing tag $tag to origin (triggers .github/workflows/release.yml)"
+Write-Host "Pushing tag $tag to origin (publishes agent-sync.exe through .github/workflows/release.yml)"
 git push origin $tag
 Write-Host "Done. Watch: gh run list --workflow release.yml"
 Write-Host "When green: gh release view $tag"
