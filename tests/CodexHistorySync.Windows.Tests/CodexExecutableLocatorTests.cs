@@ -20,12 +20,13 @@ public sealed class CodexExecutableLocatorTests
             configured,
             @"C:\Users\Test",
             @"C:\Path",
-            path => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(path), Path.GetFullPath(configured)),
+            _ => false,
             _ => []);
 
-        var resolved = locator.Resolve();
+        var resolved = locator.ResolveWithSource();
 
-        Assert.Equal(Path.GetFullPath(configured), resolved, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(Path.GetFullPath(configured), resolved.ExecutablePath, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(CodexExecutableSource.Configured, resolved.Source);
     }
 
     [Fact]
@@ -61,9 +62,10 @@ public sealed class CodexExecutableLocatorTests
             _ => true,
             root => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(root), extensionRoot) ? [extension] : []);
 
-        var resolved = locator.Resolve();
+        var resolved = locator.ResolveWithSource();
 
-        Assert.Null(resolved);
+        Assert.Null(resolved.ExecutablePath);
+        Assert.Equal(CodexExecutableSource.AutomaticDiscoveryAbsent, resolved.Source);
     }
 
     [Fact]
