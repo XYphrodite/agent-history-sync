@@ -2,11 +2,13 @@ using System.Security.Cryptography;
 using CodexHistorySync.Cli;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
+using CodexHistorySync.Windows;
 using System.Reflection;
 
 namespace CodexHistorySync.IntegrationTests;
@@ -208,18 +210,19 @@ public sealed class CliServiceTests
     }
 
     [Fact]
-    public async Task Compatibility_probe_soft_skips_when_codex_executable_is_missing()
+    public async Task Compatibility_probe_does_not_soft_skip_a_missing_configured_executable()
     {
         var runtime = new CoreCliSyncRuntime(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
             new FakeGateway([]), new RecordingProcessDetector(), (_, _) => Task.FromResult(
                 new CompatibilityResult(false, "unknown",
-                    "Codex executable was not found. Install the OpenAI Codex VS Code extension or set CODEX_EXE.")));
+                    "Codex executable was not found. Install the OpenAI Codex VS Code extension or set CODEX_EXE.")),
+            null, null, CodexExecutableSource.Configured);
 
         var result = await runtime.ProbeCompatibilityAsync(CancellationToken.None);
 
-        Assert.True(result.Passed);
+        Assert.False(result.Passed);
         Assert.Equal("codex-compatibility", result.Name);
-        Assert.StartsWith("skipped-no-codex:", result.Diagnostic, StringComparison.Ordinal);
+        Assert.StartsWith("Codex executable was not found", result.Diagnostic, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -235,6 +238,62 @@ public sealed class CliServiceTests
         Assert.False(result.Passed);
         Assert.Equal("codex-compatibility", result.Name);
         Assert.Equal(diagnostic, result.Diagnostic);
+    }
+
+    [Fact]
+    public async Task Automatically_missing_codex_still_previews_and_imports_existing_grok_home()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "agent-sync-grok-only-" + Guid.NewGuid().ToString("N"));
+        var sourceRoot = Path.Combine(root, "source");
+        var targetRoot = Path.Combine(root, "target");
+        var missingCodexHome = Path.Combine(targetRoot, "missing-codex");
+        var sourceGrokHome = Path.Combine(sourceRoot, "grok");
+        var targetGrokHome = Path.Combine(targetRoot, "grok");
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        const string sessionId = "019fd29d-8f07-7eb3-8fcd-cadaf33d2de6";
+        const string cwd = @"C:\Repos\GrokOnly";
+        var provider = new TestMemoryProvider();
+        var sourceConfiguration = new CliLocalConfiguration(1, "repository-grok-only", "source-device", Remote, string.Empty);
+        var targetConfiguration = sourceConfiguration with { DeviceId = "target-device" };
+
+        try
+        {
+            await WriteGrokSessionAsync(sourceGrokHome, cwd, sessionId, "hello from Grok");
+            Directory.CreateDirectory(Path.Combine(targetGrokHome, "sessions"));
+            await using (var source = CreateGrokEngine(sourceRoot, Path.Combine(sourceRoot, "missing-codex"),
+                             sourceGrokHome, sourceConfiguration, key, provider))
+            {
+                var published = await source.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+                Assert.Equal(1, published.Uploaded);
+            }
+
+            var runtime = new CoreCliSyncRuntime(targetRoot, new FakeGateway([]), new RecordingProcessDetector(),
+                (_, _) => Task.FromException<CompatibilityResult>(
+                    new InvalidOperationException("Automatic executable absence must not invoke the compatibility process.")),
+                (configuration, currentKey) => CreateGrokEngine(targetRoot, missingCodexHome, targetGrokHome,
+                    configuration, currentKey, provider), null, CodexExecutableSource.AutomaticDiscoveryAbsent,
+                missingCodexHome, targetGrokHome);
+
+            var gate = await runtime.ProbeCompatibilityAsync(CancellationToken.None);
+            Assert.True(gate.Passed);
+            var preview = await runtime.PreviewJoinAsync(targetConfiguration, key,
+                new CliRemoteSetup([], [], "1"), CancellationToken.None);
+            Assert.Equal(1, preview.Remote);
+            Assert.Equal(1, preview.Pending);
+
+            var pulled = await runtime.SynchronizeAsync(targetConfiguration, key, SyncMode.Pull, CancellationToken.None);
+
+            Assert.Equal(1, pulled.Downloaded);
+            Assert.False(Directory.Exists(missingCodexHome));
+            var imported = Path.Combine(targetGrokHome, "sessions", GrokPaths.EncodeCwdSegment(cwd), sessionId,
+                "chat_history.jsonl");
+            Assert.Contains("hello from Grok", await File.ReadAllTextAsync(imported), StringComparison.Ordinal);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -467,6 +526,34 @@ public sealed class CliServiceTests
         return new SyncEngine(configuration.RepositoryId, configuration.DeviceId, paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state, writer, conflicts,
             provider ?? new EmptyProvider(), Path.Combine(root, "staging"));
+    }
+
+    private static SyncEngine CreateGrokEngine(string root, string codexHome, string grokHome,
+        CliLocalConfiguration configuration, ReadOnlyMemory<byte> key, IStorageProvider provider)
+    {
+        var paths = new CodexPaths(Path.GetFullPath(codexHome), Path.GetFullPath(Path.Combine(codexHome, "sessions")),
+            Path.GetFullPath(Path.Combine(codexHome, "archived_sessions")),
+            Path.GetFullPath(Path.Combine(codexHome, "attachments")));
+        var grokPaths = GrokPaths.TryResolve(grokHome) ?? throw new InvalidOperationException("Grok fixture is unavailable.");
+        var state = new LocalStateStore(root);
+        var backups = new BackupStore(configuration.RepositoryId, root, paths, grokPaths: grokPaths);
+        var conflicts = new ConflictStore(configuration.RepositoryId, root, paths);
+        var writer = new CodexHistoryWriter(paths, backups, new RecordingProcessDetector(), grokPaths: grokPaths);
+        return new SyncEngine(configuration.RepositoryId, configuration.DeviceId, paths, key,
+            new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state, writer, conflicts, provider,
+            Path.Combine(root, "staging"), grokPaths, new GrokSessionScanner(TimeSpan.Zero));
+    }
+
+    private static async Task WriteGrokSessionAsync(string grokHome, string cwd, string sessionId, string message)
+    {
+        var directory = Path.Combine(grokHome, "sessions", GrokPaths.EncodeCwdSegment(cwd), sessionId);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "chat_history.jsonl"),
+            $"{{\"type\":\"user\",\"content\":\"{message}\"}}\n{{\"type\":\"assistant\",\"content\":\"received\"}}\n",
+            new System.Text.UTF8Encoding(false));
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"),
+            System.Text.Json.JsonSerializer.Serialize(new { info = new { id = sessionId, cwd } }),
+            new System.Text.UTF8Encoding(false));
     }
 
     private static async Task WriteSessionAsync(string directory, string id, string side)

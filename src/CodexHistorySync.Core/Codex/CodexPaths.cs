@@ -4,11 +4,17 @@ public sealed record CodexPaths(string Home, string Sessions, string ArchivedSes
 {
     public static CodexPaths Resolve(string? configuredHome)
     {
+        var paths = ResolveLayout(configuredHome);
+        if (!Directory.Exists(paths.Home)) throw new DirectoryNotFoundException("The configured Codex home does not exist.");
+        return paths;
+    }
+
+    public static CodexPaths ResolveLayout(string? configuredHome)
+    {
         var homeInput = configuredHome ?? Environment.GetEnvironmentVariable("CODEX_HOME") ?? GetDefaultHome();
         if (string.IsNullOrWhiteSpace(homeInput)) throw new ArgumentException("A Codex home path is required.", nameof(configuredHome));
 
         var home = Path.GetFullPath(homeInput);
-        if (!Directory.Exists(home)) throw new DirectoryNotFoundException("The configured Codex home does not exist.");
         if (IsInsideSyncRepository(home)) throw new ArgumentException("The Codex home cannot be inside the sync repository.", nameof(configuredHome));
 
         return new CodexPaths(

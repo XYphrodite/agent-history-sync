@@ -21,13 +21,14 @@ public static class CliComposition
         var gateway = new GitHubCliRepositoryGateway();
         var local = new FileCliLocalRepository(localAppData, new DpapiKeyStore());
         var scheduler = new AgentScheduler();
-        var codexExecutable = new CodexExecutableLocator().Resolve() ?? string.Empty;
+        var codexResolution = new CodexExecutableLocator().ResolveWithSource();
+        var codexExecutable = codexResolution.ExecutablePath ?? string.Empty;
         var detectorExecutable = string.IsNullOrWhiteSpace(codexExecutable) ? Path.GetFullPath("codex.exe") : codexExecutable;
         var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(detectorExecutable));
         var runtime = new CoreCliSyncRuntime(localAppData, gateway, detector,
             (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync(
                 string.IsNullOrWhiteSpace(codexExecutable) ? "codex.exe" : codexExecutable, fixture, cancellationToken),
-            null, scheduler);
+            null, scheduler, codexResolution.Source);
         var services = new DefaultCliServices(gateway, local, runtime, new RepositoryCrypto());
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
             new WindowsNotifier(), new RotatingAgentLogger(localAppData));
@@ -286,6 +287,9 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly IAgentInstallationChecker agentInstallationChecker;
     private readonly Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe;
     private readonly Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory;
+    private readonly CodexExecutableSource codexExecutableSource;
+    private readonly string? codexHome;
+    private readonly string? grokHome;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
         : this(localAppData, gateway, processDetector,
@@ -309,7 +313,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector,
         Func<string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe,
         Func<CliLocalConfiguration, ReadOnlyMemory<byte>, SyncEngine>? engineFactory,
-        IAgentInstallationChecker? agentInstallationChecker)
+        IAgentInstallationChecker? agentInstallationChecker,
+        CodexExecutableSource codexExecutableSource = CodexExecutableSource.Discovered,
+        string? codexHome = null,
+        string? grokHome = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -317,10 +324,17 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.compatibilityProbe = compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe));
         this.engineFactory = engineFactory;
         this.agentInstallationChecker = agentInstallationChecker ?? UnconfiguredAgentInstallationChecker.Instance;
+        this.codexExecutableSource = codexExecutableSource;
+        this.codexHome = codexHome;
+        this.grokHome = grokHome;
     }
 
     public async Task<CliGateResult> ProbeCompatibilityAsync(CancellationToken cancellationToken)
     {
+        if (codexExecutableSource == CodexExecutableSource.AutomaticDiscoveryAbsent)
+            return new CliGateResult(true, "codex-compatibility",
+                "skipped-no-codex: Codex executable was not found during automatic discovery.");
+
         var fixtureRoot = Path.Combine(Path.GetTempPath(), "codex-history-sync-compatibility-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -332,9 +346,6 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             var result = await compatibilityProbe(fixture, cancellationToken).ConfigureAwait(false);
             if (result.IsCompatible)
                 return new CliGateResult(true, "codex-compatibility", result.Diagnostic);
-            // Join/sync may still import JSONL and Grok packages; reindex is unproven until Codex is installed.
-            if (IsMissingCodexExecutable(result.Diagnostic))
-                return new CliGateResult(true, "codex-compatibility", "skipped-no-codex: " + result.Diagnostic);
             return new CliGateResult(false, "codex-compatibility", result.Diagnostic);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -348,10 +359,6 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             catch (UnauthorizedAccessException) { }
         }
     }
-
-    private static bool IsMissingCodexExecutable(string? diagnostic) =>
-        !string.IsNullOrWhiteSpace(diagnostic) &&
-        diagnostic.Contains("Codex executable was not found", StringComparison.Ordinal);
 
     public async Task<CliJoinPlan> PreviewJoinAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
         CliRemoteSetup setup, CancellationToken cancellationToken)
@@ -435,8 +442,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         string? pinnedRevision = null)
     {
         if (requireKey && key.Length != RepositoryCrypto.MasterKeySize) throw new CliGateException("The repository key is unavailable.");
-        var paths = CodexPaths.Resolve(null);
-        var grokPaths = CodexHistorySync.Core.Grok.GrokPaths.TryResolve(null);
+        var paths = codexExecutableSource == CodexExecutableSource.AutomaticDiscoveryAbsent
+            ? CodexPaths.ResolveLayout(codexHome)
+            : CodexPaths.Resolve(codexHome);
+        var grokPaths = CodexHistorySync.Core.Grok.GrokPaths.TryResolve(grokHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
         var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths);

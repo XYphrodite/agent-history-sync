@@ -1,5 +1,14 @@
 namespace CodexHistorySync.Windows;
 
+public enum CodexExecutableSource
+{
+    Configured,
+    Discovered,
+    AutomaticDiscoveryAbsent
+}
+
+public sealed record CodexExecutableResolution(string? ExecutablePath, CodexExecutableSource Source);
+
 public sealed class CodexExecutableLocator
 {
     private readonly string? configuredExecutable;
@@ -27,9 +36,12 @@ public sealed class CodexExecutableLocator
         this.enumerateDirectories = enumerateDirectories ?? throw new ArgumentNullException(nameof(enumerateDirectories));
     }
 
-    public string? Resolve()
+    public string? Resolve() => ResolveWithSource().ExecutablePath;
+
+    public CodexExecutableResolution ResolveWithSource()
     {
-        if (!string.IsNullOrWhiteSpace(configuredExecutable)) return Path.GetFullPath(configuredExecutable);
+        if (!string.IsNullOrWhiteSpace(configuredExecutable))
+            return new CodexExecutableResolution(Path.GetFullPath(configuredExecutable), CodexExecutableSource.Configured);
 
         foreach (var extensionRoot in VsCodeExtensionRoots(userProfile))
         {
@@ -47,7 +59,8 @@ public sealed class CodexExecutableLocator
                 foreach (var relative in CandidateRelativeExecutables)
                 {
                     var executable = Path.GetFullPath(Path.Combine(extension, relative));
-                    if (fileExists(executable)) return executable;
+                    if (fileExists(executable))
+                        return new CodexExecutableResolution(executable, CodexExecutableSource.Discovered);
                 }
             }
         }
@@ -60,7 +73,8 @@ public sealed class CodexExecutableLocator
             try
             {
                 var executable = Path.GetFullPath(Path.Combine(directory, "codex.exe"));
-                if (fileExists(executable)) return executable;
+                if (fileExists(executable))
+                    return new CodexExecutableResolution(executable, CodexExecutableSource.Discovered);
             }
             catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
             {
@@ -68,7 +82,7 @@ public sealed class CodexExecutableLocator
             }
         }
 
-        return null;
+        return new CodexExecutableResolution(null, CodexExecutableSource.AutomaticDiscoveryAbsent);
     }
 
     private static readonly string[] CandidateRelativeExecutables =
