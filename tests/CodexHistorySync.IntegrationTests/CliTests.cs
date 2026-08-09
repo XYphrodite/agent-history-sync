@@ -20,6 +20,7 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync([option], CancellationToken.None);
 
         Assert.Equal(0, exitCode);
+        Assert.Contains("Usage: agent-sync", fixture.Console.OutputText);
         Assert.Contains("init|join|sync|pull|push|status|doctor|conflicts|resolve|agent", fixture.Console.OutputText);
         Assert.Empty(fixture.Console.ErrorText);
         Assert.Empty(fixture.Services.Calls);

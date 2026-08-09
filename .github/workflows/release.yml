@@ -29,16 +29,16 @@ jobs:
             --self-contained true `
             -p:PublishSingleFile=true `
             -o artifacts/win-x64
-          if (-not (Test-Path "artifacts/win-x64/codex-sync.exe")) {
-            throw "Publish output missing codex-sync.exe"
+          if (-not (Test-Path "artifacts/win-x64/agent-sync.exe")) {
+            throw "Publish output missing agent-sync.exe"
           }
 
       - name: SHA-256 checksum
         shell: pwsh
         run: |
-          $exe = "artifacts/win-x64/codex-sync.exe"
+          $exe = "artifacts/win-x64/agent-sync.exe"
           $hash = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLowerInvariant()
-          "$hash  codex-sync.exe" | Set-Content -Path "artifacts/win-x64/codex-sync.exe.sha256" -Encoding ascii
+          "$hash  agent-sync.exe" | Set-Content -Path "artifacts/win-x64/agent-sync.exe.sha256" -Encoding ascii
           Write-Host "SHA256=$hash"
           Get-Item $exe | Format-List FullName, Length
 
@@ -47,7 +47,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/win-x64/codex-sync.exe
-            artifacts/win-x64/codex-sync.exe.sha256
+            artifacts/win-x64/agent-sync.exe
+            artifacts/win-x64/agent-sync.exe.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
