@@ -15,16 +15,18 @@ public static class CliComposition
 {
     public static CliApplication CreateDefault()
     {
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Codex History Sync currently requires Windows.");
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData)) throw new InvalidOperationException("Local application data is unavailable.");
         var gateway = new GitHubCliRepositoryGateway();
         var local = new FileCliLocalRepository(localAppData, new DpapiKeyStore());
         var scheduler = new AgentScheduler();
-        var codexExecutable = new CodexExecutableLocator().Resolve() ?? Path.GetFullPath("codex.exe");
-        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(codexExecutable));
+        var codexExecutable = new CodexExecutableLocator().Resolve() ?? string.Empty;
+        var detectorExecutable = string.IsNullOrWhiteSpace(codexExecutable) ? Path.GetFullPath("codex.exe") : codexExecutable;
+        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(detectorExecutable));
         var runtime = new CoreCliSyncRuntime(localAppData, gateway, detector,
-            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync(codexExecutable, fixture, cancellationToken),
+            (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync(
+                string.IsNullOrWhiteSpace(codexExecutable) ? "codex.exe" : codexExecutable, fixture, cancellationToken),
             null, scheduler);
         var services = new DefaultCliServices(gateway, local, runtime, new RepositoryCrypto());
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
@@ -137,7 +139,7 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
             await File.WriteAllBytesAsync(Path.Combine(clone, ManifestFileName), manifest, cancellationToken).ConfigureAwait(false);
             await File.WriteAllBytesAsync(Path.Combine(clone, "repository.chs"), encryptedIndex, cancellationToken).ConfigureAwait(false);
             await RequireSuccessAsync(await git.RunAsync(["config", "user.email", "codex-history-sync@localhost"], clone, cancellationToken), "Unable to configure Git identity.").ConfigureAwait(false);
-            await RequireSuccessAsync(await git.RunAsync(["config", "user.name", "Codex History Sync"], clone, cancellationToken), "Unable to configure Git identity.").ConfigureAwait(false);
+            await RequireSuccessAsync(await git.RunAsync(["config", "user.name", "Agent History Sync"], clone, cancellationToken), "Unable to configure Git identity.").ConfigureAwait(false);
             await RequireSuccessAsync(await git.RunAsync(["add", "--", ManifestFileName, "repository.chs"], clone, cancellationToken), "Unable to stage initialization metadata.").ConfigureAwait(false);
             await RequireSuccessAsync(await git.RunAsync(["commit", "--no-gpg-sign", "-m", "Initialize encrypted Codex history"], clone, cancellationToken), "Unable to commit initialization metadata.").ConfigureAwait(false);
             await RequireSuccessAsync(await git.RunAsync(["push", "origin", "HEAD:main"], clone, cancellationToken), "Unable to publish initialization metadata.").ConfigureAwait(false);
@@ -328,11 +330,16 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"compatibility-fixture\"}}\n",
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var result = await compatibilityProbe(fixture, cancellationToken).ConfigureAwait(false);
-            return new CliGateResult(result.IsCompatible, "codex-compatibility");
+            if (result.IsCompatible)
+                return new CliGateResult(true, "codex-compatibility", result.Diagnostic);
+            // Join/sync may still import JSONL and Grok packages; reindex is unproven until Codex is installed.
+            if (IsMissingCodexExecutable(result.Diagnostic))
+                return new CliGateResult(true, "codex-compatibility", "skipped-no-codex: " + result.Diagnostic);
+            return new CliGateResult(false, "codex-compatibility", result.Diagnostic);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            return new CliGateResult(false, "codex-compatibility");
+            return new CliGateResult(false, "codex-compatibility", "The Codex compatibility probe could not run.");
         }
         finally
         {
@@ -341,6 +348,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             catch (UnauthorizedAccessException) { }
         }
     }
+
+    private static bool IsMissingCodexExecutable(string? diagnostic) =>
+        !string.IsNullOrWhiteSpace(diagnostic) &&
+        diagnostic.Contains("Codex executable was not found", StringComparison.Ordinal);
 
     public async Task<CliJoinPlan> PreviewJoinAsync(CliLocalConfiguration configuration, ReadOnlyMemory<byte> key,
         CliRemoteSetup setup, CancellationToken cancellationToken)

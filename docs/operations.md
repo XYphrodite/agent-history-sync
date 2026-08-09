@@ -4,6 +4,8 @@
 
 Agent History Sync runs on Windows. Install `git`, GitHub CLI (`gh`), and the agents you sync (Codex and/or Grok CLI), then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The **data** repository must already exist, be private, and be empty for `init` (recommended name: `agent-history-sync-data`).
 
+The public command is `agent-sync`. For compatibility with existing installations, local application data deliberately remains under `%LOCALAPPDATA%\CodexHistorySync`; upgrading does not migrate or rename that directory.
+
 Passphrases are accepted only from an interactive console with hidden input. They are never accepted as command-line arguments, written to configuration, or printed. Keep the passphrase in a password manager: the DPAPI cache is tied to the current Windows user and cannot recover a forgotten passphrase on another device.
 
 ## Setup
@@ -11,7 +13,7 @@ Passphrases are accepted only from an interactive console with hidden input. The
 Initialize an empty private repository:
 
 ```powershell
-codex-sync init https://github.com/OWNER/REPOSITORY.git
+agent-sync init https://github.com/OWNER/REPOSITORY.git
 ```
 
 `init` checks both private visibility and repository emptiness before prompting twice. It creates a random repository ID, device ID, and Argon2id salt; derives the repository key; and publishes the authenticated manifest and encrypted empty index in one initialization commit. It checks emptiness again immediately before publication to reject a concurrent initializer. Only after that commit succeeds does it cache the key with DPAPI and write local configuration and state.
@@ -21,7 +23,7 @@ If the remote commit succeeds but local caching fails, do not initialize again. 
 On another Windows profile, first preview the import:
 
 ```powershell
-codex-sync join https://github.com/OWNER/REPOSITORY.git
+agent-sync join https://github.com/OWNER/REPOSITORY.git
 ```
 
 The join command verifies private visibility before prompting once. It pins the current branch SHA, reads and authenticates the manifest and encrypted index at that exact SHA, runs the disposable Codex compatibility probe with a controlled synthetic session, and prints authenticated planner-derived local, remote, pending, and conflict counts. It makes no persistent key, configuration, state, conflict-evidence, or Codex-history change during this dry run, and the pending in-memory key is zeroed when the command ends.
@@ -29,7 +31,7 @@ The join command verifies private visibility before prompting once. It pins the 
 Apply the first import only after reviewing the counts:
 
 ```powershell
-codex-sync join https://github.com/OWNER/REPOSITORY.git --apply
+agent-sync join https://github.com/OWNER/REPOSITORY.git --apply
 ```
 
 Wrong passphrases, tampered metadata, unsupported schema, failed visibility checks, failed compatibility probes, or a branch update after authentication stop before persistent join state or history imports. The applied join reports and returns exit code 4 from the actual pull result if conflicts are discovered after the preview.
@@ -37,9 +39,9 @@ Wrong passphrases, tampered metadata, unsupported schema, failed visibility chec
 ## Manual synchronization
 
 ```powershell
-codex-sync sync   # bidirectional
-codex-sync pull   # download/apply only; never publish local history
-codex-sync push   # publish only; never replace local history
+agent-sync sync   # bidirectional
+agent-sync pull   # download/apply only; never publish local history
+agent-sync push   # publish only; never replace local history
 ```
 
 All three commands call the same `SyncEngine` used by automation. Each command disposes its temporary engine after the operation, serializing with any active work and zeroing the engine-owned repository-key copy. Output contains only revisions and object counts. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
@@ -57,7 +59,7 @@ Before hashing and upload, each session JSONL is reduced deterministically to a 
 
 ## Grok CLI sessions
 
-When `%USERPROFILE%\.grok\sessions` exists, `codex-sync` also inventories Grok CLI sessions. Each session is stored as one encrypted package under logical id `g-<uuid>` containing:
+When `%USERPROFILE%\.grok\sessions` exists, `agent-sync` also inventories Grok CLI sessions. Each session is stored as one encrypted package under logical id `g-<uuid>` containing:
 
 - normalized `chat_history.jsonl` (system/tool lines dropped; long content truncated);
 - `summary.json` when present.
@@ -70,9 +72,9 @@ GitHub still rejects individual blobs larger than 100 MiB. After reduction, payl
 ## Status and diagnostics
 
 ```powershell
-codex-sync status
-codex-sync doctor
-codex-sync doctor --compatibility-session <inactive archived JSONL> --codex-exe <codex executable>
+agent-sync status
+agent-sync doctor
+agent-sync doctor --compatibility-session <inactive archived JSONL> --codex-exe <codex executable>
 ```
 
 `status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus both the current authenticated remote revision and the last successfully synchronized revision. Its conflict count is the exact identity-deduplicated union of persisted evidence and conflicts in the current plan; an unreadable evidence store makes status fail closed. Equal counts do not hide divergent objects.
@@ -92,18 +94,28 @@ Before setup, the repository/key checks are expected to fail. Before agent insta
 
 The optional `doctor --compatibility-session` form is the documented Codex JSONL reindex gate. It requires both `--compatibility-session` and `--codex-exe`, runs only the disposable-profile compatibility probe, never prints the session path or executable path, and returns exit code `0` on PASS or `3` on FAIL. See `docs/compatibility.md` for recorded results.
 
-Set `CODEX_EXE` to force a specific Codex binary for process detection and the join-time compatibility probe. When unset, the CLI resolves the first-party Windows VS Code extension install (`openai.chatgpt-*-win32-x64\bin\windows-x86_64\codex.exe`) and then `codex.exe` on `PATH`.
+Set `CODEX_EXE` to force a specific Codex binary for process detection and the join-time compatibility probe. When unset, the CLI resolves the first-party Windows IDE extension install (`openai.chatgpt-*-win32-x64\bin\windows-x86_64\codex.exe`) under:
+
+- `%USERPROFILE%\.vscode\extensions` (VS Code)
+- `%USERPROFILE%\.vscode-oss\extensions` (**VSCodium**)
+- `%USERPROFILE%\.vscode-insiders\extensions`
+- `%USERPROFILE%\.cursor\extensions` / `.cursor-insiders`
+- `%USERPROFILE%\.windsurf\extensions`
+
+then `codex.exe` on `PATH`. VSCodium does not use the Microsoft Marketplace by default: install Codex via Open VSX if available, or **Extensions: Install from VSIX…** (official `openai.chatgpt` VSIX).
+
+If Codex is not installed, `join` prints a warning and continues so Grok sessions and on-disk Codex JSONL can still be imported. When Codex *is* present but the disposable reindex probe fails, `join` hard-fails with `Gate failed: codex-compatibility` and a `diagnostic:` line. Install the OpenAI Codex IDE extension (VS Code / Cursor / Windsurf) or put `codex.exe` on `PATH` / set `CODEX_EXE` so reindex can be verified. Use `doctor --compatibility-session <jsonl> --codex-exe <path>` to re-test the probe alone.
 
 ## Background agent
 
 Install or remove the current executable's per-user logon task:
 
 ```powershell
-codex-sync agent install
-codex-sync agent uninstall
+agent-sync agent install
+agent-sync agent uninstall
 ```
 
-The task is named `CodexHistorySync`, runs only for the current Windows user at logon, and has one exact action: the canonical absolute path of the installing executable with arguments `agent run`. Installation and removal query Task Scheduler XML through the Task Scheduler API rather than localized command output. They refuse to replace or remove a same-name task whose executable, arguments, user, or logon trigger does not match.
+The task is named `AgentHistorySync`, runs only for the current Windows user at logon, and has one exact action: the canonical absolute path of the installing executable with arguments `agent run`. Installation and removal query Task Scheduler XML through the Task Scheduler API rather than localized command output. They refuse to replace or remove a same-name task whose executable, arguments, user, or logon trigger does not match.
 
 At logon the agent performs a bidirectional sync if Codex is stopped. While Codex is active it runs push-only synchronization and an authenticated read-only preview; it never requests an import or conflict resolution. When every relevant Codex process exits, the agent continues checking process state through a two-second quiet window before bidirectional synchronization. A process restart resets that window. Failures retry after 30 seconds with exponential backoff capped at 30 minutes, and Ctrl+C is a normal shutdown when `agent run` is launched interactively.
 
@@ -116,7 +128,7 @@ Notifications report only pending-restart counts, unresolved-conflict counts, re
 List unresolved conflicts:
 
 ```powershell
-codex-sync conflicts
+agent-sync conflicts
 ```
 
 The listing contains only conflict IDs, hashes, device IDs, and UTC timestamps. It never displays decrypted history.
@@ -124,9 +136,9 @@ The listing contains only conflict IDs, hashes, device IDs, and UTC timestamps. 
 Choose exactly one resolution action:
 
 ```powershell
-codex-sync resolve CONFLICT_ID --keep-local
-codex-sync resolve CONFLICT_ID --keep-remote
-codex-sync resolve CONFLICT_ID --export-both C:\existing-parent\new-export-directory
+agent-sync resolve CONFLICT_ID --keep-local
+agent-sync resolve CONFLICT_ID --keep-remote
+agent-sync resolve CONFLICT_ID --export-both C:\existing-parent\new-export-directory
 ```
 
 `--export-both` decrypts both retained envelopes into a newly created directory. The destination must be absolute, must not already exist, must have an existing parent, must be outside Codex history and conflict storage, and must pass the existing reparse-point/path-boundary checks. Export does not resolve the conflict, retains its encrypted evidence, and returns exit code 4 while any conflict remains.
@@ -154,7 +166,7 @@ Backups live outside Codex history under `%LOCALAPPDATA%\CodexHistorySync\reposi
 Close Codex, remove only this executable's background task, and select the intended backup record:
 
 ```powershell
-codex-sync agent uninstall
+agent-sync agent uninstall
 $record = 'C:\Users\USER\AppData\Local\CodexHistorySync\repositories\REPOSITORY_ID\backups\BACKUP_ID'
 $manifest = Get-Content (Join-Path $record 'manifest.json') -Raw | ConvertFrom-Json
 $content = Join-Path $record 'content.bin'
@@ -174,16 +186,16 @@ if ((Get-FileHash $temporary -Algorithm SHA256).Hash.ToLowerInvariant() -ne $act
 [IO.File]::Replace($temporary, $target, $null)
 ```
 
-Start Codex and confirm the restored chat is visible, close Codex, run `codex-sync doctor` and `codex-sync sync`, then reinstall the agent with `codex-sync agent install`. Keep the safety copy until the next successful two-device convergence check. If the target does not exist, use `Move-Item -LiteralPath $temporary -Destination $target` instead of `File.Replace`.
+Start Codex and confirm the restored chat is visible, close Codex, run `agent-sync doctor` and `agent-sync sync`, then reinstall the agent with `agent-sync agent install`. Keep the safety copy until the next successful two-device convergence check. If the target does not exist, use `Move-Item -LiteralPath $temporary -Destination $target` instead of `File.Replace`.
 
 For conflict recovery, export both retained versions before choosing a side:
 
 ```powershell
-codex-sync conflicts
-codex-sync resolve CONFLICT_ID --export-both C:\Recovery\new-export-directory
+agent-sync conflicts
+agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-export-directory
 Get-FileHash C:\Recovery\new-export-directory\*.jsonl -Algorithm SHA256
-codex-sync resolve CONFLICT_ID --keep-local   # or --keep-remote
-codex-sync sync
+agent-sync resolve CONFLICT_ID --keep-local   # or --keep-remote
+agent-sync sync
 ```
 
 `--export-both` leaves the conflict unresolved. Same-chat concurrent editing is unsupported: the utility preserves both whole-file versions and never attempts a line or JSON merge.
