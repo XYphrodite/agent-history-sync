@@ -98,13 +98,13 @@ public sealed class GrokConversationReader : IConversationReader
             };
             if (role is null) continue;
 
-            var text = ReadContent(root);
+            var text = ReadContent(root, role.Value);
             if (!string.IsNullOrWhiteSpace(text)) turns.Add(new PortableTurn(role.Value, text));
         }
         return turns;
     }
 
-    private static string? ReadContent(JsonElement root)
+    private static string? ReadContent(JsonElement root, ConversationRole role)
     {
         if (!root.TryGetProperty("content", out var content)) return null;
         if (content.ValueKind == JsonValueKind.String) return content.GetString();
@@ -114,11 +114,18 @@ public sealed class GrokConversationReader : IConversationReader
         foreach (var block in content.EnumerateArray())
         {
             if (block.ValueKind == JsonValueKind.Object &&
+                block.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String &&
+                IsTextBlock(type.GetString(), role) &&
                 block.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
                 blocks.Add(text.GetString()!);
         }
         return blocks.Count == 0 ? null : string.Concat(blocks);
     }
+
+    private static bool IsTextBlock(string? type, ConversationRole role) =>
+        role == ConversationRole.User
+            ? string.Equals(type, "input_text", StringComparison.Ordinal)
+            : string.Equals(type, "output_text", StringComparison.Ordinal);
 
     private static DateTimeOffset? ReadTimestamp(JsonElement element, params string[] names)
     {
