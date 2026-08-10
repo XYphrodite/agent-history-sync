@@ -57,17 +57,34 @@ public interface IAgentCliOperations
     Task UninstallAsync(CancellationToken cancellationToken);
 }
 
+public interface ISessionManagerRunner
+{
+    Task RunAsync(CancellationToken cancellationToken);
+}
+
 public sealed class CliApplication
 {
-    private readonly ICliServices services;
+    private readonly ICliServices? services;
     private readonly ICliConsole console;
     private readonly IAgentCliOperations? agentOperations;
+    private readonly ISessionManagerRunner? managerRunner;
 
-    public CliApplication(ICliServices services, ICliConsole console, IAgentCliOperations? agentOperations = null)
+    public CliApplication(
+        ICliServices services,
+        ICliConsole console,
+        IAgentCliOperations? agentOperations = null,
+        ISessionManagerRunner? managerRunner = null)
     {
         this.services = services ?? throw new ArgumentNullException(nameof(services));
         this.console = console ?? throw new ArgumentNullException(nameof(console));
         this.agentOperations = agentOperations;
+        this.managerRunner = managerRunner;
+    }
+
+    internal CliApplication(ICliConsole console, ISessionManagerRunner managerRunner)
+    {
+        this.console = console ?? throw new ArgumentNullException(nameof(console));
+        this.managerRunner = managerRunner ?? throw new ArgumentNullException(nameof(managerRunner));
     }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
@@ -75,6 +92,13 @@ public sealed class CliApplication
         ArgumentNullException.ThrowIfNull(args);
         try
         {
+            if (args is ["--manage"])
+            {
+                if (managerRunner is null) return Usage();
+                await managerRunner.RunAsync(cancellationToken).ConfigureAwait(false);
+                return 0;
+            }
+
             return args.Length == 0 ? Usage() : args[0] switch
             {
                 "--help" or "-h" when args.Length == 1 => Help(),
@@ -111,7 +135,7 @@ public sealed class CliApplication
     private async Task<int> RunInitAsync(string[] args, CancellationToken cancellationToken)
     {
         if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1])) return Usage();
-        var gate = await services.VerifyInitializationTargetAsync(args[1], cancellationToken).ConfigureAwait(false);
+        var gate = await Services.VerifyInitializationTargetAsync(args[1], cancellationToken).ConfigureAwait(false);
         if (!gate.Passed) return GateFailure(gate.Name);
 
         char[]? first = null;
@@ -125,7 +149,7 @@ public sealed class CliApplication
                 console.WriteError("Passphrases must be non-empty and match.");
                 return 2;
             }
-            var result = await services.InitializeAsync(args[1], first, cancellationToken).ConfigureAwait(false);
+            var result = await Services.InitializeAsync(args[1], first, cancellationToken).ConfigureAwait(false);
             console.WriteLine($"Initialized repository {SafeToken(result.RepositoryId)}.");
             return 0;
         }
@@ -140,7 +164,7 @@ public sealed class CliApplication
     {
         var apply = args.Length == 3 && args[2] == "--apply";
         if ((args.Length != 2 && !apply) || string.IsNullOrWhiteSpace(args[1])) return Usage();
-        var gate = await services.VerifyPrivateRepositoryAsync(args[1], cancellationToken).ConfigureAwait(false);
+        var gate = await Services.VerifyPrivateRepositoryAsync(args[1], cancellationToken).ConfigureAwait(false);
         if (!gate.Passed) return GateFailure(gate.Name);
 
         char[]? passphrase = null;
@@ -149,8 +173,8 @@ public sealed class CliApplication
         {
             passphrase = await console.ReadSecretAsync("Passphrase: ", cancellationToken).ConfigureAwait(false);
             if (passphrase.Length == 0) return Usage();
-            repository = await services.AuthenticateRepositoryAsync(args[1], passphrase, cancellationToken).ConfigureAwait(false);
-            var compatibility = await services.ProbeCompatibilityAsync(repository, cancellationToken).ConfigureAwait(false);
+            repository = await Services.AuthenticateRepositoryAsync(args[1], passphrase, cancellationToken).ConfigureAwait(false);
+            var compatibility = await Services.ProbeCompatibilityAsync(repository, cancellationToken).ConfigureAwait(false);
             if (!compatibility.Passed) return GateFailure(compatibility.Name, compatibility.Diagnostic);
             if (!string.IsNullOrWhiteSpace(compatibility.Diagnostic) &&
                 compatibility.Diagnostic.StartsWith("skipped-no-codex", StringComparison.Ordinal))
@@ -158,34 +182,34 @@ public sealed class CliApplication
                 console.WriteLine("warning: codex-compatibility skipped (Codex executable not found). " +
                     "Install the OpenAI Codex IDE extension or set CODEX_EXE so Codex can reindex imported sessions.");
             }
-            var plan = await services.PlanJoinAsync(repository, cancellationToken).ConfigureAwait(false);
+            var plan = await Services.PlanJoinAsync(repository, cancellationToken).ConfigureAwait(false);
             console.WriteLine($"Join plan: local={plan.Local} remote={plan.Remote} pending={plan.Pending} conflicts={plan.Conflicts}.");
             if (!apply)
             {
                 console.WriteLine("Dry run only; repeat with --apply to perform the first import.");
                 return plan.Conflicts == 0 ? 0 : 4;
             }
-            var result = await services.ApplyJoinAsync(repository, plan, cancellationToken).ConfigureAwait(false);
+            var result = await Services.ApplyJoinAsync(repository, plan, cancellationToken).ConfigureAwait(false);
             console.WriteLine($"Join applied: revision={SafeToken(result.RemoteRevision)} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts}.");
             return result.Conflicts == 0 ? 0 : 4;
         }
         finally
         {
-            if (repository is not null) await services.AbortJoinAsync(repository, CancellationToken.None).ConfigureAwait(false);
+            if (repository is not null) await Services.AbortJoinAsync(repository, CancellationToken.None).ConfigureAwait(false);
             if (passphrase is not null) CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsBytes(passphrase.AsSpan()));
         }
     }
 
     private async Task<int> RunSyncAsync(SyncMode mode, CancellationToken cancellationToken)
     {
-        var result = await services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
+        var result = await Services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
         console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 
     private async Task<int> RunStatusAsync(CancellationToken cancellationToken)
     {
-        var result = await services.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var result = await Services.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         console.WriteLine($"local={result.Local} remote={result.Remote} pending={result.Pending} conflicts={result.Conflicts} " +
             $"remote-revision={SafeToken(result.RemoteRevision)} last-successful-revision={SafeToken(result.LastSuccessfulRevision)}");
         return result.Conflicts == 0 ? 0 : 4;
@@ -197,14 +221,14 @@ public sealed class CliApplication
         {
             if (!TryParseCompatibilityDoctorArguments(args, out var sourceSession, out var codexExecutable))
                 return Usage();
-            var compatibility = await services.ProbeCompatibilitySessionAsync(sourceSession!, codexExecutable!, cancellationToken)
+            var compatibility = await Services.ProbeCompatibilitySessionAsync(sourceSession!, codexExecutable!, cancellationToken)
                 .ConfigureAwait(false);
             console.WriteLine($"codex-compatibility: {(compatibility.IsCompatible ? "PASS" : "FAIL")} " +
                 $"version={SafeToken(compatibility.CodexVersion)} diagnostic={SafeToken(compatibility.Diagnostic)}");
             return compatibility.IsCompatible ? 0 : 3;
         }
 
-        var report = await services.RunDoctorAsync(cancellationToken).ConfigureAwait(false);
+        var report = await Services.RunDoctorAsync(cancellationToken).ConfigureAwait(false);
         foreach (var check in report.Checks)
             console.WriteLine($"{SafeToken(check.Name)}: {(check.Passed ? "PASS" : "FAIL")}");
         return report.Checks.All(check => check.Passed) ? 0 : 3;
@@ -230,7 +254,7 @@ public sealed class CliApplication
 
     private async Task<int> RunConflictsAsync(CancellationToken cancellationToken)
     {
-        var conflicts = await services.ListConflictsAsync(cancellationToken).ConfigureAwait(false);
+        var conflicts = await Services.ListConflictsAsync(cancellationToken).ConfigureAwait(false);
         foreach (var conflict in conflicts)
         {
             console.WriteLine($"id={SafeToken(conflict.Id)} local-hash={SafeToken(conflict.LocalHash)} remote-hash={SafeToken(conflict.RemoteHash)} " +
@@ -254,7 +278,7 @@ public sealed class CliApplication
         }
         else return Usage();
 
-        var result = await services.ResolveAsync(args[1], resolution, exportDirectory, cancellationToken).ConfigureAwait(false);
+        var result = await Services.ResolveAsync(args[1], resolution, exportDirectory, cancellationToken).ConfigureAwait(false);
         console.WriteLine(result.Exported
             ? $"Exported conflict {SafeToken(args[1])}; it remains unresolved."
             : $"Resolved conflict {SafeToken(args[1])}.");
@@ -283,13 +307,13 @@ public sealed class CliApplication
 
     private int Usage()
     {
-        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage]");
         return 2;
     }
 
     private int Help()
     {
-        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage]");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         return 0;
     }
@@ -320,4 +344,6 @@ public sealed class CliApplication
         if (string.IsNullOrWhiteSpace(value)) return "unknown";
         return new string(value.Select(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':' ? character : '_').ToArray());
     }
+
+    private ICliServices Services => services ?? throw new InvalidOperationException("CLI services are unavailable.");
 }

@@ -94,6 +94,72 @@ internal static class WindowsOwnedTreeDeleter
         }
     }
 
+    public static bool TryDeleteDescendantTree(string rootPath, string targetPath,
+        Func<bool>? afterTreeCapture = null, Func<bool>? beforeFirstMutation = null)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        var retained = new List<Node>();
+        try
+        {
+            var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+            var canonicalTarget = Path.TrimEndingDirectorySeparator(Path.GetFullPath(targetPath));
+            var relative = Path.GetRelativePath(canonicalRoot, canonicalTarget);
+            if (relative is "." or ".." || Path.IsPathRooted(relative) ||
+                relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+                relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+                return false;
+            var segments = relative.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length == 0) return false;
+
+            var anchorHandle = OpenRoot(canonicalRoot);
+            Node anchor;
+            try { anchor = new Node(string.Empty, isDirectory: true, anchorHandle, ReadIdentity(anchorHandle)); }
+            catch
+            {
+                anchorHandle.Dispose();
+                throw;
+            }
+            retained.Add(anchor);
+            RequireConcreteType(anchor, expectDirectory: true);
+
+            var current = anchor;
+            foreach (var segment in segments)
+            {
+                ValidateName(segment);
+                var handle = OpenChild(current.Handle, segment, expectDirectory: true);
+                Node child;
+                try { child = new Node(segment, isDirectory: true, handle, ReadIdentity(handle)); }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+                retained.Add(child);
+                RequireConcreteType(child, expectDirectory: true);
+                current = child;
+            }
+
+            var target = current;
+            Collect(target, retained);
+            if (afterTreeCapture is not null && !afterTreeCapture()) return false;
+            ValidateSnapshot(target);
+            if (beforeFirstMutation is not null && !beforeFirstMutation()) return false;
+
+            foreach (var node in PostOrder(target)) DeleteByHandle(node.Handle, node.Name);
+            return true;
+        }
+        catch (Exception exception) when (IsNativeFailure(exception))
+        {
+            return false;
+        }
+        finally
+        {
+            for (var index = retained.Count - 1; index >= 0; index--) retained[index].Handle.Dispose();
+        }
+    }
+
     private static SafeFileHandle OpenRoot(string path)
     {
         var handle = CreateFileW(path, DeleteAccess | FileReadDataOrListDirectory | FileReadAttributes | Synchronize,
@@ -210,6 +276,12 @@ internal static class WindowsOwnedTreeDeleter
 
     private static void ValidateSnapshot(Node root, Node marker, string markerToken)
     {
+        ValidateSnapshot(root);
+        VerifyMarker(marker, markerToken);
+    }
+
+    private static void ValidateSnapshot(Node root)
+    {
         foreach (var node in Flatten(root))
         {
             RequireIdentity(node, node.Identity);
@@ -221,7 +293,6 @@ internal static class WindowsOwnedTreeDeleter
             if (!actual.SequenceEqual(expected))
                 throw new InvalidDataException("Owned temporary content changed during validation.");
         }
-        VerifyMarker(marker, markerToken);
     }
 
     private static Node FindMarker(Node root, string markerName)
