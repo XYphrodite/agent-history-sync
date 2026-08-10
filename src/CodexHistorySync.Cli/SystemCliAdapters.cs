@@ -177,6 +177,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
 
 internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDirectoryDeleter
 {
+    private readonly Func<bool>? afterContainmentValidation;
     private readonly Func<bool>? afterRootPathValidation;
     private readonly Func<bool>? afterPathValidation;
     private readonly Func<bool>? afterTreeCapture;
@@ -188,7 +189,7 @@ internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDir
     internal WindowsManagedSessionDirectoryDeleter(
         Func<bool>? afterPathValidation,
         Func<bool>? afterTreeCapture)
-        : this(null, afterPathValidation, afterTreeCapture)
+        : this(null, null, afterPathValidation, afterTreeCapture)
     {
     }
 
@@ -196,7 +197,17 @@ internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDir
         Func<bool>? afterRootPathValidation,
         Func<bool>? afterPathValidation,
         Func<bool>? afterTreeCapture)
+        : this(null, afterRootPathValidation, afterPathValidation, afterTreeCapture)
     {
+    }
+
+    internal WindowsManagedSessionDirectoryDeleter(
+        Func<bool>? afterContainmentValidation,
+        Func<bool>? afterRootPathValidation,
+        Func<bool>? afterPathValidation,
+        Func<bool>? afterTreeCapture)
+    {
+        this.afterContainmentValidation = afterContainmentValidation;
         this.afterRootPathValidation = afterRootPathValidation;
         this.afterPathValidation = afterPathValidation;
         this.afterTreeCapture = afterTreeCapture;
@@ -207,15 +218,17 @@ internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDir
         cancellationToken.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Managed session deletion requires Windows.");
+        if (!WindowsOwnedTreeDeleter.TryGetIdentity(sessionsRoot, out var expectedRootIdentity))
+            throw new IOException("The sessions root identity is unavailable.");
 
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionsRoot));
         var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionDirectory));
         if (string.Equals(root, target, StringComparison.OrdinalIgnoreCase) ||
             !target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected session directory is outside the sessions root.");
+        if (afterContainmentValidation is not null && !afterContainmentValidation())
+            throw new IOException("The sessions root changed after containment validation.");
 
-        if (!WindowsOwnedTreeDeleter.TryGetIdentity(root, out var expectedRootIdentity))
-            throw new IOException("The sessions root identity is unavailable.");
         RequireConcreteAncestors(root, target, afterRootPathValidation);
         if (afterPathValidation is not null && !afterPathValidation())
             throw new IOException("The selected session directory changed before deletion.");
