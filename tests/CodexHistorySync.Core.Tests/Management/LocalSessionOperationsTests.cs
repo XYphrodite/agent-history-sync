@@ -373,6 +373,55 @@ public sealed class LocalSessionOperationsTests
         Assert.True(fingerprint.RaceInjected);
     }
 
+    [Fact]
+    public async Task CopyAsyncBeginsRealWriterInsideTheFinalValidationFrame()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync(
+            "continuation-boundary", "Boundary source", "question", "answer");
+        var validationFrame = new ActionBoundarySynchronizationContext();
+        var fingerprint = new BoundaryTrackingCodexFingerprintProvider(validationFrame);
+        var destinationId = Guid.Parse("53000000-0000-0000-0000-000000000005");
+        var writer = new BoundaryObservingWriter(
+            new GrokConversationWriter(fixture.GrokPaths, () => destinationId),
+            validationFrame);
+
+        var result = await fixture
+            .CreateOperations(grokWriter: writer, fingerprintProvider: fingerprint)
+            .CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "continuation-boundary", path),
+                CancellationToken.None);
+
+        var destination = fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, result);
+        Assert.True(File.Exists(Path.Combine(destination, "chat_history.jsonl")));
+        Assert.True(File.Exists(Path.Combine(destination, "summary.json")));
+        var copied = await new GrokConversationReader().ReadAsync(destination, CancellationToken.None);
+        Assert.Equal("Boundary source", copied.Title);
+        Assert.Equal(
+            [new PortableTurn(ConversationRole.User, "question"),
+             new PortableTurn(ConversationRole.Assistant, "answer")],
+            copied.Turns);
+        Assert.True(writer.BeganInsideFinalValidationFrame);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncBeginsOwnedDeletionInsideTheFinalValidationFrame()
+    {
+        await using var fixture = new OperationsFixture();
+        const string id = "54000000-0000-0000-0000-000000000005";
+        var path = await fixture.WriteGrokAsync(id, "Boundary delete", "question", "answer");
+        var validationFrame = new ActionBoundarySynchronizationContext();
+        var fingerprint = new BoundaryTrackingGrokFingerprintProvider(validationFrame);
+        var deleter = new BoundaryObservingDirectoryDeleter(validationFrame);
+
+        await fixture
+            .CreateOperations(directoryDeleter: deleter, fingerprintProvider: fingerprint)
+            .DeleteAsync(fixture.Session(ManagedAgent.Grok, id, path), CancellationToken.None);
+
+        Assert.False(Directory.Exists(path));
+        Assert.True(deleter.BeganInsideFinalValidationFrame);
+    }
+
     private static async Task AssertSafeFailureAsync(
         Func<Task> action,
         string expectedMessage,
@@ -422,13 +471,15 @@ public sealed class LocalSessionOperationsTests
 
         public LocalSessionOperations CreateOperations(
             IConversationReader? codexReader = null,
-            IManagedSessionFingerprintProvider? fingerprintProvider = null) => new(
+            IManagedSessionFingerprintProvider? fingerprintProvider = null,
+            IConversationWriter? grokWriter = null,
+            IManagedSessionDirectoryDeleter? directoryDeleter = null) => new(
             CodexPaths,
             GrokPaths,
             ActiveState,
-            DirectoryDeleter,
+            directoryDeleter ?? DirectoryDeleter,
             CodexWriter,
-            GrokWriter,
+            grokWriter ?? GrokWriter,
             codexReader ?? new CodexConversationReader(),
             new GrokConversationReader(),
             fingerprintProvider);
@@ -718,7 +769,7 @@ public sealed class LocalSessionOperationsTests
             return Capture(nativePath);
         }
 
-        private static byte[] Capture(string nativePath)
+        public static byte[] Capture(string nativePath)
         {
             using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
                 System.Security.Cryptography.HashAlgorithmName.SHA256);
@@ -730,6 +781,116 @@ public sealed class LocalSessionOperationsTests
                 if (File.Exists(path)) hash.AppendData(File.ReadAllBytes(path));
             }
             return hash.GetHashAndReset();
+        }
+    }
+
+    private sealed class BoundaryTrackingCodexFingerprintProvider(
+        ActionBoundarySynchronizationContext validationFrame)
+        : IManagedSessionFingerprintProvider
+    {
+        public async Task<byte[]> CaptureAsync(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Codex, agent);
+            await using var stream = new FileStream(nativePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
+            return await System.Security.Cryptography.SHA256.HashDataAsync(stream, cancellationToken);
+        }
+
+        public byte[] CaptureImmediate(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Codex, agent);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var stream = new FileStream(nativePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
+            var fingerprint = System.Security.Cryptography.SHA256.HashData(stream);
+            validationFrame.Enter();
+            return fingerprint;
+        }
+    }
+
+    private sealed class BoundaryObservingWriter(
+        IConversationWriter inner,
+        ActionBoundarySynchronizationContext validationFrame) : IConversationWriter
+    {
+        public bool BeganInsideFinalValidationFrame { get; private set; }
+
+        public Task<ConversationWriteResult> WriteAsync(
+            PortableConversation conversation,
+            CancellationToken cancellationToken)
+        {
+            BeganInsideFinalValidationFrame = validationFrame.IsCurrentWithoutPost;
+            return inner.WriteAsync(conversation, cancellationToken);
+        }
+    }
+
+    private sealed class BoundaryTrackingGrokFingerprintProvider(
+        ActionBoundarySynchronizationContext validationFrame)
+        : IManagedSessionFingerprintProvider
+    {
+        public Task<byte[]> CaptureAsync(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Grok, agent);
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(RacingGrokFingerprintProvider.Capture(nativePath));
+        }
+
+        public byte[] CaptureImmediate(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Grok, agent);
+            cancellationToken.ThrowIfCancellationRequested();
+            var fingerprint = RacingGrokFingerprintProvider.Capture(nativePath);
+            validationFrame.Enter();
+            return fingerprint;
+        }
+    }
+
+    private sealed class BoundaryObservingDirectoryDeleter(
+        ActionBoundarySynchronizationContext validationFrame)
+        : IManagedSessionDirectoryDeleter
+    {
+        public bool BeganInsideFinalValidationFrame { get; private set; }
+
+        public Task DeleteAsync(
+            string sessionsRoot,
+            string sessionDirectory,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            BeganInsideFinalValidationFrame = validationFrame.IsCurrentWithoutPost;
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionsRoot));
+            var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionDirectory));
+            if (!target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Deletion target escaped its exact test root.");
+            Directory.Delete(target, recursive: true);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ActionBoundarySynchronizationContext : SynchronizationContext
+    {
+        private int postCount;
+
+        public bool IsCurrentWithoutPost =>
+            ReferenceEquals(Current, this) && Volatile.Read(ref postCount) == 0;
+
+        public void Enter() => SetSynchronizationContext(this);
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            Interlocked.Increment(ref postCount);
+            ThreadPool.QueueUserWorkItem(_ => callback(state));
         }
     }
 }

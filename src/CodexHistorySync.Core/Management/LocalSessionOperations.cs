@@ -70,16 +70,15 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         try
         {
             var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
-            await RevalidateForActionAsync(source, validated, cancellationToken).ConfigureAwait(false);
             var writer = source.Agent switch
             {
                 ManagedAgent.Codex => grokWriter,
                 ManagedAgent.Grok => codexWriter,
                 _ => null
             } ?? throw new InvalidOperationException("The destination agent is unavailable.");
-
-            var result = await writer.WriteAsync(validated.Conversation, cancellationToken).ConfigureAwait(false);
-            return result.SessionId;
+            return await CopyAfterFinalValidationAsync(
+                    source, validated, writer, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -96,16 +95,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         try
         {
             var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
-            await RevalidateForActionAsync(source, validated, cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (source.Agent == ManagedAgent.Codex)
-            {
-                File.Delete(validated.NativePath);
-                return;
-            }
-
-            await directoryDeleter.DeleteAsync(validated.Root, validated.NativePath, cancellationToken)
+            await DeleteAfterFinalValidationAsync(source, validated, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -146,15 +136,50 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         return new ValidatedSource(revalidated.Root, revalidated.NativePath, conversation, after);
     }
 
-    private async Task RevalidateForActionAsync(
+    private async Task<string> CopyAfterFinalValidationAsync(
+        ManagedSession source,
+        ValidatedSource validated,
+        IConversationWriter writer,
+        CancellationToken cancellationToken)
+    {
+        await RequireStableBeforeFinalActiveCheckAsync(source, validated, cancellationToken)
+            .ConfigureAwait(false);
+        await RequireInactiveAsync(source, validated.NativePath, cancellationToken).ConfigureAwait(false);
+        RequireUnchangedImmediately(source, validated, cancellationToken);
+        var writeTask = writer.WriteAsync(validated.Conversation, cancellationToken);
+        var result = await writeTask.ConfigureAwait(false);
+        return result.SessionId;
+    }
+
+    private async Task DeleteAfterFinalValidationAsync(
+        ManagedSession source,
+        ValidatedSource validated,
+        CancellationToken cancellationToken)
+    {
+        await RequireStableBeforeFinalActiveCheckAsync(source, validated, cancellationToken)
+            .ConfigureAwait(false);
+        await RequireInactiveAsync(source, validated.NativePath, cancellationToken).ConfigureAwait(false);
+        RequireUnchangedImmediately(source, validated, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (source.Agent == ManagedAgent.Codex)
+        {
+            File.Delete(validated.NativePath);
+            return;
+        }
+
+        var deleteTask = directoryDeleter.DeleteAsync(
+            validated.Root, validated.NativePath, cancellationToken);
+        await deleteTask.ConfigureAwait(false);
+    }
+
+    private async Task RequireStableBeforeFinalActiveCheckAsync(
         ManagedSession source,
         ValidatedSource validated,
         CancellationToken cancellationToken)
     {
         await RequireUnchangedAsync(source, validated, cancellationToken).ConfigureAwait(false);
         await RequireUnchangedAsync(source, validated, cancellationToken).ConfigureAwait(false);
-        await RequireInactiveAsync(source, validated.NativePath, cancellationToken).ConfigureAwait(false);
-        RequireUnchangedImmediately(source, validated, cancellationToken);
     }
 
     private async Task RequireUnchangedAsync(
