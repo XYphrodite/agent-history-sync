@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using CodexHistorySync.Core.Conversion;
 
 namespace CodexHistorySync.Core.Tests.Conversion;
@@ -66,6 +67,40 @@ public sealed class GrokConversationReaderTests
         Assert.Collection(result.Turns,
             turn => Assert.Equal(new PortableTurn(ConversationRole.User, "question"), turn),
             turn => Assert.Equal(new PortableTurn(ConversationRole.Assistant, "answer"), turn));
+    }
+
+    [Fact]
+    public async Task ReadAsyncPreservesNativeTurnTextLongerThanTheSyncNormalizerLimit()
+    {
+        // Routing conversion through the sync package normalizer truncates otherwise valid native text.
+        await using var fixture = await GrokFixture.CreateAsync();
+        var expectedText = new string('x', 4_321);
+        var chat = JsonSerializer.Serialize(new { type = "user", content = expectedText }) + "\n";
+        var directory = await fixture.WritePackageAsync(SessionId, chat,
+            "{\"info\":{\"id\":\"" + SessionId + "\",\"cwd\":\"C:\\\\Repos\\\\Demo\"}}");
+
+        var result = await new GrokConversationReader().ReadAsync(directory, CancellationToken.None);
+
+        var turn = Assert.Single(result.Turns);
+        Assert.Equal(ConversationRole.User, turn.Role);
+        Assert.Equal(expectedText, turn.Text);
+    }
+
+    [Fact]
+    public async Task ReadAsyncRejectsMalformedNativeRecordBetweenValidTurns()
+    {
+        // Letting the sync normalizer discard one malformed record would return a misleading partial conversation.
+        await using var fixture = await GrokFixture.CreateAsync();
+        var directory = await fixture.WritePackageAsync(SessionId,
+            """
+            {"type":"user","content":"question"}
+            {not-json}
+            {"type":"assistant","content":"answer"}
+            """,
+            "{\"info\":{\"id\":\"" + SessionId + "\",\"cwd\":\"C:\\\\Repos\\\\Demo\"}}");
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new GrokConversationReader().ReadAsync(directory, CancellationToken.None));
     }
 
     [Fact]

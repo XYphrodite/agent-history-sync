@@ -30,6 +30,170 @@ internal interface IConversationPublicationSeal
     void VerifyUnchanged();
 }
 
+internal sealed class ConversationDestinationGuard
+{
+    private const string InvalidDestinationMessage = "The native conversation destination contains an unsafe ancestor.";
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+    private readonly IReadOnlyList<string> directoryChain;
+
+    private ConversationDestinationGuard(
+        string trustedRoot,
+        string destinationDirectory)
+    {
+        DestinationDirectory = destinationDirectory;
+        directoryChain = DirectoryChain(trustedRoot, destinationDirectory);
+    }
+
+    public string DestinationDirectory { get; }
+
+    public static ConversationDestinationGuard Prepare(
+        string trustedRoot,
+        string nativeRoot,
+        string destinationDirectory)
+    {
+        var canonicalTrustedRoot = Canonicalize(trustedRoot, nameof(trustedRoot));
+        var canonicalNativeRoot = Canonicalize(nativeRoot, nameof(nativeRoot));
+        var canonicalDestination = Canonicalize(destinationDirectory, nameof(destinationDirectory));
+        if (!IsSameOrDescendant(canonicalNativeRoot, canonicalTrustedRoot) ||
+            !IsSameOrDescendant(canonicalDestination, canonicalNativeRoot))
+            throw InvalidDestination();
+
+        var guard = new ConversationDestinationGuard(canonicalTrustedRoot, canonicalDestination);
+        guard.CreateMissingDirectories();
+        return guard;
+    }
+
+    public void VerifyUnchanged() => VerifyExistingChain(requireAll: true);
+
+    public IConversationPublicationSeal Protect(IConversationPublicationSeal stagingSeal)
+    {
+        ArgumentNullException.ThrowIfNull(stagingSeal);
+        return new DestinationPublicationSeal(stagingSeal, this);
+    }
+
+    private void CreateMissingDirectories()
+    {
+        VerifyExistingChain(requireAll: false);
+        foreach (var directory in directoryChain)
+        {
+            VerifyExistingChain(requireAll: false);
+            if (TryGetAttributes(directory, out var attributes))
+            {
+                ValidateDirectoryAttributes(attributes);
+                continue;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                              SecurityException or ArgumentException)
+            {
+                throw InvalidDestination(exception);
+            }
+
+            VerifyExistingChain(requireAll: false);
+        }
+        VerifyExistingChain(requireAll: true);
+    }
+
+    private void VerifyExistingChain(bool requireAll)
+    {
+        try
+        {
+            foreach (var directory in directoryChain)
+            {
+                if (TryGetAttributes(directory, out var attributes))
+                {
+                    ValidateDirectoryAttributes(attributes);
+                    continue;
+                }
+
+                if (requireAll) throw InvalidDestination();
+            }
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          SecurityException or ArgumentException)
+        {
+            throw InvalidDestination(exception);
+        }
+    }
+
+    private static bool TryGetAttributes(string path, out FileAttributes attributes)
+    {
+        try
+        {
+            attributes = File.GetAttributes(path);
+            return true;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            attributes = default;
+            return false;
+        }
+    }
+
+    private static void ValidateDirectoryAttributes(FileAttributes attributes)
+    {
+        if (!attributes.HasFlag(FileAttributes.Directory) || attributes.HasFlag(FileAttributes.ReparsePoint))
+            throw InvalidDestination();
+    }
+
+    private static IReadOnlyList<string> DirectoryChain(string trustedRoot, string destinationDirectory)
+    {
+        var chain = new List<string> { trustedRoot };
+        if (string.Equals(trustedRoot, destinationDirectory, PathComparison)) return chain;
+
+        var current = trustedRoot;
+        foreach (var component in Path.GetRelativePath(trustedRoot, destinationDirectory)
+                     .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                         StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Canonicalize(Path.Combine(current, component), nameof(destinationDirectory));
+            chain.Add(current);
+        }
+        return chain;
+    }
+
+    private static string Canonicalize(string path, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("A path is required.", parameterName);
+        var canonical = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(canonical);
+        return root is not null && string.Equals(canonical, root, PathComparison)
+            ? root
+            : Path.TrimEndingDirectorySeparator(canonical);
+    }
+
+    private static bool IsSameOrDescendant(string candidate, string root)
+    {
+        if (string.Equals(candidate, root, PathComparison)) return true;
+        var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        return candidate.StartsWith(prefix, PathComparison);
+    }
+
+    private static InvalidDataException InvalidDestination(Exception? inner = null) =>
+        new(InvalidDestinationMessage, inner);
+
+    private sealed class DestinationPublicationSeal(
+        IConversationPublicationSeal stagingSeal,
+        ConversationDestinationGuard destinationGuard) : IConversationPublicationSeal
+    {
+        public void VerifyUnchanged()
+        {
+            stagingSeal.VerifyUnchanged();
+            destinationGuard.VerifyUnchanged();
+        }
+    }
+}
+
 internal sealed class SystemConversationPublisher : IConversationPublisher
 {
     public static SystemConversationPublisher Instance { get; } = new();
