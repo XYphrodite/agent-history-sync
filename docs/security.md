@@ -36,6 +36,14 @@ Remote deletions are authenticated tombstones. Local backups created before repl
 - Concurrent edits to the same chat are not merged. Both authenticated versions are preserved as encrypted conflict evidence and require `--keep-local` or `--keep-remote`; `--export-both` is a non-resolving recovery aid.
 - Cleanup is best effort after an authoritative remote initialization. A cleanup error does not replace the primary result or encourage reinitializing an already-published repository.
 
+## Local session-manager boundary
+
+`agent-sync --manage` is deliberately local-only: it does not initialize the sync runtime, make network requests, or create repository, sync-state, conflict, or tombstone records. A copy reads only a selected native session, reduces it to the portable title/timestamps/user-and-assistant-turn representation, and publishes a new native session for the other agent. System, reasoning, and tool content are not copied.
+
+The manager refuses active, unreadable, malformed, reparse-point, out-of-root, or changed selections. For copy, it validates the staged destination, records its exact owned tree and hashes, revalidates that exact tree immediately before the non-overwriting atomic move, and never replaces an existing destination. For delete, it revalidates the selected source immediately before the action. Grok deletion is anchored to the captured identity of the native sessions root and traverses/deletes relative to retained handles, rejecting root replacement, reparse points, unexpected entries, or changed identities before it removes the selected tree.
+
+The supported local security boundary is immediate pre-publish/final-action hash, exact-tree, and path revalidation followed by the atomic move or action. Same-user adversarial mutation after that check or after publication is outside scope: native Codex and Grok sessions remain writable by that same user. This boundary does not weaken the earlier validation or permit a replacement to be accepted before the final action.
+
 The release audit uses only synthetic disposable homes. It scans every blob reachable from every ref and historical commit, validates the allowed public manifest separately, authenticates every historical encrypted index and object with the test key, audits the dedicated working clone and typed agent logs, and checks forbidden filenames, marker content, local paths, and credential-bearing URLs. The clone's explicitly allowed structural `.git` data is limited to Git control files, configuration, index, refs and reflogs, standard hook samples and `info` files, plus loose, packed, and temporary object-store artifacts. Their paths and bytes are audited too; `.git` is not excluded as a whole. No real Codex history is used.
 
 ## Reporting a suspected exposure
