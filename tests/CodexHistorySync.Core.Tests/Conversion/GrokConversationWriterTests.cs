@@ -28,6 +28,108 @@ public sealed class GrokConversationWriterTests
     }
 
     [Fact]
+    public async Task WriteAsyncRejectsReparseSessionsRootWithoutWritingPlaintextOutsideTheNativeStore()
+    {
+        // Removing full-chain validation would let an existing sessions junction receive the staged and final session.
+        await using var fixture = await GrokWriterFixture.CreateAsync();
+        var outside = Path.Combine(fixture.Root, "outside-grok-sessions");
+        Directory.CreateDirectory(outside);
+        var sentinel = Path.Combine(outside, "existing.txt");
+        await File.WriteAllTextAsync(sentinel, "existing");
+        Directory.Delete(fixture.Paths.Sessions);
+        ConversationWriterReparseTestSupport.CreateDirectoryReparsePoint(fixture.Paths.Sessions, outside);
+        var expectedOutside = Path.Combine(
+            outside,
+            Path.GetRelativePath(
+                fixture.Paths.Sessions,
+                fixture.Paths.SessionDirectory(fixture.WorkingDirectory, FirstId.ToString())),
+            "chat_history.jsonl");
+
+        try
+        {
+            var error = await Record.ExceptionAsync(() =>
+                new GrokConversationWriter(fixture.Paths, () => FirstId)
+                    .WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+            Assert.False(File.Exists(expectedOutside));
+            Assert.Equal([sentinel], Directory.EnumerateFiles(outside, "*", SearchOption.AllDirectories));
+            Assert.Equal("existing", await File.ReadAllTextAsync(sentinel));
+            Assert.IsType<InvalidDataException>(error);
+        }
+        finally
+        {
+            ConversationWriterReparseTestSupport.RemoveDirectoryReparsePoint(fixture.Paths.Sessions);
+            Directory.CreateDirectory(fixture.Paths.Sessions);
+        }
+    }
+
+    [Fact]
+    public async Task WriteAsyncRejectsIntermediateDestinationJunctionWithoutWritingPlaintextOutsideTheNativeStore()
+    {
+        // Checking only the immediate staging parent misses a junction between the trusted home and sessions root.
+        await using var fixture = await GrokWriterFixture.CreateAsync();
+        var nativeParent = Path.Combine(fixture.Paths.Home, "managed");
+        var sessions = Path.Combine(nativeParent, "sessions");
+        var paths = new GrokPaths(fixture.Paths.Home, sessions);
+        var outside = Path.Combine(fixture.Root, "outside-grok-native-parent");
+        Directory.CreateDirectory(outside);
+        var sentinel = Path.Combine(outside, "existing.txt");
+        await File.WriteAllTextAsync(sentinel, "existing");
+        ConversationWriterReparseTestSupport.CreateDirectoryReparsePoint(nativeParent, outside);
+        var expectedOutside = Path.Combine(
+            outside,
+            "sessions",
+            GrokPaths.EncodeCwdSegment(fixture.WorkingDirectory),
+            FirstId.ToString(),
+            "chat_history.jsonl");
+
+        try
+        {
+            var error = await Record.ExceptionAsync(() =>
+                new GrokConversationWriter(paths, () => FirstId)
+                    .WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+            Assert.False(File.Exists(expectedOutside));
+            Assert.Equal([sentinel], Directory.EnumerateFiles(outside, "*", SearchOption.AllDirectories));
+            Assert.Equal("existing", await File.ReadAllTextAsync(sentinel));
+            Assert.IsType<InvalidDataException>(error);
+        }
+        finally
+        {
+            ConversationWriterReparseTestSupport.RemoveDirectoryReparsePoint(nativeParent);
+        }
+    }
+
+    [Fact]
+    public async Task WriteAsyncRevalidatesDestinationAncestorsImmediatelyBeforePublication()
+    {
+        // Dropping the publication-time ancestor check would move validated plaintext through a newly introduced junction.
+        await using var fixture = await GrokWriterFixture.CreateAsync();
+        var existing = Path.Combine(fixture.Paths.Sessions, "existing.txt");
+        await File.WriteAllTextAsync(existing, "existing");
+        var publisher = new AncestorReplacingConversationPublisher(
+            fixture.Paths.Sessions,
+            Path.Combine(fixture.Root, "relocated-grok-sessions"));
+        var independentStaging = Path.Combine(fixture.Root, "independent-grok-staging");
+        Directory.CreateDirectory(independentStaging);
+        var writer = new GrokConversationWriter(
+            fixture.Paths,
+            () => FirstId,
+            new GrokConversationReader(),
+            publisher,
+            new IndependentConversationStagingDirectoryFactory(independentStaging));
+
+        var error = await Record.ExceptionAsync(() =>
+            writer.WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+        Assert.Null(publisher.PublishedPlaintext);
+        Assert.IsType<InvalidDataException>(error);
+        Assert.Equal("existing", await File.ReadAllTextAsync(existing));
+        Assert.False(Directory.Exists(fixture.Paths.SessionDirectory(fixture.WorkingDirectory, FirstId.ToString())));
+        AssertNoStaging(fixture.Paths.Sessions);
+    }
+
+    [Fact]
     public async Task WriteAsyncRetriesOccupiedGeneratedIdWithoutOverwritingIt()
     {
         // Publishing over an occupied generated ID would destroy an existing Grok session.
@@ -283,6 +385,33 @@ public sealed class GrokConversationWriterTests
             InjectedPath = Path.Combine(stagingPath, "injected.json");
             File.WriteAllText(InjectedPath, "foreign");
             SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
+        }
+    }
+
+    private sealed class AncestorReplacingConversationPublisher(string ancestor, string relocated)
+        : IConversationPublisher
+    {
+        public string? PublishedPlaintext { get; private set; }
+
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
+            throw new NotSupportedException();
+
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
+        {
+            var relativeDestination = Path.GetRelativePath(ancestor, destinationPath);
+            Directory.Move(ancestor, relocated);
+            try
+            {
+                ConversationWriterReparseTestSupport.CreateDirectoryReparsePoint(ancestor, relocated);
+                SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
+                var outsideChat = Path.Combine(relocated, relativeDestination, "chat_history.jsonl");
+                if (File.Exists(outsideChat)) PublishedPlaintext = File.ReadAllText(outsideChat);
+            }
+            finally
+            {
+                ConversationWriterReparseTestSupport.RemoveDirectoryReparsePoint(ancestor);
+                if (Directory.Exists(relocated) && !Directory.Exists(ancestor)) Directory.Move(relocated, ancestor);
+            }
         }
     }
 

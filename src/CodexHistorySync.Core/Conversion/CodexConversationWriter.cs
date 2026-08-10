@@ -74,7 +74,11 @@ public sealed class CodexConversationWriter : IConversationWriter
             createdUtc.ToString("yyyy", CultureInfo.InvariantCulture),
             createdUtc.ToString("MM", CultureInfo.InvariantCulture),
             createdUtc.ToString("dd", CultureInfo.InvariantCulture));
-        Directory.CreateDirectory(destinationDirectory);
+        var destinationGuard = ConversationDestinationGuard.Prepare(
+            paths.Home,
+            paths.Sessions,
+            destinationDirectory);
+        destinationDirectory = destinationGuard.DestinationDirectory;
 
         for (var attempt = 0; attempt < MaximumIdAttempts; attempt++)
         {
@@ -88,12 +92,13 @@ public sealed class CodexConversationWriter : IConversationWriter
                 File.Exists(destination) || Directory.Exists(destination))
                 continue;
 
+            destinationGuard.VerifyUnchanged();
             var stagingDirectory = stagingFactory.Create(destinationDirectory);
             try
             {
                 var staging = stagingDirectory.FilePath(Path.GetFileName(destination));
                 await WriteRolloutAsync(staging, sessionId, conversation, cancellationToken).ConfigureAwait(false);
-                var seal = stagingDirectory.Seal();
+                var seal = destinationGuard.Protect(stagingDirectory.Seal());
                 var roundTrip = await validator.ReadAsync(staging, cancellationToken).ConfigureAwait(false);
                 ValidateRoundTrip(conversation, roundTrip, sessionId);
 

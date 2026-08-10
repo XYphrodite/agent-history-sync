@@ -41,19 +41,21 @@ public sealed class GrokConversationWriter : IConversationWriter
             throw new ArgumentException("A working directory is required for a Grok conversation.", nameof(conversation));
 
         var workingDirectory = Path.GetFullPath(conversation.WorkingDirectory);
-        var parent = Path.GetDirectoryName(paths.SessionDirectory(workingDirectory, Guid.Empty.ToString()))!;
-        Directory.CreateDirectory(parent);
+        var intendedParent = Path.GetDirectoryName(paths.SessionDirectory(workingDirectory, Guid.Empty.ToString()))!;
+        var destinationGuard = ConversationDestinationGuard.Prepare(paths.Home, paths.Sessions, intendedParent);
+        var parent = destinationGuard.DestinationDirectory;
 
         for (var attempt = 0; attempt < MaximumIdAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var generatedId = idGenerator();
             var sessionId = generatedId.ToString();
-            var destination = paths.SessionDirectory(workingDirectory, sessionId);
+            var destination = Path.Combine(parent, sessionId);
             if (ConversationWriterIdentity.IsSourceSessionId(generatedId, conversation.SourceSessionId) ||
                 Directory.Exists(destination) || File.Exists(destination))
                 continue;
 
+            destinationGuard.VerifyUnchanged();
             var stagingDirectory = stagingFactory.Create(parent);
             try
             {
@@ -65,7 +67,7 @@ public sealed class GrokConversationWriter : IConversationWriter
                 await WriteSummaryAsync(stagingSession, sessionId, workingDirectory, conversation, cancellationToken)
                     .ConfigureAwait(false);
 
-                var seal = stagingDirectory.Seal();
+                var seal = destinationGuard.Protect(stagingDirectory.Seal());
                 _ = GrokSessionPackage.Parse(GrokSessionPackage.BuildFromDirectory(stagingSession));
                 var roundTrip = await validator.ReadAsync(stagingSession, cancellationToken).ConfigureAwait(false);
                 ValidateRoundTrip(conversation, roundTrip, sessionId, workingDirectory);

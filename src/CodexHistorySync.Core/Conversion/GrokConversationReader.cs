@@ -27,7 +27,7 @@ public sealed class GrokConversationReader : IConversationReader
             if (!string.Equals(metadata.Id, package.SessionId, StringComparison.OrdinalIgnoreCase))
                 throw InvalidConversation();
 
-            var turns = await ReadTurnsAsync(package.ChatHistory, cancellationToken).ConfigureAwait(false);
+            var turns = await ReadTurnsAsync(chatPath, cancellationToken).ConfigureAwait(false);
             if (turns.Count == 0) throw InvalidConversation();
 
             var fallbackCreated = new DateTimeOffset(File.GetCreationTimeUtc(chatPath), TimeSpan.Zero);
@@ -76,10 +76,16 @@ public sealed class GrokConversationReader : IConversationReader
             ReadTimestamp(root, "updated_at", "updatedAt", "last_modified_at", "lastModifiedAt"));
     }
 
-    private static async Task<List<PortableTurn>> ReadTurnsAsync(byte[] chatHistory, CancellationToken cancellationToken)
+    private static async Task<List<PortableTurn>> ReadTurnsAsync(string chatPath, CancellationToken cancellationToken)
     {
         var turns = new List<PortableTurn>();
-        using var stream = new MemoryStream(chatHistory, writable: false);
+        await using var stream = new FileStream(
+            chatPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var reader = new StreamReader(stream, Utf8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: false);
         while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
         {

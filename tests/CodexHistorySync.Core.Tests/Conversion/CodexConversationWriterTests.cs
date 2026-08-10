@@ -33,6 +33,106 @@ public sealed class CodexConversationWriterTests
     }
 
     [Fact]
+    public async Task WriteAsyncRejectsReparseSessionsRootWithoutWritingPlaintextOutsideTheNativeStore()
+    {
+        // Removing full-chain validation would let an existing sessions junction receive the staged and final rollout.
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var outside = Path.Combine(fixture.Root, "outside-codex-sessions");
+        Directory.CreateDirectory(outside);
+        var sentinel = Path.Combine(outside, "existing.txt");
+        await File.WriteAllTextAsync(sentinel, "existing");
+        Directory.Delete(fixture.Paths.Sessions);
+        ConversationWriterReparseTestSupport.CreateDirectoryReparsePoint(fixture.Paths.Sessions, outside);
+        var expectedOutside = Path.Combine(
+            outside,
+            Path.GetRelativePath(
+                fixture.Paths.Sessions,
+                fixture.RolloutPath(fixture.Conversation().CreatedAt, FirstId)));
+
+        try
+        {
+            var error = await Record.ExceptionAsync(() => fixture.Writer(
+                    new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
+                    () => FirstId)
+                .WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+            Assert.False(File.Exists(expectedOutside));
+            Assert.Equal([sentinel], Directory.EnumerateFiles(outside, "*", SearchOption.AllDirectories));
+            Assert.Equal("existing", await File.ReadAllTextAsync(sentinel));
+            Assert.IsType<InvalidDataException>(error);
+        }
+        finally
+        {
+            ConversationWriterReparseTestSupport.RemoveDirectoryReparsePoint(fixture.Paths.Sessions);
+            Directory.CreateDirectory(fixture.Paths.Sessions);
+        }
+    }
+
+    [Fact]
+    public async Task WriteAsyncRejectsIntermediateDestinationJunctionWithoutWritingPlaintextOutsideTheNativeStore()
+    {
+        // Checking only the immediate staging parent misses a junction higher in the date hierarchy.
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var year = Path.Combine(fixture.Paths.Sessions, "2026");
+        var month = Path.Combine(year, "08");
+        var outside = Path.Combine(fixture.Root, "outside-codex-month");
+        Directory.CreateDirectory(year);
+        Directory.CreateDirectory(outside);
+        var sentinel = Path.Combine(outside, "existing.txt");
+        await File.WriteAllTextAsync(sentinel, "existing");
+        ConversationWriterReparseTestSupport.CreateDirectoryReparsePoint(month, outside);
+        var expectedOutside = Path.Combine(
+            outside,
+            "09",
+            Path.GetFileName(fixture.RolloutPath(fixture.Conversation().CreatedAt, FirstId)));
+
+        try
+        {
+            var error = await Record.ExceptionAsync(() => fixture.Writer(
+                    new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
+                    () => FirstId)
+                .WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+            Assert.False(File.Exists(expectedOutside));
+            Assert.Equal([sentinel], Directory.EnumerateFiles(outside, "*", SearchOption.AllDirectories));
+            Assert.Equal("existing", await File.ReadAllTextAsync(sentinel));
+            Assert.IsType<InvalidDataException>(error);
+        }
+        finally
+        {
+            ConversationWriterReparseTestSupport.RemoveDirectoryReparsePoint(month);
+        }
+    }
+
+    [Fact]
+    public async Task WriteAsyncRevalidatesDestinationAncestorsImmediatelyBeforePublication()
+    {
+        // Dropping the publication-time ancestor check would move validated plaintext through a newly introduced junction.
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var existing = Path.Combine(fixture.Paths.Sessions, "existing.txt");
+        await File.WriteAllTextAsync(existing, "existing");
+        var publisher = new AncestorReplacingConversationPublisher(
+            fixture.Paths.Sessions,
+            Path.Combine(fixture.Root, "relocated-codex-sessions"));
+        var independentStaging = Path.Combine(fixture.Root, "independent-codex-staging");
+        Directory.CreateDirectory(independentStaging);
+        var writer = fixture.Writer(
+            new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
+            () => FirstId,
+            publisher: publisher,
+            stagingFactory: new IndependentConversationStagingDirectoryFactory(independentStaging));
+
+        var error = await Record.ExceptionAsync(() =>
+            writer.WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+        Assert.Null(publisher.PublishedPlaintext);
+        Assert.IsType<InvalidDataException>(error);
+        Assert.Equal("existing", await File.ReadAllTextAsync(existing));
+        Assert.False(File.Exists(fixture.RolloutPath(fixture.Conversation().CreatedAt, FirstId)));
+        AssertNoStaging(fixture.Paths.Sessions);
+    }
+
+    [Fact]
     public async Task WriteAsyncRetriesOccupiedGeneratedIdWithoutOverwritingIt()
     {
         // Publishing over an occupied rollout would destroy an existing Codex conversation.
@@ -446,6 +546,33 @@ public sealed class CodexConversationWriterTests
 
         public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
             SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
+    }
+
+    private sealed class AncestorReplacingConversationPublisher(string ancestor, string relocated)
+        : IConversationPublisher
+    {
+        public string? PublishedPlaintext { get; private set; }
+
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
+        {
+            var relativeDestination = Path.GetRelativePath(ancestor, destinationPath);
+            Directory.Move(ancestor, relocated);
+            try
+            {
+                ConversationWriterReparseTestSupport.CreateDirectoryReparsePoint(ancestor, relocated);
+                SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath, seal);
+                var outsideDestination = Path.Combine(relocated, relativeDestination);
+                if (File.Exists(outsideDestination)) PublishedPlaintext = File.ReadAllText(outsideDestination);
+            }
+            finally
+            {
+                ConversationWriterReparseTestSupport.RemoveDirectoryReparsePoint(ancestor);
+                if (Directory.Exists(relocated) && !Directory.Exists(ancestor)) Directory.Move(relocated, ancestor);
+            }
+        }
+
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
+            throw new NotSupportedException();
     }
 
     private sealed class ReportingFailureStagingFactory : IConversationStagingDirectoryFactory
