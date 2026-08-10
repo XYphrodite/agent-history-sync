@@ -304,6 +304,75 @@ public sealed class LocalSessionOperationsTests
         Assert.True(fingerprint.RaceInjected);
     }
 
+    [Fact]
+    public async Task CopyAsyncRevalidatesTargetReplacedAfterFinalAsyncFingerprintBeforeWriter()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("final-fingerprint-race", "Original", "q", "a");
+        var fingerprint = new RacingCodexFingerprintProvider(4, async () =>
+        {
+            await Task.Yield();
+            await fixture.WriteCodexAsync(
+                "final-fingerprint-race", "Replacement", "changed", "changed");
+        });
+
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture
+            .CreateOperations(fingerprintProvider: fingerprint)
+            .CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "final-fingerprint-race", path),
+                CancellationToken.None));
+
+        Assert.Empty(fixture.GrokWriter.Conversations);
+        Assert.Contains("Replacement", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        Assert.True(fingerprint.RaceInjected);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncRevalidatesAncestorReplacedAfterFinalAsyncFingerprintBeforeOwnedDeleter()
+    {
+        await using var fixture = new OperationsFixture();
+        const string id = "51000000-0000-0000-0000-000000000005";
+        var path = await fixture.WriteGrokAsync(id, "Original", "q", "a");
+        var ancestor = Directory.GetParent(path)!.FullName;
+        var preserved = Path.Combine(fixture.Root, "preserved-original-grok-ancestor");
+        var fingerprint = new RacingGrokFingerprintProvider(4, async () =>
+        {
+            await Task.Yield();
+            Directory.Move(ancestor, preserved);
+            await fixture.WriteGrokAsync(id, "Replacement", "changed", "changed");
+        });
+
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture
+            .CreateOperations(fingerprintProvider: fingerprint)
+            .DeleteAsync(fixture.Session(ManagedAgent.Grok, id, path), CancellationToken.None));
+
+        Assert.Empty(fixture.DirectoryDeleter.Deletions);
+        Assert.True(Directory.Exists(path));
+        Assert.True(Directory.Exists(preserved));
+        Assert.True(fingerprint.RaceInjected);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncRefusesSessionActivatedDuringFinalAsyncFingerprintBeforeOwnedDeleter()
+    {
+        await using var fixture = new OperationsFixture();
+        const string id = "52000000-0000-0000-0000-000000000005";
+        var path = await fixture.WriteGrokAsync(id, "Becomes active", "q", "a");
+        var fingerprint = new RacingGrokFingerprintProvider(4, async () =>
+        {
+            await Task.Yield();
+            fixture.ActiveState.ActiveIds.Add(id);
+        });
+
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture
+            .CreateOperations(fingerprintProvider: fingerprint)
+            .DeleteAsync(fixture.Session(ManagedAgent.Grok, id, path), CancellationToken.None));
+
+        Assert.Empty(fixture.DirectoryDeleter.Deletions);
+        Assert.True(Directory.Exists(path));
+        Assert.True(fingerprint.RaceInjected);
+    }
+
     private static async Task AssertSafeFailureAsync(
         Func<Task> action,
         string expectedMessage,
@@ -567,10 +636,23 @@ public sealed class LocalSessionOperationsTests
             throw new InvalidDataException(message);
     }
 
-    private sealed class RacingCodexFingerprintProvider(Func<Task> injectRace)
-        : IManagedSessionFingerprintProvider
+    private sealed class RacingCodexFingerprintProvider : IManagedSessionFingerprintProvider
     {
+        private readonly int injectOnCapture;
+        private readonly Func<Task> injectRace;
         private int captureCount;
+
+        public RacingCodexFingerprintProvider(Func<Task> injectRace)
+            : this(2, injectRace)
+        {
+        }
+
+        public RacingCodexFingerprintProvider(int injectOnCapture, Func<Task> injectRace)
+        {
+            this.injectOnCapture = injectOnCapture;
+            this.injectRace = injectRace;
+        }
+
         public bool RaceInjected { get; private set; }
 
         public async Task<byte[]> CaptureAsync(
@@ -582,12 +664,72 @@ public sealed class LocalSessionOperationsTests
             await using var stream = new FileStream(nativePath, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
             var fingerprint = await System.Security.Cryptography.SHA256.HashDataAsync(stream, cancellationToken);
-            if (++captureCount == 2)
+            if (++captureCount == injectOnCapture)
             {
                 await injectRace();
                 RaceInjected = true;
             }
             return fingerprint;
+        }
+
+        public byte[] CaptureImmediate(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Codex, agent);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var stream = new FileStream(nativePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
+            return System.Security.Cryptography.SHA256.HashData(stream);
+        }
+    }
+
+    private sealed class RacingGrokFingerprintProvider(
+        int injectOnCapture,
+        Func<Task> injectRace) : IManagedSessionFingerprintProvider
+    {
+        private int captureCount;
+        public bool RaceInjected { get; private set; }
+
+        public async Task<byte[]> CaptureAsync(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Grok, agent);
+            cancellationToken.ThrowIfCancellationRequested();
+            var fingerprint = Capture(nativePath);
+            if (++captureCount == injectOnCapture)
+            {
+                await injectRace();
+                RaceInjected = true;
+            }
+            return fingerprint;
+        }
+
+        public byte[] CaptureImmediate(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Grok, agent);
+            cancellationToken.ThrowIfCancellationRequested();
+            return Capture(nativePath);
+        }
+
+        private static byte[] Capture(string nativePath)
+        {
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+                System.Security.Cryptography.HashAlgorithmName.SHA256);
+            foreach (var path in Directory.EnumerateFileSystemEntries(nativePath, "*", SearchOption.AllDirectories)
+                         .OrderBy(path => Path.GetRelativePath(nativePath, path), StringComparer.OrdinalIgnoreCase))
+            {
+                var relativePath = Path.GetRelativePath(nativePath, path);
+                hash.AppendData(Encoding.UTF8.GetBytes(relativePath + "\n"));
+                if (File.Exists(path)) hash.AppendData(File.ReadAllBytes(path));
+            }
+            return hash.GetHashAndReset();
         }
     }
 }

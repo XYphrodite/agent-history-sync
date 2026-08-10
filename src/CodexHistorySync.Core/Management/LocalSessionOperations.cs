@@ -9,6 +9,7 @@ namespace CodexHistorySync.Core.Management;
 internal interface IManagedSessionFingerprintProvider
 {
     Task<byte[]> CaptureAsync(string nativePath, ManagedAgent agent, CancellationToken cancellationToken);
+    byte[] CaptureImmediate(string nativePath, ManagedAgent agent, CancellationToken cancellationToken);
 }
 
 public sealed class LocalSessionOperations : ILocalSessionOperations
@@ -151,8 +152,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         CancellationToken cancellationToken)
     {
         await RequireUnchangedAsync(source, validated, cancellationToken).ConfigureAwait(false);
-        await RequireInactiveAsync(source, validated.NativePath, cancellationToken).ConfigureAwait(false);
         await RequireUnchangedAsync(source, validated, cancellationToken).ConfigureAwait(false);
+        await RequireInactiveAsync(source, validated.NativePath, cancellationToken).ConfigureAwait(false);
+        RequireUnchangedImmediately(source, validated, cancellationToken);
     }
 
     private async Task RequireUnchangedAsync(
@@ -167,8 +169,30 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         var fingerprint = await fingerprintProvider.CaptureAsync(
                 target.NativePath, source.Agent, cancellationToken)
             .ConfigureAwait(false);
+        RequireSameTarget(ValidateTarget(source), validated);
         if (!validated.Fingerprint.AsSpan().SequenceEqual(fingerprint))
             throw new InvalidDataException("The selected session changed during validation.");
+    }
+
+    private void RequireUnchangedImmediately(
+        ManagedSession source,
+        ValidatedSource validated,
+        CancellationToken cancellationToken)
+    {
+        var target = ValidateTarget(source);
+        RequireSameTarget(target, validated);
+        var fingerprint = fingerprintProvider.CaptureImmediate(
+            target.NativePath, source.Agent, cancellationToken);
+        RequireSameTarget(ValidateTarget(source), validated);
+        if (!validated.Fingerprint.AsSpan().SequenceEqual(fingerprint))
+            throw new InvalidDataException("The selected session changed during validation.");
+    }
+
+    private static void RequireSameTarget(Target target, ValidatedSource validated)
+    {
+        if (!string.Equals(target.NativePath, validated.NativePath, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(target.Root, validated.Root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The selected session path changed.");
     }
 
     private async Task RequireInactiveAsync(
@@ -278,6 +302,37 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         return hash.GetHashAndReset();
     }
 
+    private static byte[] CaptureFingerprintImmediate(
+        string nativePath,
+        ManagedAgent agent,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (agent == ManagedAgent.Codex)
+            return HashFileImmediate(nativePath, cancellationToken);
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        IReadOnlyList<ConcreteEntry> entries;
+        try
+        {
+            entries = EnumerateConcreteEntries(nativePath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException("The selected Grok session could not be validated.", exception);
+        }
+
+        foreach (var entry in entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            hash.AppendData(Encoding.UTF8.GetBytes(
+                (entry.IsDirectory ? "D:" : "F:") + entry.RelativePath + "\n"));
+            if (!entry.IsDirectory)
+                hash.AppendData(HashFileImmediate(entry.FullPath, cancellationToken));
+        }
+        return hash.GetHashAndReset();
+    }
+
     private static IReadOnlyList<ConcreteEntry> EnumerateConcreteEntries(string root)
     {
         var entries = new List<ConcreteEntry>();
@@ -321,6 +376,28 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         }
     }
 
+    private static byte[] HashFileImmediate(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                bufferSize: 81920,
+                FileOptions.SequentialScan);
+            var fingerprint = SHA256.HashData(stream);
+            cancellationToken.ThrowIfCancellationRequested();
+            return fingerprint;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException("The selected session could not be validated.", exception);
+        }
+    }
+
     private sealed record Target(string Root, string NativePath);
     private sealed record ValidatedSource(
         string Root,
@@ -338,5 +415,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ManagedAgent agent,
             CancellationToken cancellationToken) =>
             CaptureFingerprintAsync(nativePath, agent, cancellationToken);
+
+        public byte[] CaptureImmediate(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken) =>
+            CaptureFingerprintImmediate(nativePath, agent, cancellationToken);
     }
 }
