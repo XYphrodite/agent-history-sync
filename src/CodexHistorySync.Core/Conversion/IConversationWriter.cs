@@ -1,4 +1,5 @@
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace CodexHistorySync.Core.Conversion;
@@ -10,10 +11,23 @@ public interface IConversationWriter
     Task<ConversationWriteResult> WriteAsync(PortableConversation conversation, CancellationToken cancellationToken);
 }
 
+internal static class ConversationWriterIdentity
+{
+    public static bool IsSourceSessionId(Guid generatedId, string sourceSessionId) =>
+        Guid.TryParse(sourceSessionId, out var sourceId)
+            ? generatedId == sourceId
+            : string.Equals(generatedId.ToString(), sourceSessionId, StringComparison.OrdinalIgnoreCase);
+}
+
 internal interface IConversationPublisher
 {
-    void PublishFile(string stagingPath, string destinationPath);
-    void PublishDirectory(string stagingPath, string destinationPath);
+    void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal);
+    void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal);
+}
+
+internal interface IConversationPublicationSeal
+{
+    void VerifyUnchanged();
 }
 
 internal sealed class SystemConversationPublisher : IConversationPublisher
@@ -24,11 +38,17 @@ internal sealed class SystemConversationPublisher : IConversationPublisher
     {
     }
 
-    public void PublishFile(string stagingPath, string destinationPath) =>
+    public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
+    {
+        seal.VerifyUnchanged();
         File.Move(stagingPath, destinationPath);
+    }
 
-    public void PublishDirectory(string stagingPath, string destinationPath) =>
+    public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
+    {
+        seal.VerifyUnchanged();
         Directory.Move(stagingPath, destinationPath);
+    }
 }
 
 internal interface IConversationStagingDirectoryFactory
@@ -41,6 +61,7 @@ internal interface IConversationStagingDirectory
     string RootPath { get; }
     string DirectoryPath(params string[] components);
     string FilePath(params string[] components);
+    IConversationPublicationSeal Seal();
     bool TryDelete();
 }
 
@@ -142,6 +163,14 @@ internal sealed class SystemConversationStagingDirectory : IConversationStagingD
         return path;
     }
 
+    public IConversationPublicationSeal Seal()
+    {
+        EnsureUnchanged();
+        return new PublicationSeal(
+            this,
+            ownedFiles.ToDictionary(path => path, HashFile, StringComparer.OrdinalIgnoreCase));
+    }
+
     public bool TryDelete()
     {
         if (cleanupAttempted) return false;
@@ -236,6 +265,43 @@ internal sealed class SystemConversationStagingDirectory : IConversationStagingD
             }
         }
         return true;
+    }
+
+    private void EnsureUnchanged(IReadOnlyDictionary<string, byte[]>? expectedHashes = null)
+    {
+        const string message = "The staged conversation changed after validation.";
+        try
+        {
+            ValidateRoot();
+            if (!MarkerMatches() || !TreeContainsOnlyOwnedEntries() ||
+                ownedDirectories.Any(directory =>
+                    !Directory.Exists(directory) ||
+                    File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint)) ||
+                ownedFiles.Any(file =>
+                    !File.Exists(file) ||
+                    File.GetAttributes(file).HasFlag(FileAttributes.ReparsePoint)) ||
+                expectedHashes is not null && expectedHashes.Any(expected =>
+                    !HashFile(expected.Key).SequenceEqual(expected.Value)))
+                throw new InvalidDataException(message);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException or
+                                          ArgumentException)
+        {
+            throw new InvalidDataException(message, exception);
+        }
+    }
+
+    private static byte[] HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return SHA256.HashData(stream);
+    }
+
+    private sealed class PublicationSeal(
+        SystemConversationStagingDirectory owner,
+        IReadOnlyDictionary<string, byte[]> expectedHashes) : IConversationPublicationSeal
+    {
+        public void VerifyUnchanged() => owner.EnsureUnchanged(expectedHashes);
     }
 
     private bool Abandon()

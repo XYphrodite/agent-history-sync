@@ -47,6 +47,22 @@ public sealed class GrokConversationWriterTests
         AssertNoStaging(fixture.Paths.Sessions);
     }
 
+    [Theory]
+    [InlineData("11111111111111111111111111111111")]
+    [InlineData("{11111111-1111-1111-1111-111111111111}")]
+    public async Task WriteAsyncTreatsAlternateSourceUuidRepresentationsAsTheSameId(string sourceSessionId)
+    {
+        // String-only comparison would publish the source UUID again when its valid representation differs.
+        await using var fixture = await GrokWriterFixture.CreateAsync();
+        var ids = new Queue<Guid>([FirstId, SecondId]);
+        var writer = new GrokConversationWriter(fixture.Paths, ids.Dequeue);
+
+        var result = await writer.WriteAsync(fixture.Conversation(sourceSessionId), CancellationToken.None);
+
+        Assert.Equal(SecondId.ToString(), result.SessionId);
+        Assert.False(Directory.Exists(fixture.Paths.SessionDirectory(fixture.WorkingDirectory, FirstId.ToString())));
+    }
+
     [Fact]
     public async Task WriteAsyncFailsAfterTenOccupiedIdsWithoutChangingExistingSessions()
     {
@@ -123,6 +139,27 @@ public sealed class GrokConversationWriterTests
 
         Assert.False(Directory.Exists(fixture.Paths.SessionDirectory(fixture.WorkingDirectory, FirstId.ToString())));
         AssertNoStaging(fixture.Paths.Sessions);
+    }
+
+    [Fact]
+    public async Task WriteAsyncRefusesUnregisteredFileAddedImmediatelyBeforePublication()
+    {
+        // Moving a validated directory without rechecking its exact tree could publish injected files.
+        await using var fixture = await GrokWriterFixture.CreateAsync();
+        var publisher = new TamperingConversationPublisher();
+        var writer = new GrokConversationWriter(
+            fixture.Paths,
+            () => FirstId,
+            new GrokConversationReader(),
+            publisher);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            writer.WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+        Assert.Equal("The staged conversation changed after validation.", exception.Message);
+        Assert.False(Directory.Exists(fixture.Paths.SessionDirectory(fixture.WorkingDirectory, FirstId.ToString())));
+        Assert.NotNull(publisher.InjectedPath);
+        Assert.Equal("foreign", File.ReadAllText(publisher.InjectedPath));
     }
 
     [Fact]
@@ -208,10 +245,10 @@ public sealed class GrokConversationWriterTests
 
     private sealed class FailingConversationPublisher : IConversationPublisher
     {
-        public void PublishFile(string stagingPath, string destinationPath) =>
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
             throw new IOException("Injected publication failure.");
 
-        public void PublishDirectory(string stagingPath, string destinationPath) =>
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
             throw new IOException("Injected publication failure.");
     }
 
@@ -219,10 +256,10 @@ public sealed class GrokConversationWriterTests
     {
         private bool raced;
 
-        public void PublishFile(string stagingPath, string destinationPath) =>
-            SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath);
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
+            SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath, seal);
 
-        public void PublishDirectory(string stagingPath, string destinationPath)
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
         {
             if (!raced)
             {
@@ -230,7 +267,22 @@ public sealed class GrokConversationWriterTests
                 File.WriteAllText(destinationPath, "existing");
                 throw new IOException("Injected publication collision.");
             }
-            SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath);
+            SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
+        }
+    }
+
+    private sealed class TamperingConversationPublisher : IConversationPublisher
+    {
+        public string? InjectedPath { get; private set; }
+
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
+            SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath, seal);
+
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
+        {
+            InjectedPath = Path.Combine(stagingPath, "injected.json");
+            File.WriteAllText(InjectedPath, "foreign");
+            SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
         }
     }
 
@@ -263,6 +315,7 @@ public sealed class GrokConversationWriterTests
             }
 
             public string FilePath(params string[] components) => inner.FilePath(components);
+            public IConversationPublicationSeal Seal() => inner.Seal();
 
             public bool TryDelete()
             {

@@ -47,9 +47,10 @@ public sealed class GrokConversationWriter : IConversationWriter
         for (var attempt = 0; attempt < MaximumIdAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var sessionId = idGenerator().ToString();
+            var generatedId = idGenerator();
+            var sessionId = generatedId.ToString();
             var destination = paths.SessionDirectory(workingDirectory, sessionId);
-            if (string.Equals(sessionId, conversation.SourceSessionId, StringComparison.OrdinalIgnoreCase) ||
+            if (ConversationWriterIdentity.IsSourceSessionId(generatedId, conversation.SourceSessionId) ||
                 Directory.Exists(destination) || File.Exists(destination))
                 continue;
 
@@ -64,11 +65,12 @@ public sealed class GrokConversationWriter : IConversationWriter
                 await WriteSummaryAsync(stagingSession, sessionId, workingDirectory, conversation, cancellationToken)
                     .ConfigureAwait(false);
 
+                var seal = stagingDirectory.Seal();
                 _ = GrokSessionPackage.Parse(GrokSessionPackage.BuildFromDirectory(stagingSession));
                 var roundTrip = await validator.ReadAsync(stagingSession, cancellationToken).ConfigureAwait(false);
                 ValidateRoundTrip(conversation, roundTrip, sessionId, workingDirectory);
 
-                publisher.PublishDirectory(stagingSession, destination);
+                publisher.PublishDirectory(stagingSession, destination, seal);
                 return new ConversationWriteResult(sessionId, destination);
             }
             catch (IOException) when (Directory.Exists(destination) || File.Exists(destination))

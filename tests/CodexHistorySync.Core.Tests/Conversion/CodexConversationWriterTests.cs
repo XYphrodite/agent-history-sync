@@ -54,6 +54,24 @@ public sealed class CodexConversationWriterTests
         AssertNoStaging(fixture.Paths.Sessions);
     }
 
+    [Theory]
+    [InlineData("11111111111111111111111111111111")]
+    [InlineData("{11111111-1111-1111-1111-111111111111}")]
+    public async Task WriteAsyncTreatsAlternateSourceUuidRepresentationsAsTheSameId(string sourceSessionId)
+    {
+        // String-only comparison would publish the source UUID again when its valid representation differs.
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var ids = new Queue<Guid>([FirstId, SecondId]);
+        var writer = fixture.Writer(
+            new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
+            ids.Dequeue);
+
+        var result = await writer.WriteAsync(fixture.Conversation(sourceSessionId), CancellationToken.None);
+
+        Assert.Equal(SecondId.ToString(), result.SessionId);
+        Assert.False(File.Exists(fixture.RolloutPath(fixture.Conversation().CreatedAt, FirstId)));
+    }
+
     [Fact]
     public async Task WriteAsyncFailsAfterTenOccupiedIdsWithoutChangingExistingRollout()
     {
@@ -256,6 +274,24 @@ public sealed class CodexConversationWriterTests
     }
 
     [Fact]
+    public async Task WriteAsyncRefusesRegisteredFileTamperingImmediatelyBeforePublication()
+    {
+        // Moving a pathname without rechecking the validated object could publish attacker-replaced JSONL.
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var writer = fixture.Writer(
+            new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
+            () => FirstId,
+            publisher: new TamperingConversationPublisher());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            writer.WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+        Assert.Equal("The staged conversation changed after validation.", exception.Message);
+        Assert.False(File.Exists(fixture.RolloutPath(fixture.Conversation().CreatedAt, FirstId)));
+        AssertNoStaging(fixture.Paths.Sessions);
+    }
+
+    [Fact]
     public async Task WriteAsyncReturnsCommittedResultWhenStagingCleanupReportsFailure()
     {
         // Reporting failure after atomic publication could make a retry create a duplicate conversion.
@@ -270,6 +306,25 @@ public sealed class CodexConversationWriterTests
         Assert.Equal(FirstId.ToString(), result.SessionId);
         Assert.True(File.Exists(result.NativePath));
         AssertNoStaging(fixture.Paths.Sessions);
+    }
+
+    [Fact]
+    public async Task WriteAsyncCleansOwnedRootWhenStagedFileRegistrationFails()
+    {
+        // Registering the staged rollout before the cleanup guard would leak its owned root on failure.
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var stagingFactory = new FileRegistrationFailureStagingFactory();
+        var writer = fixture.Writer(
+            new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
+            () => FirstId,
+            stagingFactory: stagingFactory);
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            writer.WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+        Assert.Equal(1, stagingFactory.CleanupCalls);
+        Assert.NotNull(stagingFactory.RootPath);
+        Assert.False(Directory.Exists(stagingFactory.RootPath));
     }
 
     private static async Task AssertNativeRecordsAsync(
@@ -355,10 +410,10 @@ public sealed class CodexConversationWriterTests
 
     private sealed class FailingConversationPublisher : IConversationPublisher
     {
-        public void PublishFile(string stagingPath, string destinationPath) =>
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
             throw new IOException("Injected publication failure.");
 
-        public void PublishDirectory(string stagingPath, string destinationPath) =>
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
             throw new IOException("Injected publication failure.");
     }
 
@@ -366,7 +421,7 @@ public sealed class CodexConversationWriterTests
     {
         private bool raced;
 
-        public void PublishFile(string stagingPath, string destinationPath)
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
         {
             if (!raced)
             {
@@ -374,11 +429,23 @@ public sealed class CodexConversationWriterTests
                 Directory.CreateDirectory(destinationPath);
                 throw new IOException("Injected publication collision.");
             }
-            SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath);
+            SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath, seal);
         }
 
-        public void PublishDirectory(string stagingPath, string destinationPath) =>
-            SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath);
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
+            SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
+    }
+
+    private sealed class TamperingConversationPublisher : IConversationPublisher
+    {
+        public void PublishFile(string stagingPath, string destinationPath, IConversationPublicationSeal seal)
+        {
+            File.WriteAllText(stagingPath, "{\"tampered\":true}\n");
+            SystemConversationPublisher.Instance.PublishFile(stagingPath, destinationPath, seal);
+        }
+
+        public void PublishDirectory(string stagingPath, string destinationPath, IConversationPublicationSeal seal) =>
+            SystemConversationPublisher.Instance.PublishDirectory(stagingPath, destinationPath, seal);
     }
 
     private sealed class ReportingFailureStagingFactory : IConversationStagingDirectoryFactory
@@ -388,12 +455,42 @@ public sealed class CodexConversationWriterTests
                 SystemConversationStagingDirectoryFactory.Instance.Create(parentDirectory));
     }
 
+    private sealed class FileRegistrationFailureStagingFactory : IConversationStagingDirectoryFactory
+    {
+        public int CleanupCalls { get; private set; }
+        public string? RootPath { get; private set; }
+
+        public IConversationStagingDirectory Create(string parentDirectory)
+        {
+            var inner = SystemConversationStagingDirectoryFactory.Instance.Create(parentDirectory);
+            RootPath = inner.RootPath;
+            return new FileRegistrationFailureStagingDirectory(inner, this);
+        }
+
+        private sealed class FileRegistrationFailureStagingDirectory(
+            IConversationStagingDirectory inner,
+            FileRegistrationFailureStagingFactory owner) : IConversationStagingDirectory
+        {
+            public string RootPath => inner.RootPath;
+            public string DirectoryPath(params string[] components) => inner.DirectoryPath(components);
+            public string FilePath(params string[] components) => throw new IOException("Injected path registration failure.");
+            public IConversationPublicationSeal Seal() => inner.Seal();
+
+            public bool TryDelete()
+            {
+                owner.CleanupCalls++;
+                return inner.TryDelete();
+            }
+        }
+    }
+
     private sealed class ReportingFailureStagingDirectory(IConversationStagingDirectory inner)
         : IConversationStagingDirectory
     {
         public string RootPath => inner.RootPath;
         public string DirectoryPath(params string[] components) => inner.DirectoryPath(components);
         public string FilePath(params string[] components) => inner.FilePath(components);
+        public IConversationPublicationSeal Seal() => inner.Seal();
 
         public bool TryDelete()
         {

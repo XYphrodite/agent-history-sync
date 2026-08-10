@@ -79,19 +79,21 @@ public sealed class CodexConversationWriter : IConversationWriter
         for (var attempt = 0; attempt < MaximumIdAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var sessionId = idGenerator().ToString();
+            var generatedId = idGenerator();
+            var sessionId = generatedId.ToString();
             var destination = Path.Combine(
                 destinationDirectory,
                 $"rollout-{createdUtc:yyyy-MM-dd'T'HH-mm-ss}-{sessionId}.jsonl");
-            if (string.Equals(sessionId, conversation.SourceSessionId, StringComparison.OrdinalIgnoreCase) ||
+            if (ConversationWriterIdentity.IsSourceSessionId(generatedId, conversation.SourceSessionId) ||
                 File.Exists(destination) || Directory.Exists(destination))
                 continue;
 
             var stagingDirectory = stagingFactory.Create(destinationDirectory);
-            var staging = stagingDirectory.FilePath(Path.GetFileName(destination));
             try
             {
+                var staging = stagingDirectory.FilePath(Path.GetFileName(destination));
                 await WriteRolloutAsync(staging, sessionId, conversation, cancellationToken).ConfigureAwait(false);
+                var seal = stagingDirectory.Seal();
                 var roundTrip = await validator.ReadAsync(staging, cancellationToken).ConfigureAwait(false);
                 ValidateRoundTrip(conversation, roundTrip, sessionId);
 
@@ -104,7 +106,7 @@ public sealed class CodexConversationWriter : IConversationWriter
                         throw new InvalidDataException("The staged Codex conversation failed the compatibility probe.");
                 }
 
-                publisher.PublishFile(staging, destination);
+                publisher.PublishFile(staging, destination, seal);
                 return new ConversationWriteResult(sessionId, destination);
             }
             catch (IOException) when (File.Exists(destination) || Directory.Exists(destination))
