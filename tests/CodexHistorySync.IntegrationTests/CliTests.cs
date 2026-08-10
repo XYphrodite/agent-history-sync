@@ -146,6 +146,55 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Manage_directory_deleter_refuses_concrete_sessions_root_replacement_before_identity_capture()
+    {
+        var container = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-root-preidentity-{Guid.NewGuid():N}");
+        var sessionsRoot = Path.Combine(container, "sessions");
+        var preservedRoot = Path.Combine(container, "sessions.preserved");
+        var replacementRoot = Path.Combine(container, "replacement");
+        var relativeSession = Path.Combine("cwd", Guid.NewGuid().ToString());
+        var selected = Path.Combine(sessionsRoot, relativeSession);
+        var replacementSession = Path.Combine(replacementRoot, relativeSession);
+        var original = Path.Combine(selected, "owned.txt");
+        var sentinel = Path.Combine(replacementSession, "outside-keep.txt");
+        Directory.CreateDirectory(selected);
+        Directory.CreateDirectory(replacementSession);
+        await File.WriteAllTextAsync(original, "owned");
+        await File.WriteAllTextAsync(sentinel, "outside");
+        bool ReplaceRoot()
+        {
+            Directory.Move(sessionsRoot, preservedRoot);
+            Directory.Move(replacementRoot, sessionsRoot);
+            return true;
+        }
+
+        try
+        {
+            var deleter = new WindowsManagedSessionDirectoryDeleter(
+                afterContainmentValidation: ReplaceRoot,
+                afterRootPathValidation: null,
+                afterPathValidation: null,
+                afterTreeCapture: null);
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                deleter.DeleteAsync(sessionsRoot, selected, CancellationToken.None));
+
+            Assert.Equal("outside", await File.ReadAllTextAsync(
+                Path.Combine(sessionsRoot, relativeSession, "outside-keep.txt")));
+            Assert.Equal("owned", await File.ReadAllTextAsync(
+                Path.Combine(preservedRoot, relativeSession, "owned.txt")));
+        }
+        finally
+        {
+            if (Directory.Exists(sessionsRoot) && Directory.Exists(preservedRoot))
+                Directory.Move(sessionsRoot, replacementRoot);
+            if (Directory.Exists(preservedRoot) && !Directory.Exists(sessionsRoot))
+                Directory.Move(preservedRoot, sessionsRoot);
+            if (Directory.Exists(container)) Directory.Delete(container, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Manage_directory_deleter_refuses_concrete_sessions_root_replacement_after_validation()
     {
         var container = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-root-identity-{Guid.NewGuid():N}");
