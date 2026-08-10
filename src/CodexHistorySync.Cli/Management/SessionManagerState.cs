@@ -22,7 +22,9 @@ public sealed class SessionManagerState
         int grokViewportOffset)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        Snapshot = new SessionCatalogSnapshot(snapshot.Codex.ToArray(), snapshot.Grok.ToArray());
+        Snapshot = new SessionCatalogSnapshot(
+            Array.AsReadOnly(snapshot.Codex.ToArray()),
+            Array.AsReadOnly(snapshot.Grok.ToArray()));
         FocusedAgent = focusedAgent;
         ViewportRows = Math.Max(1, viewportRows);
         CodexSelectedIndex = ClampSelection(codexSelectedIndex, Snapshot.Codex.Count);
