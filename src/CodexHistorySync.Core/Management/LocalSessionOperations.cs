@@ -6,6 +6,11 @@ using CodexHistorySync.Core.Grok;
 
 namespace CodexHistorySync.Core.Management;
 
+internal interface IManagedSessionFingerprintProvider
+{
+    Task<byte[]> CaptureAsync(string nativePath, ManagedAgent agent, CancellationToken cancellationToken);
+}
+
 public sealed class LocalSessionOperations : ILocalSessionOperations
 {
     private readonly CodexPaths? codexPaths;
@@ -16,6 +21,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly IConversationWriter? grokWriter;
     private readonly IConversationReader codexReader;
     private readonly IConversationReader grokReader;
+    private readonly IManagedSessionFingerprintProvider fingerprintProvider;
 
     public LocalSessionOperations(
         CodexPaths? codexPaths,
@@ -44,7 +50,8 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationWriter? codexWriter,
         IConversationWriter? grokWriter,
         IConversationReader codexReader,
-        IConversationReader grokReader)
+        IConversationReader grokReader,
+        IManagedSessionFingerprintProvider? fingerprintProvider = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -54,35 +61,60 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.grokWriter = grokWriter;
         this.codexReader = codexReader ?? throw new ArgumentNullException(nameof(codexReader));
         this.grokReader = grokReader ?? throw new ArgumentNullException(nameof(grokReader));
+        this.fingerprintProvider = fingerprintProvider ?? SystemFingerprintProvider.Instance;
     }
 
     public async Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken)
     {
-        var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
-        var writer = source.Agent switch
+        try
         {
-            ManagedAgent.Codex => grokWriter,
-            ManagedAgent.Grok => codexWriter,
-            _ => null
-        } ?? throw new InvalidOperationException("The destination agent is unavailable.");
+            var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
+            await RevalidateForActionAsync(source, validated, cancellationToken).ConfigureAwait(false);
+            var writer = source.Agent switch
+            {
+                ManagedAgent.Codex => grokWriter,
+                ManagedAgent.Grok => codexWriter,
+                _ => null
+            } ?? throw new InvalidOperationException("The destination agent is unavailable.");
 
-        var result = await writer.WriteAsync(validated.Conversation, cancellationToken).ConfigureAwait(false);
-        return result.SessionId;
+            var result = await writer.WriteAsync(validated.Conversation, cancellationToken).ConfigureAwait(false);
+            return result.SessionId;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            throw new ManagedSessionOperationException(ManagedSessionOperationFailure.Copy);
+        }
     }
 
     public async Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken)
     {
-        var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        if (source.Agent == ManagedAgent.Codex)
+        try
         {
-            File.Delete(validated.NativePath);
-            return;
-        }
+            var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
+            await RevalidateForActionAsync(source, validated, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
 
-        await directoryDeleter.DeleteAsync(validated.Root, validated.NativePath, cancellationToken)
-            .ConfigureAwait(false);
+            if (source.Agent == ManagedAgent.Codex)
+            {
+                File.Delete(validated.NativePath);
+                return;
+            }
+
+            await directoryDeleter.DeleteAsync(validated.Root, validated.NativePath, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            throw new ManagedSessionOperationException(ManagedSessionOperationFailure.Delete);
+        }
     }
 
     private async Task<ValidatedSource> ReadAndValidateAsync(
@@ -95,7 +127,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         if (source.IsActive) throw new InvalidOperationException("The session is active.");
 
         var target = ValidateTarget(source);
-        var before = await CaptureFingerprintAsync(target.NativePath, source.Agent, cancellationToken)
+        var before = await fingerprintProvider.CaptureAsync(target.NativePath, source.Agent, cancellationToken)
             .ConfigureAwait(false);
         var reader = source.Agent == ManagedAgent.Codex ? codexReader : grokReader;
         var conversation = await reader.ReadAsync(target.NativePath, cancellationToken).ConfigureAwait(false);
@@ -105,16 +137,50 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         if (!string.Equals(target.NativePath, revalidated.NativePath, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(target.Root, revalidated.Root, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected session path changed.");
-        var after = await CaptureFingerprintAsync(revalidated.NativePath, source.Agent, cancellationToken)
+        var after = await fingerprintProvider.CaptureAsync(revalidated.NativePath, source.Agent, cancellationToken)
             .ConfigureAwait(false);
         if (!before.AsSpan().SequenceEqual(after))
             throw new InvalidDataException("The selected session changed during validation.");
 
+        return new ValidatedSource(revalidated.Root, revalidated.NativePath, conversation, after);
+    }
+
+    private async Task RevalidateForActionAsync(
+        ManagedSession source,
+        ValidatedSource validated,
+        CancellationToken cancellationToken)
+    {
+        await RequireUnchangedAsync(source, validated, cancellationToken).ConfigureAwait(false);
+        await RequireInactiveAsync(source, validated.NativePath, cancellationToken).ConfigureAwait(false);
+        await RequireUnchangedAsync(source, validated, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task RequireUnchangedAsync(
+        ManagedSession source,
+        ValidatedSource validated,
+        CancellationToken cancellationToken)
+    {
+        var target = ValidateTarget(source);
+        if (!string.Equals(target.NativePath, validated.NativePath, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(target.Root, validated.Root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The selected session path changed.");
+        var fingerprint = await fingerprintProvider.CaptureAsync(
+                target.NativePath, source.Agent, cancellationToken)
+            .ConfigureAwait(false);
+        if (!validated.Fingerprint.AsSpan().SequenceEqual(fingerprint))
+            throw new InvalidDataException("The selected session changed during validation.");
+    }
+
+    private async Task RequireInactiveAsync(
+        ManagedSession source,
+        string nativePath,
+        CancellationToken cancellationToken)
+    {
         bool isActive;
         try
         {
             isActive = await activeState.IsActiveAsync(
-                    source.Agent, source.SessionId, revalidated.NativePath, cancellationToken)
+                    source.Agent, source.SessionId, nativePath, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -126,8 +192,6 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             throw new InvalidOperationException("The session active state could not be established.", exception);
         }
         if (isActive) throw new InvalidOperationException("The session is active.");
-
-        return new ValidatedSource(revalidated.Root, revalidated.NativePath, conversation);
     }
 
     private Target ValidateTarget(ManagedSession source)
@@ -258,6 +322,21 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     }
 
     private sealed record Target(string Root, string NativePath);
-    private sealed record ValidatedSource(string Root, string NativePath, PortableConversation Conversation);
+    private sealed record ValidatedSource(
+        string Root,
+        string NativePath,
+        PortableConversation Conversation,
+        byte[] Fingerprint);
     private sealed record ConcreteEntry(string FullPath, string RelativePath, bool IsDirectory);
+
+    private sealed class SystemFingerprintProvider : IManagedSessionFingerprintProvider
+    {
+        public static SystemFingerprintProvider Instance { get; } = new();
+
+        public Task<byte[]> CaptureAsync(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken) =>
+            CaptureFingerprintAsync(nativePath, agent, cancellationToken);
+    }
 }

@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Core.Codex;
-using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
 
 namespace CodexHistorySync.Core.Management;
@@ -9,7 +8,7 @@ namespace CodexHistorySync.Core.Management;
 public sealed class LocalSessionCatalog : ILocalSessionCatalog
 {
     private const int MaximumTitleLength = 80;
-    private const int MaximumMetadataCharacters = 64 * 1024;
+    private const int MaximumMetadataBytes = 64 * 1024;
     private const int MaximumMetadataRecords = 64;
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private static readonly HashSet<string> CodexDisallowedDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
@@ -23,8 +22,6 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
     private readonly IManagedSessionActiveState activeState;
     private readonly SessionScanner codexScanner;
     private readonly GrokSessionScanner grokScanner;
-    private readonly IConversationReader codexReader;
-    private readonly IConversationReader grokReader;
 
     public LocalSessionCatalog(
         CodexPaths? codexPaths,
@@ -32,33 +29,12 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         IManagedSessionActiveState activeState,
         SessionScanner? codexScanner = null,
         GrokSessionScanner? grokScanner = null)
-        : this(
-            codexPaths,
-            grokPaths,
-            activeState,
-            codexScanner ?? new SessionScanner(),
-            grokScanner ?? new GrokSessionScanner(),
-            new CodexConversationReader(),
-            new GrokConversationReader())
-    {
-    }
-
-    internal LocalSessionCatalog(
-        CodexPaths? codexPaths,
-        GrokPaths? grokPaths,
-        IManagedSessionActiveState activeState,
-        SessionScanner codexScanner,
-        GrokSessionScanner grokScanner,
-        IConversationReader codexReader,
-        IConversationReader grokReader)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
-        this.codexScanner = codexScanner ?? throw new ArgumentNullException(nameof(codexScanner));
-        this.grokScanner = grokScanner ?? throw new ArgumentNullException(nameof(grokScanner));
-        this.codexReader = codexReader ?? throw new ArgumentNullException(nameof(codexReader));
-        this.grokReader = grokReader ?? throw new ArgumentNullException(nameof(grokReader));
+        this.codexScanner = codexScanner ?? new SessionScanner();
+        this.grokScanner = grokScanner ?? new GrokSessionScanner();
     }
 
     public async Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken)
@@ -97,8 +73,9 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                     candidate, root, expectDirectory: false, out var nativePath))
                 continue;
 
+            var metadata = await ReadCodexMetadataAsync(nativePath, cancellationToken).ConfigureAwait(false);
             var isStable = stable.TryGetValue(nativePath, out var scannedId);
-            var sessionId = isStable ? scannedId! : TryReadCodexSessionId(nativePath);
+            var sessionId = isStable ? scannedId! : metadata?.SessionId;
             if (!IsSafeCodexSessionId(sessionId)) continue;
 
             result.Add(await CreateSessionAsync(
@@ -106,7 +83,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 sessionId!,
                 nativePath,
                 isStable,
-                codexReader,
+                metadata,
                 cancellationToken).ConfigureAwait(false));
         }
         return result;
@@ -145,12 +122,14 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             var sessionId = Path.GetFileName(nativePath);
             if (!IsSafeGrokSessionId(sessionId)) continue;
 
+            var metadata = await ReadGrokMetadataAsync(nativePath, sessionId, cancellationToken)
+                .ConfigureAwait(false);
             result.Add(await CreateSessionAsync(
                 ManagedAgent.Grok,
                 sessionId,
                 nativePath,
                 stable.Contains(nativePath),
-                grokReader,
+                metadata,
                 cancellationToken).ConfigureAwait(false));
         }
         return result;
@@ -161,7 +140,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         string sessionId,
         string nativePath,
         bool stable,
-        IConversationReader reader,
+        DisplayMetadata? metadata,
         CancellationToken cancellationToken)
     {
         bool isActive;
@@ -179,43 +158,18 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             isActive = true;
         }
 
-        try
-        {
-            var conversation = await reader.ReadAsync(nativePath, cancellationToken).ConfigureAwait(false);
-            var expectedAgent = agent == ManagedAgent.Codex ? ConversationAgent.Codex : ConversationAgent.Grok;
-            var identityMatches = conversation.SourceAgent == expectedAgent &&
-                                  string.Equals(conversation.SourceSessionId, sessionId,
-                                      StringComparison.OrdinalIgnoreCase);
-            if (identityMatches && (stable || isActive))
-            {
-                return new ManagedSession(
-                    agent,
-                    sessionId,
-                    nativePath,
-                    DisplayTitle(conversation.Title, sessionId),
-                    conversation.LastModifiedAt,
-                    isActive,
-                    CanRead: true);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-                                          InvalidDataException or ArgumentException)
-        {
-            // Keep only the already-established safe identity and target, with actions disabled.
-        }
-
+        var identityMatches = metadata is not null &&
+                              string.Equals(metadata.SessionId, sessionId, StringComparison.OrdinalIgnoreCase);
         return new ManagedSession(
             agent,
             sessionId,
             nativePath,
-            sessionId,
-            LastWriteTime(nativePath, agent == ManagedAgent.Grok),
+            identityMatches ? DisplayTitle(metadata!.Title, sessionId) : sessionId,
+            identityMatches && metadata!.LastModifiedAt is { } modified
+                ? modified
+                : LastWriteTime(nativePath, agent == ManagedAgent.Grok),
             isActive,
-            CanRead: false);
+            CanRead: identityMatches && (stable || isActive && metadata!.HasReadableNativeStructure));
     }
 
     private static IReadOnlyList<ManagedSession> Order(IEnumerable<ManagedSession> sessions) =>
@@ -232,11 +186,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
 
     private static IEnumerable<string> EnumerateGrokCandidates(string root)
     {
-        foreach (var chatPath in EnumerateFiles(root, "chat_history.jsonl"))
-        {
-            var directory = Path.GetDirectoryName(chatPath);
-            if (directory is not null) yield return directory;
-        }
+        foreach (var directory in EnumerateDirectories(root))
+            if (IsSafeGrokSessionId(Path.GetFileName(directory))) yield return directory;
     }
 
     private static IReadOnlyList<string> EnumerateFiles(string root, string pattern)
@@ -248,6 +199,30 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             return Directory.EnumerateFiles(
                     root,
                     pattern,
+                    new EnumerationOptions
+                    {
+                        RecurseSubdirectories = true,
+                        AttributesToSkip = FileAttributes.ReparsePoint,
+                        IgnoreInaccessible = true
+                    })
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return [];
+        }
+    }
+
+    private static IReadOnlyList<string> EnumerateDirectories(string root)
+    {
+        if (!Directory.Exists(root)) return [];
+        try
+        {
+            if (File.GetAttributes(root).HasFlag(FileAttributes.ReparsePoint)) return [];
+            return Directory.EnumerateDirectories(
+                    root,
+                    "*",
                     new EnumerationOptions
                     {
                         RecurseSubdirectories = true,
@@ -281,39 +256,191 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             .Any(CodexDisallowedDirectorySegments.Contains);
     }
 
-    private static string? TryReadCodexSessionId(string path)
+    private static async Task<DisplayMetadata?> ReadCodexMetadataAsync(
+        string path,
+        CancellationToken cancellationToken)
     {
         try
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
-            using var reader = new StreamReader(stream, Utf8, detectEncodingFromByteOrderMarks: false,
-                bufferSize: 4096, leaveOpen: false);
-            var characters = 0;
+            var prefix = await ReadBoundedPrefixAsync(path, cancellationToken).ConfigureAwait(false);
+            using var reader = new StringReader(prefix.Text);
+            string? sessionId = null;
+            string? title = null;
+            string? cwd = null;
+            string? firstUser = null;
+            DateTimeOffset? lastModified = null;
             for (var record = 0; record < MaximumMetadataRecords; record++)
             {
                 var line = reader.ReadLine();
-                if (line is null) return null;
-                characters = checked(characters + line.Length);
-                if (characters > MaximumMetadataCharacters) return null;
+                if (line is null) break;
                 if (string.IsNullOrWhiteSpace(line)) continue;
-                using var document = JsonDocument.Parse(line);
+                JsonDocument document;
+                try { document = JsonDocument.Parse(line); }
+                catch (JsonException) { break; }
+                using (document)
+                {
                 var root = document.RootElement;
-                if (!root.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String ||
-                    !string.Equals(type.GetString(), "session_meta", StringComparison.Ordinal))
-                    continue;
-                if (!root.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object ||
-                    !payload.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String)
-                    return null;
-                return id.GetString();
+                    AddLatestTimestamp(root, ref lastModified);
+                    if (!root.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String ||
+                        !root.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
+                        continue;
+                    AddLatestTimestamp(payload, ref lastModified);
+                    if (string.Equals(type.GetString(), "session_meta", StringComparison.Ordinal))
+                    {
+                        sessionId ??= GetString(payload, "id");
+                        title ??= GetString(payload, "title") ?? GetString(payload, "thread_name");
+                        cwd ??= GetString(payload, "cwd") ?? GetString(payload, "working_directory");
+                    }
+                    else if (firstUser is null &&
+                             string.Equals(type.GetString(), "response_item", StringComparison.Ordinal))
+                    {
+                        firstUser = ReadCodexUserPreview(payload);
+                    }
+                }
             }
+            if (!IsSafeCodexSessionId(sessionId)) return null;
+            return new DisplayMetadata(
+                sessionId!,
+                string.IsNullOrWhiteSpace(title) ? firstUser : title,
+                cwd,
+                lastModified,
+                HasReadableNativeStructure: true);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-                                          DecoderFallbackException or JsonException or OverflowException)
+                                          DecoderFallbackException or ArgumentException)
         {
             return null;
         }
+    }
+
+    private static async Task<DisplayMetadata?> ReadGrokMetadataAsync(
+        string directory,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var summaryPath = Path.Combine(directory, "summary.json");
+            if (!File.Exists(summaryPath)) return null;
+            var summary = await ReadBoundedPrefixAsync(summaryPath, cancellationToken).ConfigureAwait(false);
+            if (!summary.IsComplete) return null;
+            using var document = JsonDocument.Parse(summary.Text);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("info", out var info) ||
+                info.ValueKind != JsonValueKind.Object)
+                return null;
+            var metadataId = GetString(info, "id");
+            if (!string.Equals(metadataId, sessionId, StringComparison.OrdinalIgnoreCase)) return null;
+            var title = GetString(info, "title") ?? GetString(root, "title");
+            var cwd = GetString(info, "cwd") ?? GetString(root, "cwd");
+            DateTimeOffset? modified = null;
+            AddLatestTimestamp(info, ref modified);
+            AddLatestTimestamp(root, ref modified);
+            var chatPath = Path.Combine(directory, "chat_history.jsonl");
+            var chatExists = File.Exists(chatPath);
+            if (string.IsNullOrWhiteSpace(title) && chatExists)
+                title = await ReadGrokUserPreviewAsync(chatPath, cancellationToken).ConfigureAwait(false);
+            return new DisplayMetadata(sessionId, title, cwd, modified, chatExists);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          DecoderFallbackException or JsonException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<string?> ReadGrokUserPreviewAsync(string path, CancellationToken cancellationToken)
+    {
+        var prefix = await ReadBoundedPrefixAsync(path, cancellationToken).ConfigureAwait(false);
+        using var reader = new StringReader(prefix.Text);
+        for (var record = 0; record < MaximumMetadataRecords && reader.ReadLine() is { } line; record++)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (string.Equals(GetString(root, "role") ?? GetString(root, "type"), "user",
+                        StringComparison.Ordinal))
+                    return Preview(ReadTextContent(root, "input_text"));
+            }
+            catch (JsonException) { return null; }
+        }
         return null;
+    }
+
+    private static string? ReadCodexUserPreview(JsonElement payload)
+    {
+        if (!string.Equals(GetString(payload, "type"), "message", StringComparison.Ordinal) ||
+            !string.Equals(GetString(payload, "role"), "user", StringComparison.Ordinal))
+            return null;
+        return Preview(ReadTextContent(payload, "input_text"));
+    }
+
+    private static string? ReadTextContent(JsonElement element, string expectedType)
+    {
+        if (!element.TryGetProperty("content", out var content)) return null;
+        if (content.ValueKind == JsonValueKind.String) return content.GetString();
+        if (content.ValueKind != JsonValueKind.Array) return null;
+        foreach (var block in content.EnumerateArray())
+        {
+            if (block.ValueKind == JsonValueKind.Object &&
+                string.Equals(GetString(block, "type"), expectedType, StringComparison.Ordinal) &&
+                GetString(block, "text") is { } text)
+                return text;
+        }
+        return null;
+    }
+
+    private static string? Preview(string? value)
+    {
+        var trimmed = value?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return null;
+        return trimmed.Length <= MaximumTitleLength ? trimmed : trimmed[..MaximumTitleLength];
+    }
+
+    private static void AddLatestTimestamp(JsonElement element, ref DateTimeOffset? latest)
+    {
+        foreach (var name in new[]
+                 {
+                     "timestamp", "created_at", "createdAt", "updated_at", "updatedAt", "last_modified_at",
+                     "lastModifiedAt"
+                 })
+        {
+            if (element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String &&
+                DateTimeOffset.TryParse(value.GetString(), out var timestamp) &&
+                (latest is null || timestamp > latest))
+                latest = timestamp;
+        }
+    }
+
+    private static string? GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static async Task<BoundedPrefix> ReadBoundedPrefixAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
+        var length = checked((int)Math.Min(stream.Length, MaximumMetadataBytes));
+        var bytes = new byte[length];
+        var offset = 0;
+        while (offset < bytes.Length)
+        {
+            var read = await stream.ReadAsync(bytes.AsMemory(offset), cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            offset += read;
+        }
+        var isComplete = stream.Length <= MaximumMetadataBytes;
+        if (!isComplete)
+        {
+            var lastNewline = Array.LastIndexOf(bytes, (byte)'\n', offset - 1);
+            offset = lastNewline < 0 ? 0 : lastNewline + 1;
+        }
+        return new BoundedPrefix(Utf8.GetString(bytes, 0, offset), isComplete);
     }
 
     private static bool IsSafeCodexSessionId(string? value) =>
@@ -352,4 +479,13 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             return DateTimeOffset.MinValue;
         }
     }
+
+    private sealed record DisplayMetadata(
+        string SessionId,
+        string? Title,
+        string? WorkingDirectory,
+        DateTimeOffset? LastModifiedAt,
+        bool HasReadableNativeStructure);
+
+    private readonly record struct BoundedPrefix(string Text, bool IsComplete);
 }
