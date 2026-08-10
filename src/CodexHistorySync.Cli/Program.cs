@@ -9,7 +9,7 @@ ConsoleCancelEventHandler handler = (_, eventArgs) =>
 Console.CancelKeyPress += handler;
 try
 {
-    return await CliComposition.CreateDefault().RunAsync(args, cancellation.Token);
+    return await CliComposition.CreateDefault(args).RunAsync(args, cancellation.Token);
 }
 catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
 {
