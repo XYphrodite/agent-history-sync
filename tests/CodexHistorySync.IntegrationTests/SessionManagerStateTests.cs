@@ -134,12 +134,17 @@ public sealed class SessionManagerStateTests
     [Fact]
     public void Exposed_snapshot_panels_cannot_mutate_state()
     {
-        var state = new SessionManagerState(Snapshot([Session(ManagedAgent.Codex, "stable")], []));
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "stable")],
+            [Session(ManagedAgent.Grok, "stable-grok")]));
         var exposedCodex = Assert.IsAssignableFrom<IList<ManagedSession>>(state.Snapshot.Codex);
+        var exposedGrok = Assert.IsAssignableFrom<IList<ManagedSession>>(state.Snapshot.Grok);
 
         Assert.Throws<NotSupportedException>(() => exposedCodex[0] = Session(ManagedAgent.Codex, "replaced"));
+        Assert.Throws<NotSupportedException>(() => exposedGrok[0] = Session(ManagedAgent.Grok, "replaced-grok"));
 
         Assert.Equal("stable", state.SelectedSession!.SessionId);
+        Assert.Equal("stable-grok", state.ApplyNavigation(SessionManagerCommand.FocusRight).SelectedSession!.SessionId);
     }
 
     private static SessionCatalogSnapshot Snapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok) =>
