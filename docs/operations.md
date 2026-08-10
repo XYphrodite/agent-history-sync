@@ -48,6 +48,24 @@ All three commands call the same `SyncEngine` used by automation. Each command d
 
 Each successful publish rewrites `main` to a **single orphan commit** (force-with-lease against the CAS baseline). Previous commits become unreachable so GitHub can reclaim old encrypted blobs; the repository is a snapshot store, not an append-only audit log.
 
+## Local cross-agent session manager
+
+Start the manager with:
+
+```powershell
+agent-sync --manage
+```
+
+It is a local-only tool: it does not construct the Git/GitHub sync runtime, contact the network, open the configured repository, or write sync state, conflict evidence, tombstones, or background-task configuration. It reads only the native Codex and Grok session homes and performs an explicit local copy or local delete when requested.
+
+The screen has separate **Codex** and **Grok** panels. Each panel shows **Title** and **Last modified** columns; `[A]` marks an active session and `[U]` marks one that cannot safely be read. Use `Up`/`Down` to select, `Left`/`Right` to change panels, `C` to copy, `Delete` to request deletion, `R` to refresh, and `Q` or `Esc` to exit.
+
+`C` converts the selected readable, inactive session into the other agent's native format. The copied conversation keeps its title, available timestamps, and ordered user/assistant turns. System, reasoning, and tool content are omitted. The destination is always a newly generated native session identifier: the source remains unchanged and an existing destination session is never overwritten. Before a Codex destination is published, a configured or discovered Codex executable is checked with the disposable-profile compatibility probe; an automatically unavailable executable is the only normal case in which that probe is skipped.
+
+Copy and delete refuse an active, unreadable, malformed, changed, or out-of-root session. The manager rechecks activity and the exact source immediately before the final action. `Delete` first asks for confirmation and removes only the selected local native session: the selected Codex JSONL file or the selected Grok native session directory. It does not publish a deletion or write a tombstone. **Local deletion may be restored by sync** on a later pull or bidirectional synchronization.
+
+Refresh and action failures keep the displayed catalog safe and use stable messages such as `Session refresh failed.`, `Copy failed for session …`, or `Delete failed for session …`; they do not display native paths, conversation content, or raw exception details.
+
 Before hashing and upload, each session JSONL is reduced deterministically to a compact rediscovery view:
 
 - drop bulk runtime records (`compacted`, `turn_context`, `world_state`, inter-agent metadata, `event_msg`);
