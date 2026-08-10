@@ -26,6 +26,24 @@ public interface ILocalSessionOperations
     Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken);
 }
 
+public enum ManagedSessionOperationFailure { Copy, Delete }
+
+public sealed class ManagedSessionOperationException : Exception
+{
+    public ManagedSessionOperationException(ManagedSessionOperationFailure failure)
+        : base(failure switch
+        {
+            ManagedSessionOperationFailure.Copy => "The session copy failed.",
+            ManagedSessionOperationFailure.Delete => "The session deletion failed.",
+            _ => "The session operation failed."
+        })
+    {
+        Failure = failure;
+    }
+
+    public ManagedSessionOperationFailure Failure { get; }
+}
+
 public interface IManagedSessionActiveState
 {
     Task<bool> IsActiveAsync(

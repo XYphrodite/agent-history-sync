@@ -65,6 +65,24 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncKeepsActiveSafelyIdentifiableGrokDirectoryVisibleWhenChatIsMissing()
+    {
+        await using var fixture = new CatalogFixture();
+        var sessionId = "31000000-0000-0000-0000-000000000003";
+        var sessionPath = await fixture.WriteGrokSummaryOnlyAsync(sessionId, "Missing chat");
+        fixture.ActiveState.ActiveIds.Add(sessionId);
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        var session = Assert.Single(snapshot.Grok);
+        Assert.Equal(sessionId, session.SessionId);
+        Assert.Equal(Path.GetFullPath(sessionPath), session.NativePath);
+        Assert.Equal("Missing chat", session.Title);
+        Assert.True(session.IsActive);
+        Assert.False(session.CanRead);
+    }
+
+    [Fact]
     public async Task ScanAsyncKeepsSafelyIdentifiableMalformedEntriesAsUnreadable()
     {
         await using var fixture = new CatalogFixture();
@@ -108,6 +126,23 @@ public sealed class LocalSessionCatalogTests
         var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
 
         Assert.Empty(snapshot.Codex);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesBoundedMetadataWithoutInvokingFullConversationReaderForLargeTail()
+    {
+        await using var fixture = new CatalogFixture();
+        var path = await fixture.WriteCodexAsync(
+            "bounded-codex", "Bounded title", "question", "2026-08-09T15:00:00Z");
+        var largeTail = "{\"type\":\"event_msg\",\"payload\":{\"ignored\":\"" +
+                        new string('x', 2 * 1024 * 1024);
+        await File.AppendAllTextAsync(path, largeTail + "\n", new UTF8Encoding(false));
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        var session = Assert.Single(snapshot.Codex);
+        Assert.Equal("Bounded title", session.Title);
+        Assert.True(new FileInfo(path).Length > 2 * 1024 * 1024);
     }
 
     [Fact]
@@ -237,6 +272,22 @@ public sealed class LocalSessionCatalogTests
             return session;
         }
 
+        public async Task<string> WriteGrokSummaryOnlyAsync(string id, string title)
+        {
+            var session = GrokPaths.SessionDirectory(WorkingDirectory, id);
+            Directory.CreateDirectory(session);
+            await File.WriteAllTextAsync(Path.Combine(session, "summary.json"),
+                JsonSerializer.Serialize(new
+                {
+                    info = new
+                    {
+                        id, cwd = WorkingDirectory, title,
+                        created_at = "2026-08-09T08:00:00Z", updated_at = "2026-08-09T16:00:00Z"
+                    }
+                }), Utf8);
+            return session;
+        }
+
         public static async Task WriteGrokFilesAsync(
             string session,
             string id,
@@ -293,4 +344,5 @@ public sealed class LocalSessionCatalogTests
             return Task.FromResult(ActiveIds.Contains(sessionId));
         }
     }
+
 }

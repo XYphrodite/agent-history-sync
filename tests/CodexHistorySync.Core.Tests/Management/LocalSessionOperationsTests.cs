@@ -59,13 +59,13 @@ public sealed class LocalSessionOperationsTests
         var newlyActivePath = await fixture.WriteCodexAsync("newly-active", "Newly active", "q", "a");
         fixture.ActiveState.ActiveIds.Add("newly-active");
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.CreateOperations().CopyAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
             fixture.Session(ManagedAgent.Codex, "declared-active", declaredActivePath) with { IsActive = true },
             CancellationToken.None));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.CreateOperations().CopyAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
             fixture.Session(ManagedAgent.Codex, "declared-unreadable", unreadablePath) with { CanRead = false },
             CancellationToken.None));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.CreateOperations().CopyAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
             fixture.Session(ManagedAgent.Codex, "newly-active", newlyActivePath), CancellationToken.None));
 
         Assert.Empty(fixture.CodexWriter.Conversations);
@@ -81,7 +81,7 @@ public sealed class LocalSessionOperationsTests
         var outsidePath = await fixture.WriteCodexAsync(
             "outside-source", "Outside", "q", "a", outsideDirectory.FullName);
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.CreateOperations().CopyAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
             fixture.Session(ManagedAgent.Codex, "outside-source", outsidePath), CancellationToken.None));
 
         Assert.True(File.Exists(outsidePath));
@@ -107,7 +107,7 @@ public sealed class LocalSessionOperationsTests
                 $"Symbolic-link creation is unavailable: {exception.GetType().Name}");
         }
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.CreateOperations().CopyAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
             fixture.Session(ManagedAgent.Codex, "linked-source", link), CancellationToken.None));
 
         Assert.True(File.Exists(outsidePath));
@@ -121,7 +121,7 @@ public sealed class LocalSessionOperationsTests
         var path = await fixture.WriteCodexAsync("changing-source", "Changing", "q", "a");
         var reader = new MutatingReader(new CodexConversationReader(), path);
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.CreateOperations(codexReader: reader).CopyAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations(codexReader: reader).CopyAsync(
             fixture.Session(ManagedAgent.Codex, "changing-source", path), CancellationToken.None));
 
         Assert.True(reader.Mutated);
@@ -174,11 +174,146 @@ public sealed class LocalSessionOperationsTests
         var path = await fixture.WriteCodexAsync("became-active", "Active", "q", "a");
         fixture.ActiveState.ActiveIds.Add("became-active");
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.CreateOperations().DeleteAsync(
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().DeleteAsync(
             fixture.Session(ManagedAgent.Codex, "became-active", path), CancellationToken.None));
 
         Assert.True(File.Exists(path));
         Assert.Contains(fixture.ActiveState.Checks, check => check.SessionId == "became-active");
+    }
+
+    [Fact]
+    public async Task CopyAsyncReturnsFixedSafeErrorWhenActiveStateFailureContainsSecrets()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("active-error", "Active", "q", "a");
+        const string secret = "C:\\private\\sessions\\token=secret-active";
+        fixture.ActiveState.Failure = new IOException(secret);
+
+        await AssertSafeFailureAsync(
+            () => fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "active-error", path), CancellationToken.None),
+            "The session copy failed.", secret, path);
+    }
+
+    [Fact]
+    public async Task CopyAsyncReturnsFixedSafeErrorWhenReaderOrWriterFailureContainsSecrets()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("copy-error", "Copy", "q", "a");
+        const string readerSecret = "C:\\private\\reader-token";
+        const string writerSecret = "C:\\private\\writer-token";
+
+        await AssertSafeFailureAsync(
+            () => fixture.CreateOperations(codexReader: new ThrowingReader(readerSecret)).CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "copy-error", path), CancellationToken.None),
+            "The session copy failed.", readerSecret, path);
+
+        fixture.GrokWriter.Failure = new IOException(writerSecret);
+        await AssertSafeFailureAsync(
+            () => fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "copy-error", path), CancellationToken.None),
+            "The session copy failed.", writerSecret, path);
+    }
+
+    [Fact]
+    public async Task CopyAsyncReturnsFixedSafeErrorWhenPathValidationContainsSensitiveTarget()
+    {
+        await using var fixture = new OperationsFixture();
+        var secretDirectory = Directory.CreateDirectory(Path.Combine(fixture.Root, "private-token-directory"));
+        var path = await fixture.WriteCodexAsync("path-error", "Path", "q", "a", secretDirectory.FullName);
+
+        await AssertSafeFailureAsync(
+            () => fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "path-error", path), CancellationToken.None),
+            "The session copy failed.", "private-token-directory", path);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncReturnsFixedSafeErrorWhenOwnedDeleterFailureContainsSecrets()
+    {
+        await using var fixture = new OperationsFixture();
+        var id = "41000000-0000-0000-0000-000000000004";
+        var path = await fixture.WriteGrokAsync(id, "Delete", "q", "a");
+        const string secret = "C:\\private\\deleter-token";
+        fixture.DirectoryDeleter.Failure = new IOException(secret);
+
+        await AssertSafeFailureAsync(
+            () => fixture.CreateOperations().DeleteAsync(
+                fixture.Session(ManagedAgent.Grok, id, path), CancellationToken.None),
+            "The session deletion failed.", secret, path);
+        Assert.True(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task CopyAsyncRevalidatesTargetReplacedDuringAwaitedActiveCheckBeforeWriter()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("copy-race", "Original", "q", "a");
+        fixture.ActiveState.BeforeResult = async () =>
+        {
+            await Task.Yield();
+            await fixture.WriteCodexAsync("copy-race", "Replacement", "changed", "changed");
+        };
+
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
+            fixture.Session(ManagedAgent.Codex, "copy-race", path), CancellationToken.None));
+
+        Assert.Empty(fixture.GrokWriter.Conversations);
+        Assert.Contains("Replacement", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncRevalidatesAncestorReplacedDuringAwaitedActiveCheckBeforeFileDelete()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("delete-race", "Original", "q", "a");
+        var yearDirectory = Path.Combine(fixture.CodexPaths.Sessions, "2026");
+        var preserved = Path.Combine(fixture.Root, "preserved-original-year");
+        fixture.ActiveState.BeforeResult = async () =>
+        {
+            await Task.Yield();
+            Directory.Move(yearDirectory, preserved);
+            await fixture.WriteCodexAsync("delete-race", "Replacement", "changed", "changed");
+        };
+
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().DeleteAsync(
+            fixture.Session(ManagedAgent.Codex, "delete-race", path), CancellationToken.None));
+
+        Assert.True(File.Exists(path));
+        Assert.Contains("Replacement", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        Assert.True(Directory.Exists(preserved));
+    }
+
+    [Fact]
+    public async Task CopyAsyncRevalidatesTargetReplacedDuringAwaitedFingerprintBeforeWriter()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("fingerprint-race", "Original", "q", "a");
+        var fingerprint = new RacingCodexFingerprintProvider(async () =>
+        {
+            await Task.Yield();
+            await fixture.WriteCodexAsync("fingerprint-race", "Replacement", "changed", "changed");
+        });
+
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture
+            .CreateOperations(fingerprintProvider: fingerprint)
+            .CopyAsync(fixture.Session(ManagedAgent.Codex, "fingerprint-race", path), CancellationToken.None));
+
+        Assert.Empty(fixture.GrokWriter.Conversations);
+        Assert.Contains("Replacement", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        Assert.True(fingerprint.RaceInjected);
+    }
+
+    private static async Task AssertSafeFailureAsync(
+        Func<Task> action,
+        string expectedMessage,
+        params string[] sensitiveValues)
+    {
+        var exception = await Assert.ThrowsAnyAsync<Exception>(action);
+        Assert.Equal(expectedMessage, exception.Message);
+        Assert.Null(exception.InnerException);
+        foreach (var sensitive in sensitiveValues)
+            Assert.DoesNotContain(sensitive, exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed class OperationsFixture : IAsyncDisposable
@@ -216,7 +351,9 @@ public sealed class LocalSessionOperationsTests
         public RecordingDirectoryDeleter DirectoryDeleter { get; } = new();
         public List<string> ReparsePaths { get; } = [];
 
-        public LocalSessionOperations CreateOperations(IConversationReader? codexReader = null) => new(
+        public LocalSessionOperations CreateOperations(
+            IConversationReader? codexReader = null,
+            IManagedSessionFingerprintProvider? fingerprintProvider = null) => new(
             CodexPaths,
             GrokPaths,
             ActiveState,
@@ -224,7 +361,8 @@ public sealed class LocalSessionOperationsTests
             CodexWriter,
             GrokWriter,
             codexReader ?? new CodexConversationReader(),
-            new GrokConversationReader());
+            new GrokConversationReader(),
+            fingerprintProvider);
 
         public ManagedSession Session(ManagedAgent agent, string id, string path) =>
             new(agent, id, Path.GetFullPath(path), id, DateTimeOffset.UtcNow, IsActive: false, CanRead: true);
@@ -357,8 +495,10 @@ public sealed class LocalSessionOperationsTests
     {
         public HashSet<string> ActiveIds { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<(ManagedAgent Agent, string SessionId, string NativePath)> Checks { get; } = [];
+        public Exception? Failure { get; set; }
+        public Func<Task>? BeforeResult { get; set; }
 
-        public Task<bool> IsActiveAsync(
+        public async Task<bool> IsActiveAsync(
             ManagedAgent agent,
             string sessionId,
             string nativePath,
@@ -366,7 +506,9 @@ public sealed class LocalSessionOperationsTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Checks.Add((agent, sessionId, nativePath));
-            return Task.FromResult(ActiveIds.Contains(sessionId));
+            if (Failure is not null) throw Failure;
+            if (BeforeResult is not null) await BeforeResult();
+            return ActiveIds.Contains(sessionId);
         }
     }
 
@@ -374,12 +516,14 @@ public sealed class LocalSessionOperationsTests
     {
         public List<PortableConversation> Conversations { get; } = [];
         public ConversationWriteResult Result { get; set; } = new(defaultSessionId, defaultSessionId + "-path");
+        public Exception? Failure { get; set; }
 
         public Task<ConversationWriteResult> WriteAsync(
             PortableConversation conversation,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (Failure is not null) throw Failure;
             Conversations.Add(conversation);
             return Task.FromResult(Result);
         }
@@ -388,10 +532,12 @@ public sealed class LocalSessionOperationsTests
     private sealed class RecordingDirectoryDeleter : IManagedSessionDirectoryDeleter
     {
         public List<(string Root, string Target)> Deletions { get; } = [];
+        public Exception? Failure { get; set; }
 
         public Task DeleteAsync(string sessionsRoot, string sessionDirectory, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (Failure is not null) throw Failure;
             var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionsRoot));
             var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionDirectory));
             if (!target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -412,6 +558,36 @@ public sealed class LocalSessionOperationsTests
             await File.AppendAllTextAsync(path, "\n", cancellationToken);
             Mutated = true;
             return result;
+        }
+    }
+
+    private sealed class ThrowingReader(string message) : IConversationReader
+    {
+        public Task<PortableConversation> ReadAsync(string nativePath, CancellationToken cancellationToken) =>
+            throw new InvalidDataException(message);
+    }
+
+    private sealed class RacingCodexFingerprintProvider(Func<Task> injectRace)
+        : IManagedSessionFingerprintProvider
+    {
+        private int captureCount;
+        public bool RaceInjected { get; private set; }
+
+        public async Task<byte[]> CaptureAsync(
+            string nativePath,
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(ManagedAgent.Codex, agent);
+            await using var stream = new FileStream(nativePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
+            var fingerprint = await System.Security.Cryptography.SHA256.HashDataAsync(stream, cancellationToken);
+            if (++captureCount == 2)
+            {
+                await injectRace();
+                RaceInjected = true;
+            }
+            return fingerprint;
         }
     }
 }
