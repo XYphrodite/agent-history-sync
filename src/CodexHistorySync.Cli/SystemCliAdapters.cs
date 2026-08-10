@@ -177,6 +177,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
 
 internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDirectoryDeleter
 {
+    private readonly Func<bool>? afterRootPathValidation;
     private readonly Func<bool>? afterPathValidation;
     private readonly Func<bool>? afterTreeCapture;
 
@@ -187,7 +188,16 @@ internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDir
     internal WindowsManagedSessionDirectoryDeleter(
         Func<bool>? afterPathValidation,
         Func<bool>? afterTreeCapture)
+        : this(null, afterPathValidation, afterTreeCapture)
     {
+    }
+
+    internal WindowsManagedSessionDirectoryDeleter(
+        Func<bool>? afterRootPathValidation,
+        Func<bool>? afterPathValidation,
+        Func<bool>? afterTreeCapture)
+    {
+        this.afterRootPathValidation = afterRootPathValidation;
         this.afterPathValidation = afterPathValidation;
         this.afterTreeCapture = afterTreeCapture;
     }
@@ -204,20 +214,26 @@ internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDir
             !target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected session directory is outside the sessions root.");
 
-        RequireConcreteAncestors(root, target);
+        if (!WindowsOwnedTreeDeleter.TryGetIdentity(root, out var expectedRootIdentity))
+            throw new IOException("The sessions root identity is unavailable.");
+        RequireConcreteAncestors(root, target, afterRootPathValidation);
         if (afterPathValidation is not null && !afterPathValidation())
             throw new IOException("The selected session directory changed before deletion.");
         cancellationToken.ThrowIfCancellationRequested();
         if (!WindowsOwnedTreeDeleter.TryDeleteDescendantTree(
                 root,
                 target,
+                expectedRootIdentity,
                 afterTreeCapture,
                 () => { cancellationToken.ThrowIfCancellationRequested(); return true; }))
             throw new IOException("The selected session directory could not be deleted safely.");
         return Task.CompletedTask;
     }
 
-    private static void RequireConcreteAncestors(string root, string target)
+    private static void RequireConcreteAncestors(
+        string root,
+        string target,
+        Func<bool>? afterRootPathValidation)
     {
         for (var current = target;; current = Path.GetDirectoryName(current)
                  ?? throw new InvalidDataException("The selected session directory has no sessions-root ancestor."))
@@ -225,7 +241,10 @@ internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDir
             var attributes = File.GetAttributes(current);
             if (!attributes.HasFlag(FileAttributes.Directory) || attributes.HasFlag(FileAttributes.ReparsePoint))
                 throw new InvalidDataException("The selected session directory is not a concrete directory.");
-            if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return;
+            if (!string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) continue;
+            if (afterRootPathValidation is not null && !afterRootPathValidation())
+                throw new IOException("The sessions root changed during validation.");
+            return;
         }
     }
 

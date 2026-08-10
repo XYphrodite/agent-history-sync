@@ -95,6 +95,7 @@ internal static class WindowsOwnedTreeDeleter
     }
 
     public static bool TryDeleteDescendantTree(string rootPath, string targetPath,
+        FileIdentity expectedRootIdentity,
         Func<bool>? afterTreeCapture = null, Func<bool>? beforeFirstMutation = null)
     {
         if (!OperatingSystem.IsWindows()) return false;
@@ -122,6 +123,7 @@ internal static class WindowsOwnedTreeDeleter
                 throw;
             }
             retained.Add(anchor);
+            RequireIdentity(anchor, expectedRootIdentity);
             RequireConcreteType(anchor, expectDirectory: true);
 
             var current = anchor;
