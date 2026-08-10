@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using CodexHistorySync.Core.Conversion;
 
 namespace CodexHistorySync.Core.Tests.Conversion;
@@ -46,6 +47,23 @@ public sealed class CodexConversationReaderTests
         Assert.Equal(new string('u', 80), result.Title);
     }
 
+    [Fact]
+    public async Task ReadAsyncExcludesReasoningAndToolBlocksNestedInMessages()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var path = await fixture.WriteFileAsync("session.jsonl", """
+            {"type":"session_meta","payload":{"id":"safe-id"}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"},{"type":"reasoning","text":"private reasoning"},{"type":"tool_call","text":"private tool call"}]}}
+            {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"},{"type":"tool_result","text":"private tool result"}]}}
+            """);
+
+        var result = await new CodexConversationReader().ReadAsync(path, CancellationToken.None);
+
+        Assert.Collection(result.Turns,
+            turn => Assert.Equal(new PortableTurn(ConversationRole.User, "question"), turn),
+            turn => Assert.Equal(new PortableTurn(ConversationRole.Assistant, "answer"), turn));
+    }
+
     [Theory]
     [InlineData("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}\n", "missing session metadata")]
     [InlineData("{\"type\":\"session_meta\",\"payload\":{\"id\":\"first\"}}\n{\"type\":\"session_meta\",\"payload\":{\"id\":\"second\"}}\n", "conflicting session IDs")]
@@ -69,6 +87,20 @@ public sealed class CodexConversationReaderTests
 
         await Assert.ThrowsAsync<InvalidDataException>(() => new CodexConversationReader().ReadAsync(invalidUtf8, CancellationToken.None));
         await Assert.ThrowsAsync<InvalidDataException>(() => new CodexConversationReader().ReadAsync(invalidJson, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("unsafe:id")]
+    [InlineData("unsafe*id")]
+    [InlineData("unsafe\u001fid")]
+    public async Task ReadAsyncRejectsReservedAndControlCharacterSessionIds(string sessionId)
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var path = await fixture.WriteFileAsync("session.jsonl",
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":" + JsonSerializer.Serialize(sessionId) + "}}\n" +
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}\n");
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => new CodexConversationReader().ReadAsync(path, CancellationToken.None));
     }
 
     [Fact]

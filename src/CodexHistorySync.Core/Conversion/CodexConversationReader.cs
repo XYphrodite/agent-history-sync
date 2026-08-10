@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace CodexHistorySync.Core.Conversion;
 
@@ -7,6 +8,7 @@ public sealed class CodexConversationReader : IConversationReader
 {
     private const int TitlePreviewLength = 80;
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly Regex SafeSessionId = new("^[A-Za-z0-9][A-Za-z0-9._-]*$", RegexOptions.CultureInvariant);
 
     public async Task<PortableConversation> ReadAsync(string nativePath, CancellationToken cancellationToken)
     {
@@ -114,12 +116,12 @@ public sealed class CodexConversationReader : IConversationReader
         if (conversationRole is null) return false;
 
         timestamp = ReadTimestamp(payload) ?? ReadTimestamp(root);
-        var text = ReadMessageText(payload);
+        var text = ReadMessageText(payload, conversationRole.Value);
         if (!string.IsNullOrWhiteSpace(text)) turn = new PortableTurn(conversationRole.Value, text);
         return true;
     }
 
-    private static string? ReadMessageText(JsonElement payload)
+    private static string? ReadMessageText(JsonElement payload, ConversationRole role)
     {
         if (!payload.TryGetProperty("content", out var content)) return null;
         if (content.ValueKind == JsonValueKind.String) return content.GetString();
@@ -129,12 +131,19 @@ public sealed class CodexConversationReader : IConversationReader
         foreach (var block in content.EnumerateArray())
         {
             if (block.ValueKind != JsonValueKind.Object ||
+                !block.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String ||
+                !IsTextBlock(type.GetString(), role) ||
                 !block.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String)
                 continue;
             blocks.Add(text.GetString()!);
         }
         return blocks.Count == 0 ? null : string.Concat(blocks);
     }
+
+    private static bool IsTextBlock(string? type, ConversationRole role) =>
+        role == ConversationRole.User
+            ? string.Equals(type, "input_text", StringComparison.Ordinal)
+            : string.Equals(type, "output_text", StringComparison.Ordinal);
 
     private static void AddTimestamp(JsonElement element, ICollection<DateTimeOffset> timestamps)
     {
@@ -167,8 +176,7 @@ public sealed class CodexConversationReader : IConversationReader
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String &&
         string.Equals(value.GetString(), expected, StringComparison.Ordinal);
 
-    private static bool IsSafeSessionId(string value) =>
-        !Path.IsPathRooted(value) && !value.Contains('/') && !value.Contains('\\') && value is not "." and not "..";
+    private static bool IsSafeSessionId(string value) => SafeSessionId.IsMatch(value);
 
     private static string Preview(string? text)
     {
