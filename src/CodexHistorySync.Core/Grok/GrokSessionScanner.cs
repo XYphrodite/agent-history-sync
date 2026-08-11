@@ -17,6 +17,11 @@ public sealed class GrokSessionScanner
         waitForStability = ct => Task.Delay(stabilityDelay, ct);
     }
 
+    internal GrokSessionScanner(Func<CancellationToken, Task> waitForStability)
+    {
+        this.waitForStability = waitForStability ?? throw new ArgumentNullException(nameof(waitForStability));
+    }
+
     public async Task<SessionScanResult> ScanDetailedAsync(GrokPaths paths, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -48,6 +53,7 @@ public sealed class GrokSessionScanner
         }
 
         var complete = true;
+        var candidates = new List<ObservedCandidate>();
         foreach (var chatPath in chatFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -58,7 +64,23 @@ public sealed class GrokSessionScanner
             // Skip sessions currently open in a live Grok CLI process.
             if (activeIds.Contains(sessionId)) { complete = false; continue; }
 
-            var item = await ReadStableAsync(sessionDir, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                candidates.Add(new ObservedCandidate(sessionDir, chatPath, ReadObservation(chatPath)));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                complete = false;
+            }
+        }
+
+        if (candidates.Count != 0)
+            await waitForStability(cancellationToken).ConfigureAwait(false);
+
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var item = ReadStable(candidate, cancellationToken);
             if (item is null) { complete = false; continue; }
             if (objectsById.TryAdd(item.Id, item)) objects.Add(item);
             else
@@ -73,26 +95,26 @@ public sealed class GrokSessionScanner
         return new SessionScanResult(objects, uncertain, duplicates);
     }
 
-    private async Task<LocalObject?> ReadStableAsync(string sessionDirectory, CancellationToken cancellationToken)
+    private static LocalObject? ReadStable(
+        ObservedCandidate candidate,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var chatPath = GrokSessionPackage.ChatHistoryPath(sessionDirectory);
-            var first = ReadObservation(chatPath);
-            await waitForStability(cancellationToken).ConfigureAwait(false);
-            var second = ReadObservation(chatPath);
-            if (first != second) return null;
+            cancellationToken.ThrowIfCancellationRequested();
+            var second = ReadObservation(candidate.ChatPath);
+            if (candidate.First != second) return null;
 
-            var package = GrokSessionPackage.BuildFromDirectory(sessionDirectory);
+            var package = GrokSessionPackage.BuildFromDirectory(candidate.SessionDirectory);
             if (package.Length == 0) return null;
             var hash = GrokSessionPackage.HashPackage(package);
-            var sessionId = Path.GetFileName(Path.TrimEndingDirectorySeparator(sessionDirectory));
+            var sessionId = Path.GetFileName(Path.TrimEndingDirectorySeparator(candidate.SessionDirectory));
             var logicalId = new LogicalObjectId(GrokSessionPackage.ToLogicalId(sessionId));
 
             return new LocalObject(
                 logicalId,
                 ObjectKind.GrokSession,
-                Path.GetFullPath(chatPath),
+                Path.GetFullPath(candidate.ChatPath),
                 hash,
                 package.LongLength,
                 new DateTimeOffset(second.LastWriteTimeUtc, TimeSpan.Zero));
@@ -136,4 +158,8 @@ public sealed class GrokSessionScanner
     }
 
     private readonly record struct FileObservation(long Length, DateTime LastWriteTimeUtc);
+    private readonly record struct ObservedCandidate(
+        string SessionDirectory,
+        string ChatPath,
+        FileObservation First);
 }
