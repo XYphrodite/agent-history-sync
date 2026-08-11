@@ -45,6 +45,26 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncChecksActivityOncePerAgent()
+    {
+        // Per-row process queries make startup cost grow with the number of displayed sessions.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("activity-codex-one", null, "one", "2026-08-09T10:00:00Z");
+        await fixture.WriteCodexAsync("activity-codex-two", null, "two", "2026-08-09T11:00:00Z");
+        await fixture.WriteGrokAsync(
+            "51000000-0000-0000-0000-000000000001", null, "one", "2026-08-09T12:00:00Z");
+        await fixture.WriteGrokAsync(
+            "52000000-0000-0000-0000-000000000002", null, "two", "2026-08-09T13:00:00Z");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal(2, snapshot.Codex.Count);
+        Assert.Equal(2, snapshot.Grok.Count);
+        Assert.Equal(1, fixture.ActiveState.TotalQueries[ManagedAgent.Codex]);
+        Assert.Equal(1, fixture.ActiveState.TotalQueries[ManagedAgent.Grok]);
+    }
+
+    [Fact]
     public async Task ScanAsyncKeepsActiveEntriesVisibleWhenNativeScannerDefersThem()
     {
         await using var fixture = new CatalogFixture();
@@ -333,6 +353,14 @@ public sealed class LocalSessionCatalogTests
     private sealed class FakeActiveState : IManagedSessionActiveState
     {
         public HashSet<string> ActiveIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<ManagedAgent, int> TotalQueries { get; } = new();
+
+        public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TotalQueries[agent] = TotalQueries.GetValueOrDefault(agent) + 1;
+            return Task.FromResult(ActiveIds.Count != 0);
+        }
 
         public Task<bool> IsActiveAsync(
             ManagedAgent agent,
@@ -341,6 +369,7 @@ public sealed class LocalSessionCatalogTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            TotalQueries[agent] = TotalQueries.GetValueOrDefault(agent) + 1;
             return Task.FromResult(ActiveIds.Contains(sessionId));
         }
     }
