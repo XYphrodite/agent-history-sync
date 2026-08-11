@@ -133,8 +133,10 @@ public sealed class SpectreSessionManagerViewTests
         var console = CreateConsole(out var output, 80, 24);
         var input = new FakeInput(Key(ConsoleKey.Y));
         var view = new SpectreSessionManagerView(console, input);
+        var session = Session(ManagedAgent.Codex, "safe", "Title [private]");
+        view.Render(new SessionManagerState(Snapshot([session], [])));
 
-        var confirmed = view.ConfirmLocalDelete(Session(ManagedAgent.Codex, "safe", "Title [private]"));
+        var confirmed = view.ConfirmLocalDelete(session);
 
         Assert.True(confirmed);
         Assert.Contains("local only", output.ToString(), StringComparison.OrdinalIgnoreCase);
@@ -154,20 +156,63 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
-    public async Task Composed_loop_keeps_refusal_visible_after_the_next_redraw()
+    public async Task Composed_loop_keeps_refusal_visible()
     {
-        const string clear = "\u001b[2J\u001b[H";
         var console = CreateConsole(out var output, 80, 24, ansi: true);
-        var input = new FakeInput(Key(ConsoleKey.C), Key(ConsoleKey.Q));
+        var input = new RecordingInput(output, Key(ConsoleKey.C), Key(ConsoleKey.Q));
         var view = new SpectreSessionManagerView(console, input);
         var snapshot = Snapshot([Session(ManagedAgent.Codex, "active", "Active", isActive: true)], []);
         var application = new SessionManagerApplication(new FixedCatalog(snapshot), new RejectOperations(), view);
 
         await application.RunAsync(CancellationToken.None);
 
+        Assert.DoesNotContain("Active sessions cannot be copied.", input.RenderedBeforeReads[0]);
+        var subsequentFrame = input.RenderedBeforeReads[1];
+        var panels = subsequentFrame.LastIndexOf("Last modified", StringComparison.Ordinal);
+        var refusal = subsequentFrame.LastIndexOf("Active sessions cannot be copied.", StringComparison.Ordinal);
+        var footer = subsequentFrame.LastIndexOf("Q/Esc exit", StringComparison.Ordinal);
+        Assert.True(panels < refusal && refusal < footer,
+            "Expected the refusal inside the subsequent live frame.");
+    }
+
+    [Fact]
+    public async Task Live_confirmation_uses_frame()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var input = new RecordingInput(output, Key(ConsoleKey.Delete), Key(ConsoleKey.Y), Key(ConsoleKey.Q));
+        var view = new SpectreSessionManagerView(console, input);
+        var snapshot = Snapshot([Session(ManagedAgent.Codex, "codex", "Codex")], []);
+        var application = new SessionManagerApplication(new FixedCatalog(snapshot), new RejectOperations(), view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        var confirmationFrame = input.RenderedBeforeReads[1];
+        var panels = confirmationFrame.LastIndexOf("Last modified", StringComparison.Ordinal);
+        var warning = confirmationFrame.LastIndexOf("Local only: delete", StringComparison.Ordinal);
+        var footer = confirmationFrame.LastIndexOf("Q/Esc exit", StringComparison.Ordinal);
+        Assert.True(panels < warning && warning < footer,
+            "Expected the confirmation inside the live frame.");
         var rendered = output.ToString();
-        var visibleFrame = rendered[(rendered.LastIndexOf(clear, StringComparison.Ordinal) + clear.Length)..];
-        Assert.Contains("Active sessions cannot be copied.", visibleFrame);
+        Assert.Contains("Local only: delete", rendered);
+        Assert.Contains("Sync may restore it", rendered);
+        Assert.DoesNotContain("\u001b[2J", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Initial_failure_survives_alternate_screen_exit()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console, new FakeInput());
+        var application = new SessionManagerApplication(new FailingCatalog(), new RejectOperations(), view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        var rendered = output.ToString();
+        var leaveDisplay = rendered.LastIndexOf("\u001b[?1049l", StringComparison.Ordinal);
+        var message = rendered.LastIndexOf("Session refresh failed.", StringComparison.Ordinal);
+        Assert.True(leaveDisplay >= 0 && message > leaveDisplay,
+            "Expected the initial refresh failure after leaving the alternate screen.");
+        Assert.Equal(1, Count(rendered, "Session refresh failed."));
     }
 
     [Fact]
@@ -208,6 +253,28 @@ public sealed class SpectreSessionManagerViewTests
         Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
         Assert.Equal(1, Count(rendered, "\u001b[?25l"));
         Assert.Equal(1, Count(rendered, "\u001b[?25h"));
+    }
+
+    [Fact]
+    public async Task Display_teardown_does_not_leak_pending_message_into_next_session()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console, new FakeInput());
+        var state = new SessionManagerState(Snapshot([Session(ManagedAgent.Codex, "codex", "Codex")], []));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => view.RunDisplayAsync(_ =>
+        {
+            view.Render(state);
+            view.ShowMessage("stale message", isError: true);
+            return Task.FromException(new InvalidOperationException("Stop before the next frame."));
+        }, CancellationToken.None));
+        await view.RunDisplayAsync(_ =>
+        {
+            view.Render(state);
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+
+        Assert.DoesNotContain("stale message", output.ToString());
     }
 
     private static SessionCatalogSnapshot Snapshot(
@@ -256,6 +323,20 @@ public sealed class SpectreSessionManagerViewTests
         }
     }
 
+    private sealed class RecordingInput(StringWriter output, params ConsoleKeyInfo[] keys) : ISessionManagerInput
+    {
+        private readonly Queue<ConsoleKeyInfo> keys = new(keys);
+
+        public List<string> RenderedBeforeReads { get; } = [];
+
+        public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RenderedBeforeReads.Add(output.ToString());
+            return keys.Dequeue();
+        }
+    }
+
     private sealed class CancelingInput : ISessionManagerInput
     {
         public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken) =>
@@ -269,6 +350,12 @@ public sealed class SpectreSessionManagerViewTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(snapshot);
         }
+    }
+
+    private sealed class FailingCatalog : ILocalSessionCatalog
+    {
+        public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken) =>
+            Task.FromException<SessionCatalogSnapshot>(new IOException("Catalog unavailable."));
     }
 
     private sealed class RejectOperations : ILocalSessionOperations
