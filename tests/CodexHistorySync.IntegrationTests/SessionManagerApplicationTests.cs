@@ -6,6 +6,19 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class SessionManagerApplicationTests
 {
     [Fact]
+    public async Task RunAsyncUsesOneDisplaySession()
+    {
+        var catalog = new MutableCatalog(Snapshot([], []));
+        var view = new ScriptedView(SessionManagerCommand.Exit);
+        var application = new SessionManagerApplication(catalog, new MutatingOperations(catalog), view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Equal(1, view.DisplaySessions);
+        Assert.Single(view.RenderedStates);
+    }
+
+    [Fact]
     public async Task Refresh_copy_and_confirmed_delete_render_both_updated_panels()
     {
         var catalog = new MutableCatalog(Snapshot(
@@ -104,6 +117,14 @@ public sealed class SessionManagerApplicationTests
         public Queue<bool> DeleteConfirmations { get; } = new();
         public List<SessionManagerState> RenderedStates { get; } = [];
         public List<(string Message, bool IsError)> Messages { get; } = [];
+        public int DisplaySessions { get; private set; }
+
+        public async Task RunDisplayAsync(Func<CancellationToken, Task> interaction,
+            CancellationToken cancellationToken)
+        {
+            DisplaySessions++;
+            await interaction(cancellationToken);
+        }
 
         public void Render(SessionManagerState state) => RenderedStates.Add(state);
 

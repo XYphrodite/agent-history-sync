@@ -43,6 +43,12 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         this.input = input ?? throw new ArgumentNullException(nameof(input));
     }
 
+    public Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(interaction);
+        return interaction(cancellationToken);
+    }
+
     public void Render(SessionManagerState state)
     {
         ArgumentNullException.ThrowIfNull(state);
