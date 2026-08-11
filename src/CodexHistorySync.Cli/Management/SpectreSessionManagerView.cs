@@ -24,6 +24,8 @@ public sealed class SpectreSessionManagerInput(IAnsiConsole console) : ISessionM
 
 public sealed class SpectreSessionManagerView : ISessionManagerView
 {
+    private const string EnterDisplay = "\u001b[?1049h";
+    private const string LeaveDisplay = "\u001b[?1049l";
     private const int LayoutRows = 8;
     private const int MinimumPanelWidth = 28;
     private static readonly Style FocusedBorder = new(Color.Cyan1);
@@ -35,6 +37,8 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
 
     private readonly IAnsiConsole console;
     private readonly ISessionManagerInput input;
+    private LiveDisplayContext? liveContext;
+    private SessionManagerState? latestState;
     private PendingMessage? pendingMessage;
 
     public SpectreSessionManagerView(IAnsiConsole console, ISessionManagerInput input)
@@ -43,38 +47,67 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         this.input = input ?? throw new ArgumentNullException(nameof(input));
     }
 
-    public Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken)
+    public async Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(interaction);
-        return interaction(cancellationToken);
+        console.Write(new ControlCode(EnterDisplay));
+        try
+        {
+            await console.Live(new Text(string.Empty))
+                .AutoClear(true)
+                .Overflow(VerticalOverflow.Crop)
+                .StartAsync(async context =>
+                {
+                    liveContext = context;
+                    await interaction(cancellationToken).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+        }
+        finally
+        {
+            liveContext = null;
+            console.Write(new ControlCode(LeaveDisplay));
+        }
     }
 
     public void Render(SessionManagerState state)
     {
         ArgumentNullException.ThrowIfNull(state);
+        latestState = state;
+        var frame = BuildFrame(state);
+        if (liveContext is { } context)
+        {
+            context.UpdateTarget(frame);
+            context.Refresh();
+            return;
+        }
+
+        console.Write(frame);
+    }
+
+    private Rows BuildFrame(SessionManagerState state)
+    {
         var visibleRows = Math.Max(1, console.Profile.Height - LayoutRows);
         var displayState = state.SetViewportRows(visibleRows);
         var availableWidth = Math.Max(MinimumPanelWidth * 2 + 1, console.Profile.Width);
         var panelWidth = Math.Max(MinimumPanelWidth, (availableWidth - 1) / 2);
 
-        console.Write(new ControlCode("\u001b[2J\u001b[H"));
-        console.Write(new Columns(
+        var panels = new Columns(
         [
             BuildPanel(displayState, ManagedAgent.Codex, panelWidth),
             BuildPanel(displayState, ManagedAgent.Grok, panelWidth)
         ])
         {
             Expand = true
-        });
-        console.WriteLine();
-        if (pendingMessage is { } message)
-        {
-            WriteMessage(message.Message, message.IsError);
-            pendingMessage = null;
-        }
-        console.Write(new Text("↑/↓ select  ←/→ panel  C copy  Del delete  R refresh  Q/Esc exit",
-            new Style(Color.Grey)));
-        console.WriteLine();
+        };
+        var message = pendingMessage is { } pending
+            ? new Text(pending.Message, pending.IsError ? ErrorStyle : InformationStyle)
+            : new Text(string.Empty);
+        pendingMessage = null;
+        return new Rows(
+            panels,
+            message,
+            new Text("↑/↓ select  ←/→ panel  C copy  Del delete  R refresh  Q/Esc exit",
+                new Style(Color.Grey)));
     }
 
     public SessionManagerCommand ReadCommand(CancellationToken cancellationToken)
