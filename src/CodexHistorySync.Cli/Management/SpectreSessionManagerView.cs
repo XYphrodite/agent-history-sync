@@ -16,8 +16,10 @@ public sealed class SpectreSessionManagerInput(IAnsiConsole console) : ISessionM
 
     public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken)
     {
-        return console.Input.ReadKeyAsync(intercept: true, cancellationToken).GetAwaiter().GetResult()
-               ?? throw new InvalidOperationException("Interactive console input is unavailable.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var key = console.Input.ReadKeyAsync(intercept: true, cancellationToken).GetAwaiter().GetResult();
+        cancellationToken.ThrowIfCancellationRequested();
+        return key ?? throw new InvalidOperationException("Interactive console input is unavailable.");
     }
 }
 
