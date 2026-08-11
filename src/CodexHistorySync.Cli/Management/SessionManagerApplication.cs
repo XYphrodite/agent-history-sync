@@ -9,7 +9,10 @@ public sealed class SessionManagerApplication(
 {
     private const string DeleteSyncWarning = "Local deletion may be restored by sync.";
 
-    public async Task RunAsync(CancellationToken cancellationToken)
+    public Task RunAsync(CancellationToken cancellationToken) =>
+        view.RunDisplayAsync(RunLoopAsync, cancellationToken);
+
+    private async Task RunLoopAsync(CancellationToken cancellationToken)
     {
         SessionManagerState state;
         try
