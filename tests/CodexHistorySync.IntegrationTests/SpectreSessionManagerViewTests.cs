@@ -2,6 +2,7 @@ using System.Text;
 using CodexHistorySync.Cli.Management;
 using CodexHistorySync.Core.Management;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 namespace CodexHistorySync.IntegrationTests;
 
@@ -136,7 +137,7 @@ public sealed class SpectreSessionManagerViewTests
         var session = Session(ManagedAgent.Codex, "safe", "Title [private]");
         view.Render(new SessionManagerState(Snapshot([session], [])));
 
-        var confirmed = view.ConfirmLocalDelete(session);
+        var confirmed = view.ConfirmLocalDelete(session, CancellationToken.None);
 
         Assert.True(confirmed);
         Assert.Contains("local only", output.ToString(), StringComparison.OrdinalIgnoreCase);
@@ -256,6 +257,137 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
+    public async Task Spectre_input_cancellation_unwinds_wait_and_restores_terminal_without_a_key()
+    {
+        var innerConsole = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var waitingInput = new WaitingAnsiConsoleInput();
+        var console = new ConsoleWithInput(innerConsole, waitingInput);
+        var view = new SpectreSessionManagerView(console, new SpectreSessionManagerInput(console));
+        var application = new SessionManagerApplication(
+            new FixedCatalog(Snapshot([Session(ManagedAgent.Codex, "codex", "Codex")], [])),
+            new RejectOperations(),
+            view);
+        using var cancellation = new CancellationTokenSource();
+
+        var run = Task.Run(() => application.RunAsync(cancellation.Token));
+        await waitingInput.Waiting.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var stoppedWithoutKey = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(1))) == run;
+        waitingInput.Release();
+        if (!stoppedWithoutKey) await run;
+
+        Assert.True(stoppedWithoutKey, "Expected cancellation to stop the blocking Spectre input without another key.");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        var rendered = output.ToString();
+        Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25h"));
+    }
+
+    [Fact]
+    public async Task Confirmation_wait_propagates_display_cancellation_without_another_key()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var input = new DeleteThenWaitingInput();
+        var view = new SpectreSessionManagerView(console, input);
+        var application = new SessionManagerApplication(
+            new FixedCatalog(Snapshot([Session(ManagedAgent.Codex, "codex", "Codex")], [])),
+            new RejectOperations(),
+            view);
+        using var cancellation = new CancellationTokenSource();
+
+        var run = Task.Run(() => application.RunAsync(cancellation.Token));
+        await input.WaitingForConfirmation.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var stoppedWithoutKey = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(1))) == run;
+        input.Release();
+        if (!stoppedWithoutKey) await run;
+
+        Assert.True(stoppedWithoutKey, "Expected confirmation to observe the display cancellation token.");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        var rendered = output.ToString();
+        Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25h"));
+    }
+
+    [Fact]
+    public async Task Overlapping_display_session_fails_before_emitting_terminal_codes()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console, new FakeInput());
+        Exception? overlap = null;
+
+        await view.RunDisplayAsync(async cancellationToken =>
+        {
+            overlap = await Record.ExceptionAsync(() =>
+                view.RunDisplayAsync(_ => Task.CompletedTask, cancellationToken));
+        }, CancellationToken.None);
+
+        Assert.IsType<InvalidOperationException>(overlap);
+        var rendered = output.ToString();
+        Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
+    }
+
+    [Fact]
+    public async Task Alternate_screen_acquisition_failure_still_attempts_restoration()
+    {
+        var output = new FailOnceTextWriter("\u001b[?1049h");
+        var console = CreateConsole(output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console, new FakeInput());
+        var interactionStarted = false;
+
+        await Assert.ThrowsAsync<IOException>(() => view.RunDisplayAsync(_ =>
+        {
+            interactionStarted = true;
+            return Task.CompletedTask;
+        }, CancellationToken.None));
+
+        Assert.False(interactionStarted);
+        Assert.Equal(1, Count(output.ToString(), "\u001b[?1049l"));
+    }
+
+    [Fact]
+    public async Task Teardown_write_failure_cannot_leak_exit_message_into_next_session()
+    {
+        var output = new FailOnceTextWriter("\u001b[?1049l");
+        var console = CreateConsole(output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console, new FakeInput());
+
+        await Assert.ThrowsAsync<IOException>(() => view.RunDisplayAsync(_ =>
+        {
+            view.ShowMessage("stale exit message", isError: true);
+            return Task.CompletedTask;
+        }, CancellationToken.None));
+        await view.RunDisplayAsync(_ => Task.CompletedTask, CancellationToken.None);
+
+        Assert.DoesNotContain("stale exit message", output.ToString());
+    }
+
+    [Fact]
+    public async Task Display_session_restores_terminal_after_unexpected_exception()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console,
+            new ThrowingInput(new InvalidOperationException("Unexpected input failure.")));
+        var application = new SessionManagerApplication(
+            new FixedCatalog(Snapshot([Session(ManagedAgent.Codex, "codex", "Codex")], [])),
+            new RejectOperations(),
+            view);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => application.RunAsync(CancellationToken.None));
+
+        var rendered = output.ToString();
+        Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25h"));
+    }
+
+    [Fact]
     public async Task Display_teardown_does_not_leak_pending_message_into_next_session()
     {
         var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
@@ -309,6 +441,20 @@ public sealed class SpectreSessionManagerViewTests
         });
     }
 
+    private static IAnsiConsole CreateConsole(
+        TextWriter writer,
+        int width,
+        int height,
+        bool ansi = false,
+        bool interactive = false) =>
+        AnsiConsole.Create(new AnsiConsoleSettings
+        {
+            Ansi = ansi ? AnsiSupport.Yes : AnsiSupport.No,
+            ColorSystem = ColorSystemSupport.TrueColor,
+            Interactive = interactive ? InteractionSupport.Yes : InteractionSupport.No,
+            Out = new FixedConsoleOutput(writer, width, height)
+        });
+
     private static int Count(string value, string part) =>
         value.Split(part, StringSplitOptions.None).Length - 1;
 
@@ -341,6 +487,92 @@ public sealed class SpectreSessionManagerViewTests
     {
         public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken) =>
             throw new OperationCanceledException();
+    }
+
+    private sealed class ThrowingInput(Exception exception) : ISessionManagerInput
+    {
+        public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken) => throw exception;
+    }
+
+    private sealed class DeleteThenWaitingInput : ISessionManagerInput
+    {
+        private readonly ManualResetEventSlim release = new();
+        private readonly TaskCompletionSource waitingSource =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int reads;
+
+        public Task WaitingForConfirmation => waitingSource.Task;
+
+        public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken)
+        {
+            var read = Interlocked.Increment(ref reads);
+            if (read == 1) return Key(ConsoleKey.Delete);
+            if (read > 2) return Key(ConsoleKey.Q);
+            waitingSource.TrySetResult();
+            WaitHandle.WaitAny([cancellationToken.WaitHandle, release.WaitHandle]);
+            cancellationToken.ThrowIfCancellationRequested();
+            return Key(ConsoleKey.N);
+        }
+
+        public void Release() => release.Set();
+    }
+
+    private sealed class WaitingAnsiConsoleInput : IAnsiConsoleInput
+    {
+        private readonly ManualResetEventSlim release = new();
+        private readonly TaskCompletionSource waitingSource =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Waiting => waitingSource.Task;
+
+        public bool IsKeyAvailable() => false;
+
+        public ConsoleKeyInfo? ReadKey(bool intercept)
+        {
+            waitingSource.TrySetResult();
+            release.Wait();
+            return Key(ConsoleKey.Q);
+        }
+
+        public async Task<ConsoleKeyInfo?> ReadKeyAsync(bool intercept, CancellationToken cancellationToken)
+        {
+            waitingSource.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return null;
+        }
+
+        public void Release() => release.Set();
+    }
+
+    private sealed class ConsoleWithInput(IAnsiConsole inner, IAnsiConsoleInput input) : IAnsiConsole
+    {
+        public Profile Profile => inner.Profile;
+        public IAnsiConsoleCursor Cursor => inner.Cursor;
+        public IAnsiConsoleInput Input => input;
+        public IExclusivityMode ExclusivityMode => inner.ExclusivityMode;
+        public RenderPipeline Pipeline => inner.Pipeline;
+        public void Clear(bool home) => inner.Clear(home);
+        public void Write(IRenderable renderable) => inner.Write(renderable);
+        public void WriteAnsi(Action<AnsiWriter> action) => inner.WriteAnsi(action);
+    }
+
+    private sealed class FailOnceTextWriter(string sequence) : StringWriter
+    {
+        private bool failed;
+
+        public override void Write(string? value)
+        {
+            if (!failed && value?.Contains(sequence, StringComparison.Ordinal) == true)
+            {
+                failed = true;
+                throw new IOException("Injected terminal write failure.");
+            }
+
+            base.Write(value);
+        }
+
+        public override void Write(ReadOnlySpan<char> buffer) => Write(buffer.ToString());
+        public override void Write(char[] buffer, int index, int count) => Write(new string(buffer, index, count));
     }
 
     private sealed class FixedCatalog(SessionCatalogSnapshot snapshot) : ILocalSessionCatalog

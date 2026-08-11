@@ -134,7 +134,11 @@ public sealed class SessionManagerApplicationTests
             return commands.Dequeue();
         }
 
-        public bool ConfirmLocalDelete(ManagedSession session) => DeleteConfirmations.Dequeue();
+        public bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return DeleteConfirmations.Dequeue();
+        }
 
         public void ShowMessage(string message, bool isError) => Messages.Add((message, isError));
     }

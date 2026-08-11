@@ -100,7 +100,7 @@ public sealed class SessionManagerApplication(
         if (source is null) return state;
 
         view.ShowMessage(DeleteSyncWarning, false);
-        if (!view.ConfirmLocalDelete(source)) return state;
+        if (!view.ConfirmLocalDelete(source, cancellationToken)) return state;
 
         try
         {
