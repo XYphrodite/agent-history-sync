@@ -16,8 +16,7 @@ public sealed class SpectreSessionManagerInput(IAnsiConsole console) : ISessionM
 
     public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        return console.Input.ReadKey(intercept: true)
+        return console.Input.ReadKeyAsync(intercept: true, cancellationToken).GetAwaiter().GetResult()
                ?? throw new InvalidOperationException("Interactive console input is unavailable.");
     }
 }
@@ -41,6 +40,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private SessionManagerState? latestState;
     private PendingMessage? pendingMessage;
     private PendingMessage? exitMessage;
+    private int displayActive;
 
     public SpectreSessionManagerView(IAnsiConsole console, ISessionManagerInput input)
     {
@@ -51,9 +51,12 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     public async Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(interaction);
-        console.Write(new ControlCode(EnterDisplay));
+        if (Interlocked.CompareExchange(ref displayActive, 1, 0) != 0)
+            throw new InvalidOperationException("A display session is already active.");
+
         try
         {
+            console.Write(new ControlCode(EnterDisplay));
             await console.Live(new Text(string.Empty))
                 .AutoClear(true)
                 .Overflow(VerticalOverflow.Crop)
@@ -65,16 +68,21 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         }
         finally
         {
+            var message = exitMessage;
             liveContext = null;
-            pendingMessage = null;
-            console.Write(new ControlCode(LeaveDisplay));
-            if (exitMessage is { } message)
-            {
-                WriteMessage(message.Message, message.IsError);
-                exitMessage = null;
-            }
-
             latestState = null;
+            pendingMessage = null;
+            exitMessage = null;
+            try
+            {
+                console.Write(new ControlCode(LeaveDisplay));
+                if (message is not null)
+                    WriteMessage(message.Message, message.IsError);
+            }
+            finally
+            {
+                Volatile.Write(ref displayActive, 0);
+            }
         }
     }
 
@@ -140,7 +148,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         }
     }
 
-    public bool ConfirmLocalDelete(ManagedSession session)
+    public bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
         var state = latestState ?? throw new InvalidOperationException("A session state must be rendered before confirmation.");
@@ -150,7 +158,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         Render(state);
         try
         {
-            return input.ReadKey(CancellationToken.None).Key == ConsoleKey.Y;
+            return input.ReadKey(cancellationToken).Key == ConsoleKey.Y;
         }
         finally
         {
