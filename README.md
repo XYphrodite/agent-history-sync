@@ -40,8 +40,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Pin a version; force PATH yes/no without prompting
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.3.0 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.3.0 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.0 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.0 -NoPath
 ```
 
 **From a local build:**
@@ -88,6 +88,14 @@ agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # or --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
 ```
+
+### Local session manager
+
+```powershell
+agent-sync --manage
+```
+
+This opens a two-panel Codex/Grok session manager for local copy and local deletion. It does not contact GitHub, Git, or the configured sync repository, and it does not change sync state. See [operations](docs/operations.md#local-cross-agent-session-manager) for the safety rules and controls.
 
 ### Docs
 
@@ -140,8 +148,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Конкретная версия; PATH без вопроса
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.3.0 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.3.0 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.0 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.0 -NoPath
 ```
 
 **Из локальной сборки:**

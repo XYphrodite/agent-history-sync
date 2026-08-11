@@ -1,19 +1,64 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Security;
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Cli.Management;
 using CodexHistorySync.Core.Codex;
+using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
 using CodexHistorySync.Git;
 using CodexHistorySync.Windows;
+using Spectre.Console;
 
 namespace CodexHistorySync.Cli;
 
 public static class CliComposition
 {
-    public static CliApplication CreateDefault()
+    internal static CliApplication CreateForArguments(
+        string[] args,
+        ICliConsole console,
+        Func<ICliConsole, CliApplication> createSynchronizedApplication,
+        Func<ISessionManagerRunner> createSessionManagerRunner)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(console);
+        ArgumentNullException.ThrowIfNull(createSynchronizedApplication);
+        ArgumentNullException.ThrowIfNull(createSessionManagerRunner);
+
+        return args is ["--manage"]
+            ? new CliApplication(console, createSessionManagerRunner())
+            : createSynchronizedApplication(console);
+    }
+
+    public static CliApplication CreateDefault(string[] args)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        var console = new SystemCliConsole();
+        return CreateForArguments(args, console, CreateSynchronizedApplication, CreateSessionManagerRunner);
+    }
+
+    public static CliApplication CreateDefault() => CreateSynchronizedApplication(new SystemCliConsole());
+
+    internal static CodexExecutableOption ToCodexExecutableOption(CodexExecutableResolution resolution)
+    {
+        ArgumentNullException.ThrowIfNull(resolution);
+        return new CodexExecutableOption(resolution.ExecutablePath, resolution.Source switch
+        {
+            CodexExecutableSource.Configured => CodexExecutableAvailability.Configured,
+            CodexExecutableSource.Discovered => CodexExecutableAvailability.Discovered,
+            CodexExecutableSource.AutomaticDiscoveryAbsent => CodexExecutableAvailability.AutomaticDiscoveryAbsent,
+            _ => throw new InvalidOperationException("The Codex executable source is invalid.")
+        });
+    }
+
+    private static CliApplication CreateSynchronizedApplication(ICliConsole console)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -33,8 +78,189 @@ public static class CliComposition
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
             new WindowsNotifier(), new RotatingAgentLogger(localAppData));
         var agent = new DefaultAgentCliOperations(worker, scheduler, () => Environment.ProcessPath);
-        return new CliApplication(services, new SystemCliConsole(), agent);
+        return new CliApplication(services, console, agent);
     }
+
+    private static ISessionManagerRunner CreateSessionManagerRunner()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
+        var codexPaths = TryResolveCodexPaths();
+        var grokPaths = GrokPaths.TryResolve();
+        var resolution = new CodexExecutableLocator().ResolveWithSource();
+        var executable = ToCodexExecutableOption(resolution);
+        var detectorPath = resolution.ExecutablePath ?? Path.GetFullPath("codex.exe");
+        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(detectorPath));
+        var activeState = new WindowsManagedSessionActiveState(detector.IsRunning, WindowsManagedSessionActiveState.IsGrokRunning);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState);
+        var codexWriter = codexPaths is null
+            ? null
+            : new CodexConversationWriter(codexPaths, executable, new CodexCompatibilityProbe());
+        var grokWriter = grokPaths is null ? null : new GrokConversationWriter(grokPaths);
+        var operations = new LocalSessionOperations(
+            codexPaths,
+            grokPaths,
+            activeState,
+            new WindowsManagedSessionDirectoryDeleter(),
+            codexWriter,
+            grokWriter);
+        var ansiConsole = AnsiConsole.Console;
+        var view = new SpectreSessionManagerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
+        return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog, operations, view));
+    }
+
+    internal static CodexPaths? TryResolveCodexPaths(string? configuredHome = null)
+    {
+        try
+        {
+            return CodexPaths.ResolveLayout(configuredHome);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+}
+
+internal sealed class DefaultSessionManagerRunner(SessionManagerApplication application) : ISessionManagerRunner
+{
+    private readonly SessionManagerApplication application = application ?? throw new ArgumentNullException(nameof(application));
+
+    public Task RunAsync(CancellationToken cancellationToken) => application.RunAsync(cancellationToken);
+}
+
+internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveState
+{
+    private readonly Func<bool> codexIsRunning;
+    private readonly Func<bool> grokIsRunning;
+
+    public WindowsManagedSessionActiveState(Func<bool> codexIsRunning, Func<bool> grokIsRunning)
+    {
+        this.codexIsRunning = codexIsRunning ?? throw new ArgumentNullException(nameof(codexIsRunning));
+        this.grokIsRunning = grokIsRunning ?? throw new ArgumentNullException(nameof(grokIsRunning));
+    }
+
+    public Task<bool> IsActiveAsync(
+        ManagedAgent agent,
+        string sessionId,
+        string nativePath,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(agent switch
+        {
+            ManagedAgent.Codex => codexIsRunning(),
+            ManagedAgent.Grok => grokIsRunning(),
+            _ => true
+        });
+    }
+
+    internal static bool IsGrokRunning()
+    {
+        Process[]? processes = null;
+        try
+        {
+            processes = Process.GetProcessesByName("grok");
+            return processes.Length != 0;
+        }
+        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException or
+                                          UnauthorizedAccessException or SecurityException)
+        {
+            return true;
+        }
+        finally
+        {
+            if (processes is not null)
+                foreach (var process in processes) process.Dispose();
+        }
+    }
+}
+
+internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDirectoryDeleter
+{
+    private readonly Func<bool>? afterContainmentValidation;
+    private readonly Func<bool>? afterRootPathValidation;
+    private readonly Func<bool>? afterPathValidation;
+    private readonly Func<bool>? afterTreeCapture;
+
+    public WindowsManagedSessionDirectoryDeleter()
+    {
+    }
+
+    internal WindowsManagedSessionDirectoryDeleter(
+        Func<bool>? afterPathValidation,
+        Func<bool>? afterTreeCapture)
+        : this(null, null, afterPathValidation, afterTreeCapture)
+    {
+    }
+
+    internal WindowsManagedSessionDirectoryDeleter(
+        Func<bool>? afterRootPathValidation,
+        Func<bool>? afterPathValidation,
+        Func<bool>? afterTreeCapture)
+        : this(null, afterRootPathValidation, afterPathValidation, afterTreeCapture)
+    {
+    }
+
+    internal WindowsManagedSessionDirectoryDeleter(
+        Func<bool>? afterContainmentValidation,
+        Func<bool>? afterRootPathValidation,
+        Func<bool>? afterPathValidation,
+        Func<bool>? afterTreeCapture)
+    {
+        this.afterContainmentValidation = afterContainmentValidation;
+        this.afterRootPathValidation = afterRootPathValidation;
+        this.afterPathValidation = afterPathValidation;
+        this.afterTreeCapture = afterTreeCapture;
+    }
+
+    public Task DeleteAsync(string sessionsRoot, string sessionDirectory, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Managed session deletion requires Windows.");
+        if (!WindowsOwnedTreeDeleter.TryGetIdentity(sessionsRoot, out var expectedRootIdentity))
+            throw new IOException("The sessions root identity is unavailable.");
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionsRoot));
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionDirectory));
+        if (string.Equals(root, target, StringComparison.OrdinalIgnoreCase) ||
+            !target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The selected session directory is outside the sessions root.");
+        if (afterContainmentValidation is not null && !afterContainmentValidation())
+            throw new IOException("The sessions root changed after containment validation.");
+
+        RequireConcreteAncestors(root, target, afterRootPathValidation);
+        if (afterPathValidation is not null && !afterPathValidation())
+            throw new IOException("The selected session directory changed before deletion.");
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!WindowsOwnedTreeDeleter.TryDeleteDescendantTree(
+                root,
+                target,
+                expectedRootIdentity,
+                afterTreeCapture,
+                () => { cancellationToken.ThrowIfCancellationRequested(); return true; }))
+            throw new IOException("The selected session directory could not be deleted safely.");
+        return Task.CompletedTask;
+    }
+
+    private static void RequireConcreteAncestors(
+        string root,
+        string target,
+        Func<bool>? afterRootPathValidation)
+    {
+        for (var current = target;; current = Path.GetDirectoryName(current)
+                 ?? throw new InvalidDataException("The selected session directory has no sessions-root ancestor."))
+        {
+            var attributes = File.GetAttributes(current);
+            if (!attributes.HasFlag(FileAttributes.Directory) || attributes.HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException("The selected session directory is not a concrete directory.");
+            if (!string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) continue;
+            if (afterRootPathValidation is not null && !afterRootPathValidation())
+                throw new IOException("The sessions root changed during validation.");
+            return;
+        }
+    }
+
 }
 
 public sealed class DefaultAgentCliOperations : IAgentCliOperations

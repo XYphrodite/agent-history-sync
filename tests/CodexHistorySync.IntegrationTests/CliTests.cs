@@ -1,6 +1,10 @@
+using System.Diagnostics;
 using CodexHistorySync.Cli;
 using CodexHistorySync.Core.Codex;
+using CodexHistorySync.Core.Conversion;
+using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Sync;
+using CodexHistorySync.Windows;
 
 namespace CodexHistorySync.IntegrationTests;
 
@@ -22,8 +26,343 @@ public sealed class CliTests
         Assert.Equal(0, exitCode);
         Assert.Contains("Usage: agent-sync", fixture.Console.OutputText);
         Assert.Contains("init|join|sync|pull|push|status|doctor|conflicts|resolve|agent", fixture.Console.OutputText);
+        Assert.Contains("[--manage]", fixture.Console.OutputText);
         Assert.Empty(fixture.Console.ErrorText);
         Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Manage_exact_flag_invokes_only_the_manager_runner()
+    {
+        var fixture = new Fixture();
+        var manager = new FakeSessionManagerRunner();
+        var application = new CliApplication(fixture.Services, fixture.Console, managerRunner: manager);
+
+        var exitCode = await application.RunAsync(["--manage"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(1, manager.RunCount);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Manage_with_extra_argument_is_a_usage_error_without_running_manager()
+    {
+        var fixture = new Fixture();
+        var manager = new FakeSessionManagerRunner();
+        var application = new CliApplication(fixture.Services, fixture.Console, managerRunner: manager);
+
+        var exitCode = await application.RunAsync(["--manage", "extra"], CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(0, manager.RunCount);
+        Assert.Contains("[--manage]", fixture.Console.ErrorText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Manage_composition_does_not_construct_sync_or_remote_services()
+    {
+        var console = new FakeConsole();
+        var manager = new FakeSessionManagerRunner();
+        var application = CliComposition.CreateForArguments(
+            ["--manage"],
+            console,
+            _ => throw new InvalidOperationException("Git/GitHub construction must not run."),
+            () => manager);
+
+        var exitCode = await application.RunAsync(["--manage"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(1, manager.RunCount);
+    }
+
+    [Fact]
+    public async Task Manage_active_state_dispatches_to_the_matching_local_agent_probe()
+    {
+        var codexCalls = 0;
+        var grokCalls = 0;
+        var activeState = new WindowsManagedSessionActiveState(
+            () => { codexCalls++; return true; },
+            () => { grokCalls++; return false; });
+
+        var codex = await activeState.IsActiveAsync(
+            ManagedAgent.Codex, "codex", "unused", CancellationToken.None);
+        var grok = await activeState.IsActiveAsync(
+            ManagedAgent.Grok, "grok", "unused", CancellationToken.None);
+
+        Assert.True(codex);
+        Assert.False(grok);
+        Assert.Equal(1, codexCalls);
+        Assert.Equal(1, grokCalls);
+    }
+
+    [Fact]
+    public void Manage_maps_windows_locator_source_to_core_writer_availability()
+    {
+        var option = CliComposition.ToCodexExecutableOption(
+            new CodexExecutableResolution("C:\\tools\\codex.exe", CodexExecutableSource.Configured));
+
+        Assert.Equal("C:\\tools\\codex.exe", option.ExecutablePath);
+        Assert.Equal(CodexExecutableAvailability.Configured, option.Availability);
+    }
+
+    [Fact]
+    public void Manage_resolves_missing_codex_layout_without_creating_it_during_composition()
+    {
+        var home = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-missing-{Guid.NewGuid():N}");
+
+        var paths = CliComposition.TryResolveCodexPaths(home);
+
+        Assert.NotNull(paths);
+        Assert.Equal(Path.GetFullPath(home), paths.Home);
+        Assert.False(Directory.Exists(home));
+    }
+
+    [Fact]
+    public async Task Manage_directory_deleter_removes_only_the_selected_directory()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-{Guid.NewGuid():N}");
+        var selected = Path.Combine(root, "cwd", Guid.NewGuid().ToString());
+        var sibling = Path.Combine(root, "cwd", Guid.NewGuid().ToString());
+        Directory.CreateDirectory(selected);
+        Directory.CreateDirectory(sibling);
+        await File.WriteAllTextAsync(Path.Combine(selected, "chat_history.jsonl"), "{}\n");
+        await File.WriteAllTextAsync(Path.Combine(sibling, "chat_history.jsonl"), "{}\n");
+        try
+        {
+            var deleter = new WindowsManagedSessionDirectoryDeleter();
+
+            await deleter.DeleteAsync(root, selected, CancellationToken.None);
+
+            Assert.False(Directory.Exists(selected));
+            Assert.True(Directory.Exists(sibling));
+            Assert.True(Directory.Exists(root));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Manage_directory_deleter_refuses_concrete_sessions_root_replacement_before_identity_capture()
+    {
+        var container = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-root-preidentity-{Guid.NewGuid():N}");
+        var sessionsRoot = Path.Combine(container, "sessions");
+        var preservedRoot = Path.Combine(container, "sessions.preserved");
+        var replacementRoot = Path.Combine(container, "replacement");
+        var relativeSession = Path.Combine("cwd", Guid.NewGuid().ToString());
+        var selected = Path.Combine(sessionsRoot, relativeSession);
+        var replacementSession = Path.Combine(replacementRoot, relativeSession);
+        var original = Path.Combine(selected, "owned.txt");
+        var sentinel = Path.Combine(replacementSession, "outside-keep.txt");
+        Directory.CreateDirectory(selected);
+        Directory.CreateDirectory(replacementSession);
+        await File.WriteAllTextAsync(original, "owned");
+        await File.WriteAllTextAsync(sentinel, "outside");
+        bool ReplaceRoot()
+        {
+            Directory.Move(sessionsRoot, preservedRoot);
+            Directory.Move(replacementRoot, sessionsRoot);
+            return true;
+        }
+
+        try
+        {
+            var deleter = new WindowsManagedSessionDirectoryDeleter(
+                afterContainmentValidation: ReplaceRoot,
+                afterRootPathValidation: null,
+                afterPathValidation: null,
+                afterTreeCapture: null);
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                deleter.DeleteAsync(sessionsRoot, selected, CancellationToken.None));
+
+            Assert.Equal("outside", await File.ReadAllTextAsync(
+                Path.Combine(sessionsRoot, relativeSession, "outside-keep.txt")));
+            Assert.Equal("owned", await File.ReadAllTextAsync(
+                Path.Combine(preservedRoot, relativeSession, "owned.txt")));
+        }
+        finally
+        {
+            if (Directory.Exists(sessionsRoot) && Directory.Exists(preservedRoot))
+                Directory.Move(sessionsRoot, replacementRoot);
+            if (Directory.Exists(preservedRoot) && !Directory.Exists(sessionsRoot))
+                Directory.Move(preservedRoot, sessionsRoot);
+            if (Directory.Exists(container)) Directory.Delete(container, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Manage_directory_deleter_refuses_concrete_sessions_root_replacement_after_validation()
+    {
+        var container = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-root-identity-{Guid.NewGuid():N}");
+        var sessionsRoot = Path.Combine(container, "sessions");
+        var preservedRoot = Path.Combine(container, "sessions.preserved");
+        var replacementRoot = Path.Combine(container, "replacement");
+        var relativeSession = Path.Combine("cwd", Guid.NewGuid().ToString());
+        var selected = Path.Combine(sessionsRoot, relativeSession);
+        var replacementSession = Path.Combine(replacementRoot, relativeSession);
+        var original = Path.Combine(selected, "owned.txt");
+        var sentinel = Path.Combine(replacementSession, "keep.txt");
+        Directory.CreateDirectory(selected);
+        Directory.CreateDirectory(replacementSession);
+        await File.WriteAllTextAsync(original, "owned");
+        await File.WriteAllTextAsync(sentinel, "keep");
+        bool ReplaceRoot()
+        {
+            Directory.Move(sessionsRoot, preservedRoot);
+            Directory.Move(replacementRoot, sessionsRoot);
+            return true;
+        }
+
+        try
+        {
+            var deleter = new WindowsManagedSessionDirectoryDeleter(
+                afterRootPathValidation: ReplaceRoot,
+                afterPathValidation: null,
+                afterTreeCapture: null);
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                deleter.DeleteAsync(sessionsRoot, selected, CancellationToken.None));
+
+            Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(sessionsRoot, relativeSession, "keep.txt")));
+            Assert.Equal("owned", await File.ReadAllTextAsync(Path.Combine(preservedRoot, relativeSession, "owned.txt")));
+        }
+        finally
+        {
+            if (Directory.Exists(sessionsRoot) && Directory.Exists(preservedRoot))
+                Directory.Move(sessionsRoot, replacementRoot);
+            if (Directory.Exists(preservedRoot) && !Directory.Exists(sessionsRoot))
+                Directory.Move(preservedRoot, sessionsRoot);
+            if (Directory.Exists(container)) Directory.Delete(container, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Manage_directory_deleter_refuses_ancestor_replacement_after_path_validation()
+    {
+        var container = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-root-race-{Guid.NewGuid():N}");
+        var sessionsRoot = Path.Combine(container, "sessions");
+        var sessionId = Guid.NewGuid().ToString();
+        var ancestor = Path.Combine(sessionsRoot, "cwd");
+        var selected = Path.Combine(ancestor, sessionId);
+        var preserved = ancestor + ".preserved";
+        var outside = Path.Combine(container, "outside");
+        Directory.CreateDirectory(selected);
+        var outsideSelected = Path.Combine(outside, sessionId);
+        Directory.CreateDirectory(outsideSelected);
+        VerifyDirectoryJunctionsAvailable(container);
+        var sentinel = Path.Combine(outsideSelected, "keep.txt");
+        await File.WriteAllTextAsync(Path.Combine(selected, "owned.txt"), "owned");
+        await File.WriteAllTextAsync(sentinel, "keep");
+        bool ReplaceAncestor()
+        {
+            Directory.Move(ancestor, preserved);
+            CreateDirectoryJunction(ancestor, outside);
+            return true;
+        }
+
+        try
+        {
+            var deleter = new WindowsManagedSessionDirectoryDeleter(
+                afterPathValidation: ReplaceAncestor, afterTreeCapture: null);
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                deleter.DeleteAsync(sessionsRoot, selected, CancellationToken.None));
+
+            Assert.Equal("keep", await File.ReadAllTextAsync(sentinel));
+            Assert.True(File.Exists(Path.Combine(preserved, sessionId, "owned.txt")));
+        }
+        finally
+        {
+            RestoreReplacedDirectory(ancestor, preserved);
+            if (Directory.Exists(container)) Directory.Delete(container, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Manage_directory_deleter_refuses_descendant_replacement_without_partial_deletion()
+    {
+        var container = Path.Combine(Path.GetTempPath(), $"agent-sync-task5-child-race-{Guid.NewGuid():N}");
+        var sessionsRoot = Path.Combine(container, "sessions");
+        var selected = Path.Combine(sessionsRoot, Guid.NewGuid().ToString());
+        var child = Path.Combine(selected, "child");
+        var preserved = child + ".preserved";
+        var outside = Path.Combine(container, "outside");
+        Directory.CreateDirectory(child);
+        Directory.CreateDirectory(outside);
+        VerifyDirectoryJunctionsAvailable(container);
+        var owned = Path.Combine(child, "owned.txt");
+        var sentinel = Path.Combine(outside, "keep.txt");
+        await File.WriteAllTextAsync(owned, "owned");
+        await File.WriteAllTextAsync(sentinel, "keep");
+        bool ReplaceChild()
+        {
+            Directory.Move(child, preserved);
+            CreateDirectoryJunction(child, outside);
+            return true;
+        }
+
+        try
+        {
+            var deleter = new WindowsManagedSessionDirectoryDeleter(
+                afterPathValidation: null, afterTreeCapture: ReplaceChild);
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                deleter.DeleteAsync(sessionsRoot, selected, CancellationToken.None));
+
+            Assert.Equal("keep", await File.ReadAllTextAsync(sentinel));
+            Assert.True(File.Exists(owned) || File.Exists(Path.Combine(preserved, "owned.txt")));
+        }
+        finally
+        {
+            RestoreReplacedDirectory(child, preserved);
+            if (Directory.Exists(container)) Directory.Delete(container, recursive: true);
+        }
+    }
+
+    private static void RestoreReplacedDirectory(string path, string preserved)
+    {
+        if (Directory.Exists(path) && File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+            Directory.Delete(path);
+        if (Directory.Exists(preserved) && !Directory.Exists(path)) Directory.Move(preserved, path);
+    }
+
+    private static void VerifyDirectoryJunctionsAvailable(string container)
+    {
+        var target = Path.Combine(container, "junction-probe-target");
+        var link = Path.Combine(container, "junction-probe-link");
+        Directory.CreateDirectory(target);
+        CreateDirectoryJunction(link, target);
+        Assert.True(File.GetAttributes(link).HasFlag(FileAttributes.ReparsePoint));
+        Directory.Delete(link);
+        Directory.Delete(target);
+    }
+
+    private static void CreateDirectoryJunction(string link, string target)
+    {
+        var startInfo = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("mklink");
+        startInfo.ArgumentList.Add("/J");
+        startInfo.ArgumentList.Add(link);
+        startInfo.ArgumentList.Add(target);
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Unable to start the directory-junction helper.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+            throw new IOException($"Directory-junction creation failed with exit code {process.ExitCode}: {output}{error}");
     }
 
     [Fact]
@@ -399,6 +738,18 @@ public sealed class CliTests
             cancellationToken.ThrowIfCancellationRequested();
             SecretReadCount++;
             return Task.FromResult(Secrets.Dequeue());
+        }
+    }
+
+    private sealed class FakeSessionManagerRunner : ISessionManagerRunner
+    {
+        public int RunCount { get; private set; }
+
+        public Task RunAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RunCount++;
+            return Task.CompletedTask;
         }
     }
 

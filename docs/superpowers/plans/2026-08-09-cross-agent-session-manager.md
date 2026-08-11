@@ -461,15 +461,15 @@ git commit -m "feat: add interactive cross-agent session manager"
 - Consumes: completed `agent-sync --manage` feature.
 - Produces: user-facing 0.4.0 documentation and release-ready executable behavior.
 
-- [ ] **Step 1: Add failing release-surface assertions**
+- [ ] **Step 1: Add failing release-surface behavior tests**
 
-Extend existing CLI/release text tests (or add `tests/CodexHistorySync.IntegrationTests/ReleaseSurfaceTests.cs`) to assert assembly/package version `0.4.0`, `agent-sync --manage` help, installer/publisher examples using `0.4.0`/`v0.4.0`, and zero public `0.3.0`, `v0.3.0`, `codex-sync.exe`, or stale usage strings in release-facing files.
+Add `tests/CodexHistorySync.IntegrationTests/ReleaseSurfaceTests.cs` to execute the built CLI and release PowerShell scripts against controlled arguments. Assert assembly/package version `0.4.0`, `agent-sync --manage` help, successful `install.ps1 -?` / `publish-release.ps1 -?`, and the publisher's observable validation message for an invalid version. Do not assert source or documentation text; stale human-facing prose is covered by the explicit release scan in Step 4.
 
 - [ ] **Step 2: Run release-surface tests and verify RED**
 
 Run: `dotnet test tests/CodexHistorySync.IntegrationTests/CodexHistorySync.IntegrationTests.csproj -c Release --filter FullyQualifiedName~ReleaseSurfaceTests`
 
-Expected: FAIL while the project and public examples still report 0.3.0.
+Expected: FAIL while the built assembly and script behavior still report 0.3.0.
 
 - [ ] **Step 3: Update version and operational documentation**
 
