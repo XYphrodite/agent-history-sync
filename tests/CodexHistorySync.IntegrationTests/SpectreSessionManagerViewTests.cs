@@ -170,6 +170,46 @@ public sealed class SpectreSessionManagerViewTests
         Assert.Contains("Active sessions cannot be copied.", visibleFrame);
     }
 
+    [Fact]
+    public async Task Composed_loop_uses_one_live_alternate_screen()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var input = new FakeInput(Key(ConsoleKey.DownArrow), Key(ConsoleKey.RightArrow), Key(ConsoleKey.Q));
+        var view = new SpectreSessionManagerView(console, input);
+        var snapshot = Snapshot(
+            [Session(ManagedAgent.Codex, "codex-one", "Codex one"), Session(ManagedAgent.Codex, "codex-two", "Codex two")],
+            [Session(ManagedAgent.Grok, "grok", "Grok")]);
+        var application = new SessionManagerApplication(new FixedCatalog(snapshot), new RejectOperations(), view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        var rendered = output.ToString();
+        Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25h"));
+        Assert.DoesNotContain("\u001b[2J", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Display_session_restores_terminal_after_cancellation()
+    {
+        var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
+        var view = new SpectreSessionManagerView(console, new CancelingInput());
+        var application = new SessionManagerApplication(
+            new FixedCatalog(Snapshot([Session(ManagedAgent.Codex, "codex", "Codex")], [])),
+            new RejectOperations(),
+            view);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => application.RunAsync(CancellationToken.None));
+
+        var rendered = output.ToString();
+        Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25l"));
+        Assert.Equal(1, Count(rendered, "\u001b[?25h"));
+    }
+
     private static SessionCatalogSnapshot Snapshot(
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok) => new(codex, grok);
@@ -189,14 +229,15 @@ public sealed class SpectreSessionManagerViewTests
         out StringWriter writer,
         int width,
         int height,
-        bool ansi = false)
+        bool ansi = false,
+        bool interactive = false)
     {
         writer = new StringWriter();
         return AnsiConsole.Create(new AnsiConsoleSettings
         {
             Ansi = ansi ? AnsiSupport.Yes : AnsiSupport.No,
             ColorSystem = ColorSystemSupport.TrueColor,
-            Interactive = InteractionSupport.No,
+            Interactive = interactive ? InteractionSupport.Yes : InteractionSupport.No,
             Out = new FixedConsoleOutput(writer, width, height)
         });
     }
@@ -213,6 +254,12 @@ public sealed class SpectreSessionManagerViewTests
             cancellationToken.ThrowIfCancellationRequested();
             return keys.Dequeue();
         }
+    }
+
+    private sealed class CancelingInput : ISessionManagerInput
+    {
+        public ConsoleKeyInfo ReadKey(CancellationToken cancellationToken) =>
+            throw new OperationCanceledException();
     }
 
     private sealed class FixedCatalog(SessionCatalogSnapshot snapshot) : ILocalSessionCatalog
