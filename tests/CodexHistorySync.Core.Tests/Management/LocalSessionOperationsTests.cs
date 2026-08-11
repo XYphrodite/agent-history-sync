@@ -618,6 +618,12 @@ public sealed class LocalSessionOperationsTests
         public Exception? Failure { get; set; }
         public Func<Task>? BeforeResult { get; set; }
 
+        public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(ActiveIds.Count != 0);
+        }
+
         public async Task<bool> IsActiveAsync(
             ManagedAgent agent,
             string sessionId,

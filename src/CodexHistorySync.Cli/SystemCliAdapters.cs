@@ -143,6 +143,11 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ManagedAgent agent,
         string sessionId,
         string nativePath,
+        CancellationToken cancellationToken) =>
+        IsAgentActiveAsync(agent, cancellationToken);
+
+    public Task<bool> IsAgentActiveAsync(
+        ManagedAgent agent,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

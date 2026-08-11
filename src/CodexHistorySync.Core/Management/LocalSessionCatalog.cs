@@ -65,7 +65,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             // Candidate-level parsing below still exposes safely identifiable entries as unreadable.
         }
 
-        foreach (var candidate in EnumerateCodexCandidates(codexPaths))
+        var candidates = EnumerateCodexCandidates(codexPaths).ToArray();
+        if (candidates.Length == 0) return result;
+        var isActive = await IsAgentActiveAsync(ManagedAgent.Codex, cancellationToken).ConfigureAwait(false);
+        foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var root = SelectCodexRoot(candidate, codexPaths);
@@ -78,13 +81,13 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             var sessionId = isStable ? scannedId! : metadata?.SessionId;
             if (!IsSafeCodexSessionId(sessionId)) continue;
 
-            result.Add(await CreateSessionAsync(
+            result.Add(CreateSession(
                 ManagedAgent.Codex,
                 sessionId!,
                 nativePath,
                 isStable,
                 metadata,
-                cancellationToken).ConfigureAwait(false));
+                isActive));
         }
         return result;
     }
@@ -113,7 +116,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             // Candidate-level parsing below still exposes safely identifiable entries as unreadable.
         }
 
-        foreach (var candidate in EnumerateGrokCandidates(grokPaths.Sessions))
+        var candidates = EnumerateGrokCandidates(grokPaths.Sessions).ToArray();
+        if (candidates.Length == 0) return result;
+        var isActive = await IsAgentActiveAsync(ManagedAgent.Grok, cancellationToken).ConfigureAwait(false);
+        foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!ManagedSessionPathPolicy.TryResolveConcreteTarget(
@@ -124,30 +130,22 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
 
             var metadata = await ReadGrokMetadataAsync(nativePath, sessionId, cancellationToken)
                 .ConfigureAwait(false);
-            result.Add(await CreateSessionAsync(
+            result.Add(CreateSession(
                 ManagedAgent.Grok,
                 sessionId,
                 nativePath,
                 stable.Contains(nativePath),
                 metadata,
-                cancellationToken).ConfigureAwait(false));
+                isActive));
         }
         return result;
     }
 
-    private async Task<ManagedSession> CreateSessionAsync(
-        ManagedAgent agent,
-        string sessionId,
-        string nativePath,
-        bool stable,
-        DisplayMetadata? metadata,
-        CancellationToken cancellationToken)
+    private async Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
     {
-        bool isActive;
         try
         {
-            isActive = await activeState.IsActiveAsync(agent, sessionId, nativePath, cancellationToken)
-                .ConfigureAwait(false);
+            return await activeState.IsAgentActiveAsync(agent, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -155,9 +153,18 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         }
         catch
         {
-            isActive = true;
+            return true;
         }
+    }
 
+    private static ManagedSession CreateSession(
+        ManagedAgent agent,
+        string sessionId,
+        string nativePath,
+        bool stable,
+        DisplayMetadata? metadata,
+        bool isActive)
+    {
         var identityMatches = metadata is not null &&
                               string.Equals(metadata.SessionId, sessionId, StringComparison.OrdinalIgnoreCase);
         return new ManagedSession(
