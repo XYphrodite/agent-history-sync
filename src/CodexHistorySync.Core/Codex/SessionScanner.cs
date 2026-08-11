@@ -42,6 +42,11 @@ public sealed class SessionScanner
         waitForStability = cancellationToken => Task.Delay(stabilityDelay, cancellationToken);
     }
 
+    internal SessionScanner(Func<CancellationToken, Task> waitForStability)
+    {
+        this.waitForStability = waitForStability ?? throw new ArgumentNullException(nameof(waitForStability));
+    }
+
     public async Task<IReadOnlyList<LocalObject>> ScanAsync(CodexPaths paths, CancellationToken cancellationToken)
     {
         var result = await ScanDetailedAsync(paths, cancellationToken).ConfigureAwait(false);
@@ -58,53 +63,19 @@ public sealed class SessionScanner
         var objectsById = new Dictionary<LogicalObjectId, LocalObject>();
         var uncertainKinds = new HashSet<ObjectKind>();
         var duplicateIds = new HashSet<LogicalObjectId>();
-        if (!await ScanDirectoryAsync(paths.Sessions, ObjectKind.ActiveSession, objectsById, objects, uncertainKinds,
-                duplicateIds, cancellationToken).ConfigureAwait(false))
-            uncertainKinds.Add(ObjectKind.ActiveSession);
-        if (!await ScanDirectoryAsync(paths.ArchivedSessions, ObjectKind.ArchivedSession, objectsById, objects,
-                uncertainKinds, duplicateIds, cancellationToken).ConfigureAwait(false))
-            uncertainKinds.Add(ObjectKind.ArchivedSession);
-        return new SessionScanResult(objects, uncertainKinds, duplicateIds);
-    }
+        var candidates = new List<ObservedCandidate>();
+        CollectCandidates(paths.Sessions, ObjectKind.ActiveSession, candidates, uncertainKinds, cancellationToken);
+        CollectCandidates(paths.ArchivedSessions, ObjectKind.ArchivedSession, candidates, uncertainKinds,
+            cancellationToken);
 
-    private async Task<bool> ScanDirectoryAsync(
-        string directory,
-        ObjectKind kind,
-        Dictionary<LogicalObjectId, LocalObject> objectsById,
-        List<LocalObject> objects,
-        HashSet<ObjectKind> uncertainKinds,
-        HashSet<LogicalObjectId> duplicateIds,
-        CancellationToken cancellationToken)
-    {
-        if (!Directory.Exists(directory)) return false;
+        if (candidates.Count != 0)
+            await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        IEnumerable<string> candidates;
-        try
-        {
-            candidates = Directory.EnumerateFiles(
-                directory,
-                "*.jsonl",
-                new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint })
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
-
-        var complete = true;
         foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!CodexPaths.IsPathWithin(candidate, directory) || IsDisallowedCandidate(candidate, directory)) continue;
-
-            var session = await ReadStableSessionAsync(candidate, kind, cancellationToken);
-            if (session is null) complete = false;
+            var session = await ReadStableSessionAsync(candidate, cancellationToken).ConfigureAwait(false);
+            if (session is null) uncertainKinds.Add(candidate.Kind);
             else if (objectsById.TryAdd(session.Id, session)) objects.Add(session);
             else
             {
@@ -116,19 +87,68 @@ public sealed class SessionScanner
                     objects.Remove(prior);
             }
         }
-        return complete;
+        return new SessionScanResult(objects, uncertainKinds, duplicateIds);
     }
 
-    private async Task<LocalObject?> ReadStableSessionAsync(string path, ObjectKind kind, CancellationToken cancellationToken)
+    private static void CollectCandidates(
+        string directory,
+        ObjectKind kind,
+        List<ObservedCandidate> observed,
+        HashSet<ObjectKind> uncertainKinds,
+        CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(directory))
+        {
+            uncertainKinds.Add(kind);
+            return;
+        }
+
+        IReadOnlyList<string> candidates;
+        try
+        {
+            candidates = Directory.EnumerateFiles(
+                    directory,
+                    "*.jsonl",
+                    new EnumerationOptions
+                    {
+                        RecurseSubdirectories = true,
+                        AttributesToSkip = FileAttributes.ReparsePoint
+                    })
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            uncertainKinds.Add(kind);
+            return;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!CodexPaths.IsPathWithin(candidate, directory) || IsDisallowedCandidate(candidate, directory))
+                continue;
+            try
+            {
+                observed.Add(new ObservedCandidate(candidate, kind, ReadObservation(candidate)));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                uncertainKinds.Add(kind);
+            }
+        }
+    }
+
+    private static async Task<LocalObject?> ReadStableSessionAsync(
+        ObservedCandidate candidate,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var first = ReadObservation(path);
-            await waitForStability(cancellationToken);
-            var second = ReadObservation(path);
-            if (first != second) return null;
+            var second = ReadObservation(candidate.Path);
+            if (candidate.First != second) return null;
 
-            var bytes = await ReadFileAsync(path, second.Length, cancellationToken);
+            var bytes = await ReadFileAsync(candidate.Path, second.Length, cancellationToken).ConfigureAwait(false);
             if (bytes is null || bytes.Length == 0 || bytes[^1] != (byte)'\n') return null;
 
             // Hash/sync the reduced view so compaction snapshots do not dominate size or identity.
@@ -140,8 +160,8 @@ public sealed class SessionScanner
 
             return new LocalObject(
                 id.Value,
-                kind,
-                Path.GetFullPath(path),
+                candidate.Kind,
+                Path.GetFullPath(candidate.Path),
                 new ContentHash(Convert.ToHexString(SHA256.HashData(normalized)).ToLowerInvariant()),
                 normalized.LongLength,
                 new DateTimeOffset(second.LastWriteTimeUtc, TimeSpan.Zero));
@@ -236,4 +256,5 @@ public sealed class SessionScanner
         && value != "..";
 
     private readonly record struct FileObservation(long Length, DateTime LastWriteTimeUtc);
+    private readonly record struct ObservedCandidate(string Path, ObjectKind Kind, FileObservation First);
 }
