@@ -286,6 +286,17 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
+    public void Spectre_input_pre_cancelled_token_throws_operation_cancelled()
+    {
+        var console = CreateConsole(out _, 80, 24, ansi: true, interactive: true);
+        var input = new SpectreSessionManagerInput(console);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.ThrowsAny<OperationCanceledException>(() => input.ReadKey(cancellation.Token));
+    }
+
+    [Fact]
     public async Task Confirmation_wait_propagates_display_cancellation_without_another_key()
     {
         var console = CreateConsole(out var output, 80, 24, ansi: true, interactive: true);
