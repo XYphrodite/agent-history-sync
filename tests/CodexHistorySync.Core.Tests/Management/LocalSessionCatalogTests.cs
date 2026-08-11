@@ -65,6 +65,32 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncTreatsActivityQueryFailureAsActive()
+    {
+        // Losing fail-closed handling would expose copy/delete actions while process state is unknown.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("activity-failure", null, "question", "2026-08-09T10:00:00Z");
+        fixture.ActiveState.AgentFailure = new InvalidOperationException("process lookup failed");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.True(Assert.Single(snapshot.Codex).IsActive);
+    }
+
+    [Fact]
+    public async Task ScanAsyncPropagatesRequestedCancellationFromActivityQuery()
+    {
+        // Treating requested cancellation as an ordinary lookup failure would leave refresh unresponsive.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("activity-cancel", null, "question", "2026-08-09T10:00:00Z");
+        using var cancellation = new CancellationTokenSource();
+        fixture.ActiveState.BeforeAgentQuery = cancellation.Cancel;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.CreateCatalog().ScanAsync(cancellation.Token));
+    }
+
+    [Fact]
     public async Task ScanAsyncKeepsActiveEntriesVisibleWhenNativeScannerDefersThem()
     {
         await using var fixture = new CatalogFixture();
@@ -354,11 +380,15 @@ public sealed class LocalSessionCatalogTests
     {
         public HashSet<string> ActiveIds { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<ManagedAgent, int> TotalQueries { get; } = new();
+        public Exception? AgentFailure { get; set; }
+        public Action? BeforeAgentQuery { get; set; }
 
         public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
         {
+            BeforeAgentQuery?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             TotalQueries[agent] = TotalQueries.GetValueOrDefault(agent) + 1;
+            if (AgentFailure is not null) throw AgentFailure;
             return Task.FromResult(ActiveIds.Count != 0);
         }
 
