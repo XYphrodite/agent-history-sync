@@ -40,6 +40,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private LiveDisplayContext? liveContext;
     private SessionManagerState? latestState;
     private PendingMessage? pendingMessage;
+    private PendingMessage? exitMessage;
 
     public SpectreSessionManagerView(IAnsiConsole console, ISessionManagerInput input)
     {
@@ -65,7 +66,15 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         finally
         {
             liveContext = null;
+            pendingMessage = null;
             console.Write(new ControlCode(LeaveDisplay));
+            if (exitMessage is { } message)
+            {
+                WriteMessage(message.Message, message.IsError);
+                exitMessage = null;
+            }
+
+            latestState = null;
         }
     }
 
@@ -134,18 +143,35 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     public bool ConfirmLocalDelete(ManagedSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        console.Write(new Text(
+        var state = latestState ?? throw new InvalidOperationException("A session state must be rendered before confirmation.");
+        pendingMessage = new PendingMessage(
             $"Local only: delete '{session.Title}'? Sync may restore it. [y/N] ",
-            InformationStyle));
-        var key = input.ReadKey(CancellationToken.None).Key;
-        console.WriteLine();
-        return key == ConsoleKey.Y;
+            false);
+        Render(state);
+        try
+        {
+            return input.ReadKey(CancellationToken.None).Key == ConsoleKey.Y;
+        }
+        finally
+        {
+            pendingMessage = null;
+            Render(state);
+        }
     }
 
     public void ShowMessage(string message, bool isError)
     {
-        pendingMessage = new PendingMessage(message ?? string.Empty, isError);
-        WriteMessage(pendingMessage.Message, pendingMessage.IsError);
+        var nextMessage = new PendingMessage(message ?? string.Empty, isError);
+        if (liveContext is not null)
+        {
+            if (latestState is null)
+                exitMessage = nextMessage;
+            else
+                pendingMessage = nextMessage;
+            return;
+        }
+
+        WriteMessage(nextMessage.Message, nextMessage.IsError);
     }
 
     private static Panel BuildPanel(SessionManagerState state, ManagedAgent agent, int width)
