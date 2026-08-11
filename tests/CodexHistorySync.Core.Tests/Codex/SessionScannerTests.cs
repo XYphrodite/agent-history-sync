@@ -30,6 +30,33 @@ public sealed class SessionScannerTests
     }
 
     [Fact]
+    public async Task ScanDetailedAsyncUsesOneStabilityWindowAndRejectsAChangedCandidate()
+    {
+        // A per-candidate wait makes large histories start linearly slower and loses the shared snapshot boundary.
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        var stable = await fixture.WriteSessionAsync("sessions", "stable.jsonl", "stable-thread");
+        var changing = await fixture.WriteSessionAsync("sessions", "changing.jsonl", "changing-thread");
+        var waits = 0;
+        var scanner = new SessionScanner(async cancellationToken =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            waits++;
+            await File.AppendAllTextAsync(
+                changing,
+                "{\"type\":\"event\",\"payload\":{}}\n",
+                cancellationToken);
+        });
+
+        var result = await scanner.ScanDetailedAsync(
+            CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+
+        Assert.Equal(1, waits);
+        Assert.Contains(result.Objects, item => item.SourcePath == Path.GetFullPath(stable));
+        Assert.DoesNotContain(result.Objects, item => item.SourcePath == Path.GetFullPath(changing));
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
+    }
+
+    [Fact]
     public async Task ScanAsyncDoesNotTreatAttachmentLikeJsonStringsAsAttachmentPaths()
     {
         // Broad JSON string discovery would allow a session to export arbitrary local files.
