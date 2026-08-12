@@ -9,6 +9,45 @@ namespace CodexHistorySync.Core.Tests.Management;
 public sealed class LocalSessionCatalogTests
 {
     [Fact]
+    public async Task ScanAsyncReadsNativeGrokTextBlockAndNormalizesWhitespace()
+    {
+        await using var fixture = new CatalogFixture();
+        const string id = "53000000-0000-0000-0000-000000000003";
+        var session = fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, id);
+        Directory.CreateDirectory(session);
+        await File.WriteAllTextAsync(Path.Combine(session, "chat_history.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                type = "user",
+                content = new[] { new { type = "text", text = "  First\r\n\t  Grok   question  " } }
+            }) + "\n", new UTF8Encoding(false));
+        await File.WriteAllTextAsync(Path.Combine(session, "summary.json"),
+            JsonSerializer.Serialize(new
+            {
+                info = new { id, cwd = fixture.WorkingDirectory, title = (string?)null,
+                    updated_at = "2026-08-09T13:00:00Z" }
+            }), new UTF8Encoding(false));
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal("First Grok question", Assert.Single(snapshot.Grok).Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncNormalizesExplicitTitleAndFallsBackWhenItIsOnlyWhitespace()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("normalized", "  Multi\r\n\t line   title  ", "question",
+            "2026-08-09T12:00:00Z");
+        await fixture.WriteCodexAsync("fallback", " \r\n\t ", "", "2026-08-09T11:00:00Z");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal("Multi line title", snapshot.Codex[0].Title);
+        Assert.Equal("fallback", snapshot.Codex[1].Title);
+    }
+
+    [Fact]
     public async Task ScanAsyncOrdersEachAgentByDescendingModifiedTimeAndExtractsTitles()
     {
         await using var fixture = new CatalogFixture();

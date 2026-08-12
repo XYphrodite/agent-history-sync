@@ -11,6 +11,15 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
     private const int MaximumMetadataBytes = 64 * 1024;
     private const int MaximumMetadataRecords = 64;
     private static readonly UTF8Encoding Utf8 = new(false, true);
+    private static readonly IReadOnlySet<string> CodexTextBlockTypes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "input_text"
+    };
+    private static readonly IReadOnlySet<string> GrokTextBlockTypes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "text",
+        "input_text"
+    };
     private static readonly HashSet<string> CodexDisallowedDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
     {
         "logs", "cache", "tmp", "temp", ".sandbox", ".sandbox-secrets", "machine", "machines",
@@ -367,9 +376,9 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             {
                 using var document = JsonDocument.Parse(line);
                 var root = document.RootElement;
-                if (string.Equals(GetString(root, "role") ?? GetString(root, "type"), "user",
-                        StringComparison.Ordinal))
-                    return Preview(ReadTextContent(root, "input_text"));
+                if (string.Equals(GetString(root, "role"), "user", StringComparison.Ordinal) ||
+                    string.Equals(GetString(root, "type"), "user", StringComparison.Ordinal))
+                    return Preview(ReadTextContent(root, GrokTextBlockTypes));
             }
             catch (JsonException) { return null; }
         }
@@ -381,10 +390,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         if (!string.Equals(GetString(payload, "type"), "message", StringComparison.Ordinal) ||
             !string.Equals(GetString(payload, "role"), "user", StringComparison.Ordinal))
             return null;
-        return Preview(ReadTextContent(payload, "input_text"));
+        return Preview(ReadTextContent(payload, CodexTextBlockTypes));
     }
 
-    private static string? ReadTextContent(JsonElement element, string expectedType)
+    private static string? ReadTextContent(JsonElement element, IReadOnlySet<string> allowedBlockTypes)
     {
         if (!element.TryGetProperty("content", out var content)) return null;
         if (content.ValueKind == JsonValueKind.String) return content.GetString();
@@ -392,7 +401,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         foreach (var block in content.EnumerateArray())
         {
             if (block.ValueKind == JsonValueKind.Object &&
-                string.Equals(GetString(block, "type"), expectedType, StringComparison.Ordinal) &&
+                GetString(block, "type") is { } blockType && allowedBlockTypes.Contains(blockType) &&
                 GetString(block, "text") is { } text)
                 return text;
         }
@@ -401,9 +410,29 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
 
     private static string? Preview(string? value)
     {
-        var trimmed = value?.Trim();
-        if (string.IsNullOrEmpty(trimmed)) return null;
-        return trimmed.Length <= MaximumTitleLength ? trimmed : trimmed[..MaximumTitleLength];
+        var normalized = NormalizeTitle(value);
+        return normalized is null ? null : normalized.Length <= MaximumTitleLength
+            ? normalized
+            : normalized[..MaximumTitleLength];
+    }
+
+    private static string? NormalizeTitle(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var builder = new StringBuilder(value.Length);
+        var pendingSpace = false;
+        foreach (var character in value.Trim())
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+            if (pendingSpace) builder.Append(' ');
+            builder.Append(character);
+            pendingSpace = false;
+        }
+        return builder.Length == 0 ? null : builder.ToString();
     }
 
     private static void AddLatestTimestamp(JsonElement element, ref DateTimeOffset? latest)
@@ -470,7 +499,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
 
     private static string DisplayTitle(string? title, string fallback)
     {
-        var value = string.IsNullOrWhiteSpace(title) ? fallback : title.Trim();
+        var value = NormalizeTitle(title) ?? fallback;
         return value.Length <= MaximumTitleLength ? value : value[..MaximumTitleLength];
     }
 
