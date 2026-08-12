@@ -111,6 +111,18 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
+    public void Render_uses_session_id_for_whitespace_only_title()
+    {
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "fallback-session-id", " \r\n\t ")], []));
+        var console = CreateConsole(out var output, 100, 12);
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        Assert.Contains("fallback-session-id", output.ToString());
+    }
+
+    [Fact]
     public void Render_handles_empty_lists_and_minimum_dimensions()
     {
         var console = CreateConsole(out var output, 60, 8);
