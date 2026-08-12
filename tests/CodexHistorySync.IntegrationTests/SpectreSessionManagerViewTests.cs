@@ -91,6 +91,26 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
+    public void Render_collapses_multiline_title_and_keeps_selected_row_in_small_viewport()
+    {
+        var sessions = Enumerable.Range(0, 8)
+            .Select(index => Session(ManagedAgent.Codex, $"id-{index}",
+                index == 7 ? "  Selected\r\n\t session   title  " : $"title-{index}"))
+            .ToArray();
+        var state = new SessionManagerState(Snapshot(sessions, []));
+        for (var index = 0; index < 7; index++)
+            state = state.ApplyNavigation(SessionManagerCommand.MoveDown);
+        var console = CreateConsole(out var output, 80, 10);
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        Assert.Contains("Selected sess…", rendered);
+        Assert.DoesNotContain("Selected\r", rendered);
+        Assert.DoesNotContain("title-0", rendered);
+    }
+
+    [Fact]
     public void Render_handles_empty_lists_and_minimum_dimensions()
     {
         var console = CreateConsole(out var output, 60, 8);
