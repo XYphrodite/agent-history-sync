@@ -257,6 +257,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         if (marker.Length >= maximum) return marker[..maximum];
         var availableTitle = maximum - marker.Length;
         var title = NormalizeWhitespace(session.Title);
+        if (title.Length == 0) title = session.SessionId;
         if (title.Length > availableTitle)
             title = availableTitle == 1 ? "…" : string.Concat(title.AsSpan(0, availableTitle - 1), "…");
         return marker + title;
