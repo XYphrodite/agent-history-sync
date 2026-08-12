@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using CodexHistorySync.Core.Management;
 using Spectre.Console;
 using Spectre.Console.Rendering;
@@ -255,10 +256,29 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         var maximum = Math.Max(4, panelWidth - 25);
         if (marker.Length >= maximum) return marker[..maximum];
         var availableTitle = maximum - marker.Length;
-        var title = session.Title ?? string.Empty;
+        var title = NormalizeWhitespace(session.Title);
         if (title.Length > availableTitle)
             title = availableTitle == 1 ? "…" : string.Concat(title.AsSpan(0, availableTitle - 1), "…");
         return marker + title;
+    }
+
+    private static string NormalizeWhitespace(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var builder = new StringBuilder(value.Length);
+        var pendingSpace = false;
+        foreach (var character in value.Trim())
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+            if (pendingSpace) builder.Append(' ');
+            builder.Append(character);
+            pendingSpace = false;
+        }
+        return builder.ToString();
     }
 
     private void WriteMessage(string message, bool isError)
