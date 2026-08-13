@@ -414,7 +414,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 return null;
             var metadataId = GetString(info, "id");
             if (!string.Equals(metadataId, sessionId, StringComparison.OrdinalIgnoreCase)) return null;
-            var title = GetString(info, "title") ?? GetString(root, "title");
+            var title = GetString(root, "generated_title")
+                        ?? GetString(root, "session_summary")
+                        ?? GetString(info, "title")
+                        ?? GetString(root, "title");
             var cwd = GetString(info, "cwd") ?? GetString(root, "cwd");
             DateTimeOffset? modified = null;
             AddLatestTimestamp(info, ref modified);

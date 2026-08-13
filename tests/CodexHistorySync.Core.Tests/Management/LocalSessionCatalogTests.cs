@@ -137,6 +137,48 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncUsesGrokGeneratedTitleBeforeOtherSources()
+    {
+        // Removing generated_title precedence would expose the legacy info.title instead.
+        await using var fixture = new CatalogFixture();
+        const string id = "54000000-0000-0000-0000-000000000004";
+        await fixture.WriteGrokSummaryAsync(id, "Official Grok name", "Summary name",
+            "Legacy info", "Legacy root", "<user_info>technical</user_info>");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.Equal("Official Grok name", session.Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesStringGrokSessionSummaryWhenGeneratedTitleIsAbsent()
+    {
+        // Ignoring the string summary would fall through to the legacy info.title.
+        await using var fixture = new CatalogFixture();
+        const string id = "55000000-0000-0000-0000-000000000005";
+        await fixture.WriteGrokSummaryAsync(id, null, "Official summary",
+            "Legacy info", "Legacy root", "fallback");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.Equal("Official summary", session.Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncIgnoresNonStringGrokSessionSummaryBeforeInfoTitle()
+    {
+        // Accepting JSON objects as titles would prevent the legacy string title from being shown.
+        await using var fixture = new CatalogFixture();
+        const string id = "56000000-0000-0000-0000-000000000006";
+        await fixture.WriteGrokSummaryAsync(id, null, new { title = "Object summary" },
+            "Legacy info", "Legacy root", "fallback");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.Equal("Legacy info", session.Title);
+    }
+
+    [Fact]
     public async Task ScanAsyncNormalizesExplicitTitleAndFallsBackWhenItIsOnlyWhitespace()
     {
         await using var fixture = new CatalogFixture();
@@ -444,6 +486,36 @@ public sealed class LocalSessionCatalogTests
             Directory.CreateDirectory(session);
             await WriteGrokFilesAsync(session, id, WorkingDirectory, title, userText, modifiedAt);
             return session;
+        }
+
+        public async Task WriteGrokSummaryAsync(
+            string id,
+            string? generatedTitle,
+            object? sessionSummary,
+            string? infoTitle,
+            string? rootTitle,
+            string userText)
+        {
+            var session = GrokPaths.SessionDirectory(WorkingDirectory, id);
+            Directory.CreateDirectory(session);
+            await File.WriteAllTextAsync(Path.Combine(session, "chat_history.jsonl"),
+                JsonSerializer.Serialize(new
+                {
+                    role = "user",
+                    content = new[] { new { type = "input_text", text = userText } }
+                }) + "\n", Utf8);
+            await File.WriteAllTextAsync(Path.Combine(session, "summary.json"),
+                JsonSerializer.Serialize(new
+                {
+                    generated_title = generatedTitle,
+                    session_summary = sessionSummary,
+                    info = new
+                    {
+                        id, cwd = WorkingDirectory, title = infoTitle,
+                        created_at = "2026-08-09T08:00:00Z", updated_at = "2026-08-09T16:00:00Z"
+                    },
+                    title = rootTitle
+                }), Utf8);
         }
 
         public async Task<string> WriteMalformedCodexAsync(string id)
