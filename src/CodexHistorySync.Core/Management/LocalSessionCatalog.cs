@@ -20,6 +20,17 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         "text",
         "input_text"
     };
+    private static readonly string[] TechnicalPreviewOpeningTags =
+    [
+        "<environment_context>",
+        "<recommended_plugins>",
+        "<user_info>",
+        "<system-reminder>",
+        "<permissions instructions>",
+        "<skills_instructions>",
+        "<apps_instructions>",
+        "<plugins_instructions>"
+    ];
     private static readonly HashSet<string> CodexDisallowedDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
     {
         "logs", "cache", "tmp", "temp", ".sandbox", ".sandbox-secrets", "machine", "machines",
@@ -314,7 +325,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                     else if (firstUser is null &&
                              string.Equals(type.GetString(), "response_item", StringComparison.Ordinal))
                     {
-                        firstUser = ReadCodexUserPreview(payload);
+                        var preview = ReadCodexUserPreview(payload);
+                        if (preview is not null && !IsTechnicalPreview(preview)) firstUser = preview;
                     }
                 }
             }
@@ -448,7 +460,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 var root = document.RootElement;
                 if (string.Equals(GetString(root, "role"), "user", StringComparison.Ordinal) ||
                     string.Equals(GetString(root, "type"), "user", StringComparison.Ordinal))
-                    return Preview(ReadTextContent(root, GrokTextBlockTypes));
+                {
+                    var preview = Preview(ReadTextContent(root, GrokTextBlockTypes));
+                    if (preview is not null && !IsTechnicalPreview(preview)) return preview;
+                }
             }
             catch (JsonException) { return null; }
         }
@@ -462,6 +477,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             return null;
         return Preview(ReadTextContent(payload, CodexTextBlockTypes));
     }
+
+    private static bool IsTechnicalPreview(string? preview) =>
+        preview is not null && TechnicalPreviewOpeningTags.Any(tag =>
+            preview.StartsWith(tag, StringComparison.OrdinalIgnoreCase));
 
     private static string? ReadTextContent(JsonElement element, IReadOnlySet<string> allowedBlockTypes)
     {
