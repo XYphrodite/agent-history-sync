@@ -373,6 +373,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 {
                     using var document = JsonDocument.Parse(line);
                     var root = document.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object) continue;
                     var id = GetString(root, "id");
                     var title = NormalizeTitle(GetString(root, "thread_name"));
                     if (IsSafeCodexSessionId(id) && title is not null) titles[id!] = title;
