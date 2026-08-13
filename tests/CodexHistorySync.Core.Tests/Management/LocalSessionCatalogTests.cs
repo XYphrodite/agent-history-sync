@@ -9,6 +9,63 @@ namespace CodexHistorySync.Core.Tests.Management;
 public sealed class LocalSessionCatalogTests
 {
     [Fact]
+    public async Task ScanAsyncUsesCodexIndexThreadNameBeforeMetadataAndHistory()
+    {
+        // Replacing the official index lookup with metadata precedence must restore "Metadata title".
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("indexed", "Metadata title",
+            "<environment_context>technical</environment_context>", "2026-08-09T12:00:00Z");
+        await fixture.WriteCodexIndexAsync(
+            new { id = "indexed", thread_name = "Official Codex name" });
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("Official Codex name", session.Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesLastCodexIndexEntryForDuplicateId()
+    {
+        // Keeping the first matching index entry must return "Old name" instead.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("duplicate", null, "fallback", "2026-08-09T12:00:00Z");
+        await fixture.WriteCodexIndexAsync(
+            new { id = "duplicate", thread_name = "Old name" },
+            new { id = "duplicate", thread_name = "Newest name" });
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("Newest name", session.Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncReadsBoundedCodexIndexTailAndIgnoresMalformedLines()
+    {
+        // Reading from byte zero would incorrectly load "Old index name"; parsing the partial first tail line would throw.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("old-index", "Old metadata", "old fallback", "2026-08-09T11:00:00Z");
+        await fixture.WriteCodexAsync("retained-index", "Retained metadata", "retained fallback", "2026-08-09T12:00:00Z");
+
+        var oldRecord = JsonSerializer.Serialize(new
+        {
+            id = "old-index", thread_name = "Old index name", padding = new string('x', 70 * 1024)
+        });
+        var retainedRecords = Enumerable.Range(0, 65)
+            .Select(index => JsonSerializer.Serialize(new { id = $"noise-{index}", thread_name = "noise" }));
+        var indexText = oldRecord + "\n" + string.Join("\n", retainedRecords) +
+                        "\n{malformed-json}\n" +
+                        JsonSerializer.Serialize(new { id = "retained-index", thread_name = "Old retained name" }) + "\n" +
+                        JsonSerializer.Serialize(new { id = "retained-index", thread_name = "Final retained name" }) + "\n";
+        await fixture.WriteCodexIndexTextAsync(indexText);
+
+        var sessions = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal("Old metadata", Assert.Single(sessions.Codex, session => session.SessionId == "old-index").Title);
+        Assert.Equal("Final retained name",
+            Assert.Single(sessions.Codex, session => session.SessionId == "retained-index").Title);
+    }
+
+    [Fact]
     public async Task ScanAsyncReadsNativeGrokTextBlockAndNormalizesWhitespace()
     {
         await using var fixture = new CatalogFixture();
@@ -324,6 +381,12 @@ public sealed class LocalSessionCatalogTests
                 JsonSerializer.Serialize(metadata) + "\n" + JsonSerializer.Serialize(message) + "\n", Utf8);
             return path;
         }
+
+        public Task WriteCodexIndexAsync(params object[] records) =>
+            WriteCodexIndexTextAsync(string.Join("\n", records.Select(record => JsonSerializer.Serialize(record))) + "\n");
+
+        public Task WriteCodexIndexTextAsync(string text) =>
+            File.WriteAllTextAsync(Path.Combine(CodexHome, "session_index.jsonl"), text, Utf8);
 
         public async Task<string> WriteGrokAsync(
             string id,

@@ -58,6 +58,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         var result = new List<ManagedSession>();
         if (codexPaths is null) return result;
 
+        var officialTitles = await ReadCodexTitleIndexAsync(codexPaths, cancellationToken).ConfigureAwait(false);
+
         var stable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -96,7 +98,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 nativePath,
                 isStable,
                 metadata,
-                isActive));
+                isActive,
+                officialTitles.GetValueOrDefault(sessionId!)));
         }
         return result;
     }
@@ -172,7 +175,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         string nativePath,
         bool stable,
         DisplayMetadata? metadata,
-        bool isActive)
+        bool isActive,
+        string? officialTitle = null)
     {
         var identityMatches = metadata is not null &&
                               string.Equals(metadata.SessionId, sessionId, StringComparison.OrdinalIgnoreCase);
@@ -180,7 +184,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             agent,
             sessionId,
             nativePath,
-            identityMatches ? DisplayTitle(metadata!.Title, sessionId) : sessionId,
+            identityMatches ? DisplayTitle(officialTitle ?? metadata!.Title, sessionId) : sessionId,
             identityMatches && metadata!.LastModifiedAt is { } modified
                 ? modified
                 : LastWriteTime(nativePath, agent == ManagedAgent.Grok),
@@ -326,6 +330,68 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                                           DecoderFallbackException or ArgumentException)
         {
             return null;
+        }
+    }
+
+    private static async Task<IReadOnlyDictionary<string, string>> ReadCodexTitleIndexAsync(
+        CodexPaths paths,
+        CancellationToken cancellationToken)
+    {
+        var titles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var path = Path.Combine(paths.Home, "session_index.jsonl");
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, FileOptions.SequentialScan);
+            var offset = Math.Max(0, stream.Length - MaximumMetadataBytes);
+            stream.Seek(offset, SeekOrigin.Begin);
+            var bytes = new byte[checked((int)Math.Min(MaximumMetadataBytes, stream.Length - offset))];
+            var count = 0;
+            while (count < bytes.Length)
+            {
+                var read = await stream.ReadAsync(bytes.AsMemory(count), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                count += read;
+            }
+
+            var first = offset == 0 ? 0 : Array.IndexOf(bytes, (byte)'\n', 0, count) + 1;
+            var last = Array.LastIndexOf(bytes, (byte)'\n', count - 1, count);
+            if (first == 0 && offset != 0 || first > last || last < 0) return titles;
+
+            var text = Utf8.GetString(bytes, first, last - first + 1);
+            var lines = new List<string>();
+            using (var reader = new StringReader(text))
+            {
+                while (reader.ReadLine() is { } line) lines.Add(line);
+            }
+
+            foreach (var line in lines.TakeLast(MaximumMetadataRecords))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    var root = document.RootElement;
+                    var id = GetString(root, "id");
+                    var title = NormalizeTitle(GetString(root, "thread_name"));
+                    if (IsSafeCodexSessionId(id) && title is not null) titles[id!] = title;
+                }
+                catch (JsonException)
+                {
+                    // A malformed index line does not invalidate other complete records.
+                }
+            }
+            return titles;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          DecoderFallbackException or ArgumentException)
+        {
+            return titles;
         }
     }
 
