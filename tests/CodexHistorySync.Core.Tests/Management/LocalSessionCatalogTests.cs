@@ -39,6 +39,52 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncIgnoresNonObjectCodexIndexLines()
+    {
+        // Treating a valid non-object JSON value as an object currently aborts scanning instead of reaching this record.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("non-object-index", "Metadata title", "fallback", "2026-08-09T12:00:00Z");
+        await fixture.WriteCodexIndexTextAsync("null\n[]\n\"ignored\"\n" +
+            JsonSerializer.Serialize(new { id = "non-object-index", thread_name = "Official title" }) + "\n");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("Official title", session.Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesOnlyLast64CompleteCodexIndexRecords()
+    {
+        // Removing the final-record cap would let this old same-session title override metadata.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("capped-index", "Metadata title", "fallback", "2026-08-09T12:00:00Z");
+        var records = new[] { JsonSerializer.Serialize(new { id = "capped-index", thread_name = "Dropped old title" }) }
+            .Concat(Enumerable.Range(0, 64)
+                .Select(index => JsonSerializer.Serialize(new { id = $"noise-{index}", thread_name = "noise" })));
+        await fixture.WriteCodexIndexTextAsync(string.Join("\n", records) + "\n");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("Metadata title", session.Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncDiscardsCompleteCodexIndexLineAtRetainedTailBoundary()
+    {
+        // Removing the initial-tail-line discard would make this boundary record override metadata.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("boundary-index", "Metadata title", "fallback", "2026-08-09T12:00:00Z");
+        var boundaryRecord = JsonSerializer.Serialize(new { id = "boundary-index", thread_name = "Boundary title" }) + "\n";
+        var retainedFillerLength = 64 * 1024 - Encoding.UTF8.GetByteCount(boundaryRecord);
+        var indexText = new string('x', 70 * 1024) + boundaryRecord + new string('y', retainedFillerLength);
+        await fixture.WriteCodexIndexTextAsync(indexText);
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("Metadata title", session.Title);
+    }
+
+    [Fact]
     public async Task ScanAsyncReadsBoundedCodexIndexTailAndIgnoresMalformedLines()
     {
         // Reading from byte zero would incorrectly load "Old index name"; parsing the partial first tail line would throw.
