@@ -8,6 +8,74 @@ namespace CodexHistorySync.Core.Tests.Management;
 
 public sealed class LocalSessionCatalogTests
 {
+    [Theory]
+    [InlineData("<environment_context>")]
+    [InlineData("<recommended_plugins>")]
+    [InlineData("<user_info>")]
+    [InlineData("<system-reminder>")]
+    [InlineData("<permissions instructions>")]
+    [InlineData("<skills_instructions>")]
+    [InlineData("<apps_instructions>")]
+    [InlineData("<plugins_instructions>")]
+    public async Task ScanAsyncSkipsTechnicalOpeningUserMessages(string openingTag)
+    {
+        // Returning the first supported user preview would expose the injected wrapper instead of the user request.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexUsersAsync("technical-codex", null,
+            $" \t{openingTag} injected context", "Real user request");
+        await fixture.WriteGrokUsersAsync("57000000-0000-0000-0000-000000000007", null,
+            $" \t{openingTag} injected context", "Real user request");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal("Real user request", Assert.Single(snapshot.Codex).Title);
+        Assert.Equal("Real user request", Assert.Single(snapshot.Grok).Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncKeepsOrdinaryTextContainingTag()
+    {
+        // Treating a tag anywhere in the text as technical would hide this ordinary user request.
+        await using var fixture = new CatalogFixture();
+        const string request = "Explain this later <environment_context> tag";
+        await fixture.WriteCodexUsersAsync("ordinary-codex", null, request);
+        await fixture.WriteGrokUsersAsync("58000000-0000-0000-0000-000000000008", null, request);
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal(request, Assert.Single(snapshot.Codex).Title);
+        Assert.Equal(request, Assert.Single(snapshot.Grok).Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesIdWhenOnlyTechnicalUserMessages()
+    {
+        // Returning a technical fallback instead of no preview would prevent the safe session ID last resort.
+        await using var fixture = new CatalogFixture();
+        const string codexId = "technical-only-codex";
+        const string grokId = "59000000-0000-0000-0000-000000000009";
+        await fixture.WriteCodexUsersAsync(codexId, null, "<environment_context>context", "<apps_instructions>apps");
+        await fixture.WriteGrokUsersAsync(grokId, null, "<environment_context>context", "<apps_instructions>apps");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal(codexId, Assert.Single(snapshot.Codex).Title);
+        Assert.Equal(grokId, Assert.Single(snapshot.Grok).Title);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesRootGrokTitleWhenHigherPriorityTitlesAreAbsent()
+    {
+        // Removing root-title fallback would expose the user-preview title instead.
+        await using var fixture = new CatalogFixture();
+        const string id = "60000000-0000-0000-0000-000000000010";
+        await fixture.WriteGrokSummaryAsync(id, null, null, null, "Root-only Grok title", "fallback request");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.Equal("Root-only Grok title", session.Title);
+    }
+
     [Fact]
     public async Task ScanAsyncUsesCodexIndexThreadNameBeforeMetadataAndHistory()
     {
@@ -470,6 +538,31 @@ public sealed class LocalSessionCatalogTests
             return path;
         }
 
+        public async Task WriteCodexUsersAsync(string id, string? title, params string[] userTexts)
+        {
+            var directory = Path.Combine(CodexPaths.Sessions, "2026", "08", "09");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, $"rollout-{id}.jsonl");
+            var records = new List<string>
+            {
+                JsonSerializer.Serialize(new
+                {
+                    type = "session_meta",
+                    payload = new { id, timestamp = "2026-08-09T08:00:00Z", cwd = WorkingDirectory, title }
+                })
+            };
+            records.AddRange(userTexts.Select((text, index) => JsonSerializer.Serialize(new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message", role = "user", timestamp = $"2026-08-09T12:{index:D2}:00Z",
+                    content = new[] { new { type = "input_text", text } }
+                }
+            })));
+            await File.WriteAllTextAsync(path, string.Join("\n", records) + "\n", Utf8);
+        }
+
         public Task WriteCodexIndexAsync(params object[] records) =>
             WriteCodexIndexTextAsync(string.Join("\n", records.Select(record => JsonSerializer.Serialize(record))) + "\n");
 
@@ -486,6 +579,26 @@ public sealed class LocalSessionCatalogTests
             Directory.CreateDirectory(session);
             await WriteGrokFilesAsync(session, id, WorkingDirectory, title, userText, modifiedAt);
             return session;
+        }
+
+        public async Task WriteGrokUsersAsync(string id, string? title, params string[] userTexts)
+        {
+            var session = GrokPaths.SessionDirectory(WorkingDirectory, id);
+            Directory.CreateDirectory(session);
+            var records = userTexts.Select(text => JsonSerializer.Serialize(new
+            {
+                role = "user",
+                content = new[] { new { type = "input_text", text } }
+            }));
+            await File.WriteAllTextAsync(Path.Combine(session, "chat_history.jsonl"), string.Join("\n", records) + "\n", Utf8);
+            await File.WriteAllTextAsync(Path.Combine(session, "summary.json"), JsonSerializer.Serialize(new
+            {
+                info = new
+                {
+                    id, cwd = WorkingDirectory, title,
+                    created_at = "2026-08-09T08:00:00Z", updated_at = "2026-08-09T16:00:00Z"
+                }
+            }), Utf8);
         }
 
         public async Task WriteGrokSummaryAsync(
