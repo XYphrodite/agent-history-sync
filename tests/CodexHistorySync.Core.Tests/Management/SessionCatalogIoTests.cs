@@ -46,6 +46,25 @@ public sealed class SessionCatalogIoTests
     }
 
     [Fact]
+    public async Task ReadTailAsyncRetainsTheExactEofSuffixWithinThePhysicalBudget()
+    {
+        // Reserving boundary context by ending early would silently drop this final JSONL record.
+        await using var fixture = new CatalogIoFixture();
+        const string finalRecord = "{\"final\":true}\n";
+        var path = await fixture.WriteAsync(new string('a', 100) + "\n" + finalRecord);
+        var physicalBytesRead = 0L;
+        var io = new SystemSessionCatalogIo((sourcePath, bufferSize) => new RecordingStream(
+            new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize),
+            bytes => physicalBytesRead += bytes));
+
+        var read = await io.ReadTailAsync(path, 32, CancellationToken.None);
+
+        Assert.Equal(32, read.BytesRead);
+        Assert.Equal(32, physicalBytesRead);
+        Assert.EndsWith(finalRecord, read.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReadPrefixAsyncTrimsAnIncompleteTrailingUtf8Sequence()
     {
         // Passing an incomplete terminal sequence to strict UTF-8 would reject an otherwise valid bounded prefix.
@@ -68,20 +87,32 @@ public sealed class SessionCatalogIoTests
 
         var read = await new SystemSessionCatalogIo().ReadTailAsync(path, 4, CancellationToken.None);
 
-        Assert.Equal("x", read.Text);
+        Assert.Equal("xy", read.Text);
         Assert.Equal(4, read.BytesRead);
         Assert.False(read.IsComplete);
     }
 
     [Fact]
-    public async Task ReadTailAsyncRejectsMalformedLeadingContinuationWithinTheWindow()
+    public async Task ReadTailAsyncTreatsLeadingContinuationAsABoundaryFragment()
     {
-        // A continuation byte without a preceding multibyte lead must remain visible to strict UTF-8.
+        // The initial partial JSONL line is discarded by the caller, including this untrusted boundary fragment.
         await using var fixture = new CatalogIoFixture();
         var path = await fixture.WriteBytesAsync([0x61, 0x80, 0x62]);
 
+        var read = await new SystemSessionCatalogIo().ReadTailAsync(path, 2, CancellationToken.None);
+
+        Assert.Equal("b", read.Text);
+    }
+
+    [Fact]
+    public async Task ReadTailAsyncRejectsMalformedContinuationAfterTheBoundaryFragment()
+    {
+        // Strict decoding applies after the untrusted leading tail fragment.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0x61, 0x0A, 0x80, 0x62]);
+
         await Assert.ThrowsAsync<DecoderFallbackException>(() =>
-            new SystemSessionCatalogIo().ReadTailAsync(path, 2, CancellationToken.None));
+            new SystemSessionCatalogIo().ReadTailAsync(path, 3, CancellationToken.None));
     }
 
     [Fact]
