@@ -79,6 +79,38 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task CodexSourceUsesCompleteEofIndexRecordWithoutTerminalNewline()
+    {
+        // Discarding every final line from a bounded tail would lose the newest official title at EOF.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("eof-index", "Metadata fallback", "question", "2026-08-09T15:00:00Z");
+        var newest = JsonSerializer.Serialize(new { id = "eof-index", thread_name = "EOF official title" });
+        await fixture.WriteCodexIndexTextAsync(new string('x', 70 * 1024) + "\n" + newest);
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("EOF official title", row.Title);
+    }
+
+    [Fact]
+    public async Task CodexSourceIgnoresTruncatedEofIndexRecordWithoutTerminalNewline()
+    {
+        // Parsing a syntactically incomplete EOF record would let corrupt index data override safe metadata.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("truncated-eof-index", "Metadata fallback", "question", "2026-08-09T15:00:00Z");
+        await fixture.WriteCodexIndexTextAsync(new string('x', 70 * 1024) + "\n" +
+            "{\"id\":\"truncated-eof-index\",\"thread_name\":\"Not complete\"");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Metadata fallback", row.Title);
+    }
+
+    [Fact]
     public async Task CodexSourceUsesMeaningfulPreviewWhenMetadataTitleIsBlank()
     {
         // Treating blank metadata as a title would fall through to the ID instead of the actual user request.
