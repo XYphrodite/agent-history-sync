@@ -8,6 +8,163 @@ namespace CodexHistorySync.Core.Tests.Management;
 
 public sealed class LocalSessionCatalogTests
 {
+    [Fact]
+    public async Task CodexSourceUsesOneEnumerationAndBoundedMetadata()
+    {
+        // Replacing the bounded metadata read with an unbounded read must make the recording IO observe a >64 KiB budget.
+        await using var fixture = new CatalogFixture();
+        var path = await fixture.WriteCodexAsync("bounded", "Bounded title", "question", "2026-08-09T15:00:00Z");
+        await File.AppendAllTextAsync(path, new string('x', 2 * 1024 * 1024));
+        var io = new RecordingCatalogIo(new SystemSessionCatalogIo());
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new CodexSessionCatalogSource(fixture.CodexPaths, io)
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.True(Assert.Single(rows).CanRead);
+        Assert.All(io.ReadBudgets, value => Assert.InRange(value, 1, 64 * 1024));
+        Assert.Equal(1, io.EnumerationCount(fixture.CodexPaths.Sessions));
+        Assert.Equal(1, io.EnumerationCount(fixture.CodexPaths.ArchivedSessions));
+    }
+
+    [Fact]
+    public async Task CodexSourceMakesDuplicateMetadataIdsUnreadable()
+    {
+        // Removing post-collection duplicate detection would expose both copies as readable.
+        await using var fixture = new CatalogFixture();
+        var active = await fixture.WriteCodexAsync("duplicate-source", "One", "one", "2026-08-09T10:00:00Z");
+        var target = Path.Combine(fixture.CodexPaths.ArchivedSessions, "rollout-duplicate-source.jsonl");
+        Directory.CreateDirectory(fixture.CodexPaths.ArchivedSessions);
+        File.Copy(active, target);
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, row => Assert.False(row.CanRead));
+    }
+
+    [Fact]
+    public async Task CodexSourceIgnoresMalformedBytesAfterMetadataPrefix()
+    {
+        // Continuing past the prefix would treat trailing malformed bytes as a metadata failure.
+        await using var fixture = new CatalogFixture();
+        var path = await fixture.WriteCodexAsync("prefix-only", "Prefix title", "question", "2026-08-09T15:00:00Z");
+        await File.AppendAllTextAsync(path, new string('x', 64 * 1024) + "{bad-json}");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Prefix title", row.Title);
+        Assert.True(row.CanRead);
+    }
+
+    [Fact]
+    public async Task CodexSourceUsesLastIndexNameAndSkipsTechnicalPreview()
+    {
+        // Using first index entry or accepting technical wrappers would return either "Old" or injected context.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("source-index", null, "<environment_context> injected", "2026-08-09T15:00:00Z");
+        await fixture.WriteCodexIndexAsync(
+            new { id = "source-index", thread_name = "Old" },
+            new { id = "source-index", thread_name = "Newest" });
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Newest", row.Title);
+    }
+
+    [Fact]
+    public async Task CodexSourceUsesMeaningfulPreviewWhenMetadataTitleIsBlank()
+    {
+        // Treating blank metadata as a title would fall through to the ID instead of the actual user request.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexUsersAsync("preview-source", "   ", "<environment_context> injected", "Real request");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Real request", row.Title);
+    }
+
+    [Fact]
+    public async Task CodexSourceKeepsIdentifiableMalformedMetadataVisibleButUnreadable()
+    {
+        // Ignoring the malformed retained record would incorrectly allow this candidate to be read.
+        await using var fixture = new CatalogFixture();
+        var path = await fixture.WriteCodexAsync("broken-source", "Title", "question", "2026-08-09T15:00:00Z");
+        await File.AppendAllTextAsync(path, "{bad-json}\n");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("broken-source", row.SessionId);
+        Assert.False(row.CanRead);
+    }
+
+    [Fact]
+    public async Task CodexSourcePropagatesRequestedReadCancellation()
+    {
+        // Converting cancellation to an unreadable row would make a cancelled refresh appear complete.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("cancel-source", null, "question", "2026-08-09T15:00:00Z");
+        using var cancellation = new CancellationTokenSource();
+        using var limiter = new SessionCatalogReadLimiter(8);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new CodexSessionCatalogSource(fixture.CodexPaths,
+                new CancelingCatalogIo(new SystemSessionCatalogIo(), cancellation))
+                .ScanAsync(limiter, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task CodexSourceSkipsExcludedDirectoryAndPreservesMetadataTimestamp()
+    {
+        // Including excluded files or falling back to file time would respectively expose this row or lose its known timestamp.
+        await using var fixture = new CatalogFixture();
+        var allowed = await fixture.WriteCodexAsync("timestamp-source", null, "question", "2026-08-09T15:00:00Z");
+        var logs = Path.Combine(fixture.CodexPaths.Sessions, "logs");
+        Directory.CreateDirectory(logs);
+        File.Copy(allowed, Path.Combine(logs, "rollout-excluded.jsonl"));
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("timestamp-source", row.SessionId);
+        Assert.Equal(DateTimeOffset.Parse("2026-08-09T15:00:00Z"), row.LastModifiedAt);
+    }
+
+    [Fact]
+    public async Task CodexSourceDoesNotFollowReparseFileTargets()
+    {
+        // Accepting a link beneath the root would let metadata outside the managed tree enter the catalog.
+        await using var fixture = new CatalogFixture();
+        var outside = await fixture.WriteCodexAsync("outside-source", "Outside", "question", "2026-08-09T15:00:00Z");
+        var link = Path.Combine(fixture.CodexPaths.Sessions, "linked-source.jsonl");
+        try
+        {
+            File.CreateSymbolicLink(link, outside);
+            fixture.ReparsePaths.Add(link);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Symbolic-link creation is unavailable: {exception.GetType().Name}");
+        }
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.DoesNotContain(rows, row => string.Equals(row.NativePath, Path.GetFullPath(link), StringComparison.OrdinalIgnoreCase));
+    }
+
     [Theory]
     [InlineData("<environment_context>")]
     [InlineData("<recommended_plugins>")]
@@ -697,7 +854,10 @@ public sealed class LocalSessionCatalogTests
             {
                 if ((Directory.Exists(link) || File.Exists(link)) &&
                     File.GetAttributes(link).HasFlag(FileAttributes.ReparsePoint))
-                    Directory.Delete(link);
+                {
+                    if (Directory.Exists(link)) Directory.Delete(link);
+                    else File.Delete(link);
+                }
             }
 
             var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Root));
@@ -735,6 +895,54 @@ public sealed class LocalSessionCatalogTests
             TotalQueries[agent] = TotalQueries.GetValueOrDefault(agent) + 1;
             return Task.FromResult(ActiveIds.Contains(sessionId));
         }
+    }
+
+    private sealed class RecordingCatalogIo(ISessionCatalogIo inner) : ISessionCatalogIo
+    {
+        private readonly Dictionary<string, int> enumerations = new(StringComparer.OrdinalIgnoreCase);
+
+        public List<int> ReadBudgets { get; } = [];
+
+        public IReadOnlyList<string> EnumerateFiles(string root, string pattern)
+        {
+            enumerations[root] = EnumerationCount(root) + 1;
+            return inner.EnumerateFiles(root, pattern);
+        }
+
+        public IReadOnlyList<string> EnumerateDirectories(string root) => inner.EnumerateDirectories(root);
+        public bool FileExists(string path) => inner.FileExists(path);
+        public DateTimeOffset LastWriteTime(string path) => inner.LastWriteTime(path);
+
+        public Task<BoundedTextRead> ReadPrefixAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+        {
+            ReadBudgets.Add(maximumBytes);
+            return inner.ReadPrefixAsync(path, maximumBytes, cancellationToken);
+        }
+
+        public Task<BoundedTextRead> ReadTailAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+        {
+            ReadBudgets.Add(maximumBytes);
+            return inner.ReadTailAsync(path, maximumBytes, cancellationToken);
+        }
+
+        public int EnumerationCount(string root) => enumerations.GetValueOrDefault(root);
+    }
+
+    private sealed class CancelingCatalogIo(ISessionCatalogIo inner, CancellationTokenSource cancellation) : ISessionCatalogIo
+    {
+        public IReadOnlyList<string> EnumerateFiles(string root, string pattern) => inner.EnumerateFiles(root, pattern);
+        public IReadOnlyList<string> EnumerateDirectories(string root) => inner.EnumerateDirectories(root);
+        public bool FileExists(string path) => inner.FileExists(path);
+        public DateTimeOffset LastWriteTime(string path) => inner.LastWriteTime(path);
+
+        public Task<BoundedTextRead> ReadPrefixAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+        {
+            cancellation.Cancel();
+            return inner.ReadPrefixAsync(path, maximumBytes, cancellationToken);
+        }
+
+        public Task<BoundedTextRead> ReadTailAsync(string path, int maximumBytes, CancellationToken cancellationToken) =>
+            inner.ReadTailAsync(path, maximumBytes, cancellationToken);
     }
 
 }
