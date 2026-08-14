@@ -217,6 +217,253 @@ public sealed class LocalSessionCatalogTests
         Assert.DoesNotContain(rows, row => string.Equals(row.NativePath, Path.GetFullPath(link), StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task GrokSourceUsesOfficialSummaryWithoutReadingChat()
+    {
+        // Reading chat despite a complete official title would needlessly inspect conversation content.
+        await using var fixture = new CatalogFixture();
+        var id = "61000000-0000-0000-0000-000000000011";
+        var directory = await fixture.WriteGrokAsync(
+            id, "Official", "fallback", "2026-08-09T15:00:00Z");
+        var io = new RecordingCatalogIo(new SystemSessionCatalogIo());
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new GrokSessionCatalogSource(fixture.GrokPaths, io)
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.Equal("Official", Assert.Single(rows).Title);
+        Assert.DoesNotContain(io.ReadPaths, value => string.Equals(
+            value, Path.Combine(directory, "chat_history.jsonl"),
+            StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, io.DirectoryEnumerationCount);
+    }
+
+    [Fact]
+    public async Task GrokSourceReadsOneBoundedChatPrefixWhenOfficialTitleIsMissing()
+    {
+        // Re-reading chat or using an unbounded budget would defeat the metadata-only catalog scan.
+        await using var fixture = new CatalogFixture();
+        var directory = await fixture.WriteGrokAsync(
+            "62000000-0000-0000-0000-000000000012", null, "Fallback question", "2026-08-09T15:00:00Z");
+        await File.AppendAllTextAsync(Path.Combine(directory, "chat_history.jsonl"), new string('x', 2 * 1024 * 1024));
+        var io = new RecordingCatalogIo(new SystemSessionCatalogIo());
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, io)
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Fallback question", row.Title);
+        Assert.Equal(1, io.ReadPaths.Count(path => string.Equals(path,
+            Path.Combine(directory, "chat_history.jsonl"), StringComparison.OrdinalIgnoreCase)));
+        Assert.All(io.ReadBudgets, value => Assert.InRange(value, 1, 64 * 1024));
+    }
+
+    [Fact]
+    public async Task GrokSourceMakesDuplicateUuidDirectoriesUnreadable()
+    {
+        // Omitting post-collection duplicate detection would make both copies actionable.
+        await using var fixture = new CatalogFixture();
+        const string id = "63000000-0000-0000-0000-000000000013";
+        await fixture.WriteGrokAsync(id, "First", "first", "2026-08-09T14:00:00Z");
+        var second = Path.Combine(fixture.GrokPaths.Sessions,
+            GrokPaths.EncodeCwdSegment(Path.Combine(fixture.Root, "other-working-directory")), id);
+        Directory.CreateDirectory(second);
+        await CatalogFixture.WriteGrokFilesAsync(second, id, Path.Combine(fixture.Root, "other-working-directory"),
+            "Second", "second", "2026-08-09T15:00:00Z");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, row => Assert.False(row.CanRead));
+    }
+
+    [Theory]
+    [InlineData("{bad-json}")]
+    [InlineData("null")]
+    public async Task GrokSourceKeepsMalformedOrNonObjectSummaryVisibleButUnreadable(string summary)
+    {
+        // Dropping the directory after a bad summary would hide a potentially recoverable native session.
+        await using var fixture = new CatalogFixture();
+        const string id = "64000000-0000-0000-0000-000000000014";
+        var directory = await fixture.WriteGrokAsync(id, "Ignored", "question", "2026-08-09T15:00:00Z");
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), summary);
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal(id, row.SessionId);
+        Assert.False(row.CanRead);
+    }
+
+    [Fact]
+    public async Task GrokSourceKeepsOversizedSummaryVisibleButUnreadable()
+    {
+        // Accepting a truncated summary would treat an unverified metadata document as actionable.
+        await using var fixture = new CatalogFixture();
+        const string id = "65000000-0000-0000-0000-000000000015";
+        var directory = await fixture.WriteGrokAsync(id, "Ignored", "question", "2026-08-09T15:00:00Z");
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), new string('x', 64 * 1024 + 1));
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal(id, row.SessionId);
+        Assert.False(row.CanRead);
+    }
+
+    [Fact]
+    public async Task GrokSourceMarksSummaryIdMismatchUnreadable()
+    {
+        // Trusting info.id without comparing it to the directory would permit a session identity swap.
+        await using var fixture = new CatalogFixture();
+        const string id = "66000000-0000-0000-0000-000000000016";
+        var directory = await fixture.WriteGrokAsync(id, "Title", "question", "2026-08-09T15:00:00Z");
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), JsonSerializer.Serialize(new
+        {
+            info = new { id = "67000000-0000-0000-0000-000000000017", cwd = fixture.WorkingDirectory, title = "Wrong" }
+        }));
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal(id, row.SessionId);
+        Assert.False(row.CanRead);
+    }
+
+    [Fact]
+    public async Task GrokSourceMarksMissingChatUnreadable()
+    {
+        // A summary alone cannot be synchronized as a native Grok session.
+        await using var fixture = new CatalogFixture();
+        const string id = "68000000-0000-0000-0000-000000000018";
+        await fixture.WriteGrokSummaryOnlyAsync(id, "Official title");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Official title", row.Title);
+        Assert.False(row.CanRead);
+    }
+
+    [Fact]
+    public async Task GrokSourceUsesChatTimestampWhenSummaryHasNoTimestamp()
+    {
+        // Falling back to directory write time loses the last known conversation timestamp.
+        await using var fixture = new CatalogFixture();
+        const string id = "69000000-0000-0000-0000-000000000019";
+        var directory = fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, id);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), JsonSerializer.Serialize(new
+        {
+            info = new { id, cwd = fixture.WorkingDirectory, title = "Official title" }
+        }));
+        await File.WriteAllTextAsync(Path.Combine(directory, "chat_history.jsonl"), JsonSerializer.Serialize(new
+        {
+            role = "user", timestamp = "2026-08-09T16:00:00Z", content = "question"
+        }) + "\n");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal(DateTimeOffset.Parse("2026-08-09T16:00:00Z"), row.LastModifiedAt);
+    }
+
+    [Fact]
+    public async Task GrokSourceSkipsTechnicalTextBlockBeforeRealTextBlock()
+    {
+        // Stopping at the first supported block would hide the actual user request in this record.
+        await using var fixture = new CatalogFixture();
+        const string id = "69500000-0000-0000-0000-000000000019";
+        var directory = fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, id);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), JsonSerializer.Serialize(new
+        {
+            info = new { id, cwd = fixture.WorkingDirectory, title = (string?)null, updated_at = "2026-08-09T15:00:00Z" }
+        }));
+        await File.WriteAllTextAsync(Path.Combine(directory, "chat_history.jsonl"), JsonSerializer.Serialize(new
+        {
+            role = "user",
+            content = new[]
+            {
+                new { type = "text", text = "<environment_context>technical wrapper" },
+                new { type = "input_text", text = "Real request" }
+            }
+        }) + "\n");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Real request", row.Title);
+    }
+
+    [Fact]
+    public async Task GrokSourceDoesNotFollowReparseDirectoryTargets()
+    {
+        // Reading a linked directory would make content outside the configured root catalog-visible.
+        await using var fixture = new CatalogFixture();
+        var outside = await fixture.WriteGrokAsync(
+            "70000000-0000-0000-0000-000000000020", "Outside", "question", "2026-08-09T15:00:00Z");
+        var link = Path.Combine(fixture.GrokPaths.Sessions,
+            "linked-working-directory", "70000000-0000-0000-0000-000000000020");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+            Directory.CreateSymbolicLink(link, outside);
+            fixture.ReparsePaths.Add(link);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip($"Symbolic-link creation is unavailable: {exception.GetType().Name}");
+        }
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.DoesNotContain(rows, row => string.Equals(row.NativePath, Path.GetFullPath(link), StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task GrokSourceSkipsUnsafeUuidDirectory()
+    {
+        // Treating arbitrary directory names as session IDs would bypass Grok's UUID validation.
+        await using var fixture = new CatalogFixture();
+        var directory = Path.Combine(fixture.GrokPaths.Sessions, "working-directory", "not-a-uuid");
+        Directory.CreateDirectory(directory);
+        await CatalogFixture.WriteGrokFilesAsync(directory, "not-a-uuid", fixture.WorkingDirectory,
+            "Unsafe", "question", "2026-08-09T15:00:00Z");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None);
+
+        Assert.Empty(rows);
+    }
+
+    [Fact]
+    public async Task GrokSourcePropagatesRequestedReadCancellation()
+    {
+        // Converting cancellation to an unreadable row would make a cancelled refresh appear complete.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteGrokAsync("71000000-0000-0000-0000-000000000021", null,
+            "question", "2026-08-09T15:00:00Z");
+        using var cancellation = new CancellationTokenSource();
+        using var limiter = new SessionCatalogReadLimiter(8);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new GrokSessionCatalogSource(fixture.GrokPaths,
+                new CancelingCatalogIo(new SystemSessionCatalogIo(), cancellation))
+                .ScanAsync(limiter, cancellation.Token));
+    }
+
     [Theory]
     [InlineData("<environment_context>")]
     [InlineData("<recommended_plugins>")]
@@ -954,6 +1201,8 @@ public sealed class LocalSessionCatalogTests
         private readonly Dictionary<string, int> enumerations = new(StringComparer.OrdinalIgnoreCase);
 
         public List<int> ReadBudgets { get; } = [];
+        public List<string> ReadPaths { get; } = [];
+        public int DirectoryEnumerationCount { get; private set; }
 
         public IReadOnlyList<string> EnumerateFiles(string root, string pattern)
         {
@@ -961,18 +1210,24 @@ public sealed class LocalSessionCatalogTests
             return inner.EnumerateFiles(root, pattern);
         }
 
-        public IReadOnlyList<string> EnumerateDirectories(string root) => inner.EnumerateDirectories(root);
+        public IReadOnlyList<string> EnumerateDirectories(string root)
+        {
+            DirectoryEnumerationCount++;
+            return inner.EnumerateDirectories(root);
+        }
         public bool FileExists(string path) => inner.FileExists(path);
         public DateTimeOffset LastWriteTime(string path) => inner.LastWriteTime(path);
 
         public Task<BoundedTextRead> ReadPrefixAsync(string path, int maximumBytes, CancellationToken cancellationToken)
         {
+            ReadPaths.Add(path);
             ReadBudgets.Add(maximumBytes);
             return inner.ReadPrefixAsync(path, maximumBytes, cancellationToken);
         }
 
         public Task<BoundedTextRead> ReadTailAsync(string path, int maximumBytes, CancellationToken cancellationToken)
         {
+            ReadPaths.Add(path);
             ReadBudgets.Add(maximumBytes);
             return inner.ReadTailAsync(path, maximumBytes, cancellationToken);
         }
