@@ -24,6 +24,28 @@ public sealed class SessionCatalogIoTests
     }
 
     [Fact]
+    public async Task ReadTailAsyncNeverReadsMorePhysicalBytesThanTheBudget()
+    {
+        // Context reads beyond the tail buffer would make the advertised byte bound inaccurate.
+        await using var fixture = new CatalogIoFixture();
+        var content = new byte[64 * 1024 + 1];
+        content[0] = 0xE2;
+        content[1] = 0x82;
+        content[2] = 0xAC;
+        Array.Fill(content, (byte)'a', 3, content.Length - 3);
+        var path = await fixture.WriteBytesAsync(content);
+        var physicalBytesRead = 0L;
+        var io = new SystemSessionCatalogIo((sourcePath, bufferSize) => new RecordingStream(
+            new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize),
+            bytes => physicalBytesRead += bytes));
+
+        var read = await io.ReadTailAsync(path, 64 * 1024, CancellationToken.None);
+
+        Assert.Equal(64 * 1024, read.BytesRead);
+        Assert.Equal(64 * 1024, physicalBytesRead);
+    }
+
+    [Fact]
     public async Task ReadPrefixAsyncTrimsAnIncompleteTrailingUtf8Sequence()
     {
         // Passing an incomplete terminal sequence to strict UTF-8 would reject an otherwise valid bounded prefix.
@@ -42,12 +64,12 @@ public sealed class SessionCatalogIoTests
     {
         // Decoding a tail beginning in a multibyte character must retain the valid text after that character.
         await using var fixture = new CatalogIoFixture();
-        var path = await fixture.WriteBytesAsync([0xE2, 0x82, 0xAC, 0x78]);
+        var path = await fixture.WriteBytesAsync([0xE2, 0x82, 0xAC, 0x78, 0x79]);
 
-        var read = await new SystemSessionCatalogIo().ReadTailAsync(path, 3, CancellationToken.None);
+        var read = await new SystemSessionCatalogIo().ReadTailAsync(path, 4, CancellationToken.None);
 
         Assert.Equal("x", read.Text);
-        Assert.Equal(3, read.BytesRead);
+        Assert.Equal(4, read.BytesRead);
         Assert.False(read.IsComplete);
     }
 
@@ -160,6 +182,62 @@ public sealed class SessionCatalogIoTests
         {
             Directory.Delete(root, recursive: true);
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingStream(Stream inner, Action<int> recordRead) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+
+        public override void Flush() => inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = inner.Read(buffer, offset, count);
+            recordRead(read);
+            return read;
+        }
+
+        public override int ReadByte()
+        {
+            var value = inner.ReadByte();
+            if (value >= 0)
+                recordRead(1);
+
+            return value;
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            var read = await inner.ReadAsync(buffer, cancellationToken);
+            recordRead(read);
+            return read;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                inner.Dispose();
+
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await inner.DisposeAsync();
+            await base.DisposeAsync();
         }
     }
 }
