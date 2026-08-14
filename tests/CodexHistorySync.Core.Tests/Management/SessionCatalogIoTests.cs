@@ -105,6 +105,17 @@ public sealed class SessionCatalogIoTests
     }
 
     [Fact]
+    public async Task ReadTailAsyncRejectsMalformedLeadingContinuationWhenWholeFileIsRetained()
+    {
+        // A complete file has no caller-discarded boundary fragment, so strict UTF-8 applies from byte zero.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0x80, 0x62]);
+
+        await Assert.ThrowsAsync<DecoderFallbackException>(() =>
+            new SystemSessionCatalogIo().ReadTailAsync(path, 2, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ReadTailAsyncRejectsMalformedContinuationAfterTheBoundaryFragment()
     {
         // Strict decoding applies after the untrusted leading tail fragment.

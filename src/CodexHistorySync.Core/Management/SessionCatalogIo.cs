@@ -112,7 +112,9 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
             bytesRead += read;
         }
         var finalFileLength = stream.Length;
-        var textStart = readTail ? SkipLeadingContinuationBytes(buffer, bytesRead) : 0;
+        var textStart = readTail && physicalOffset > 0
+            ? SkipLeadingContinuationBytes(buffer, bytesRead)
+            : 0;
         var textLength = readTail ? bytesRead - textStart :
             bytesRead < fileLength ? TrimIncompleteTrailingSequence(buffer, bytesRead) : bytesRead;
         return new BoundedTextRead(
