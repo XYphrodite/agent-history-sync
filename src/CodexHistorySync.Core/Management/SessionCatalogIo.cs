@@ -99,11 +99,7 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
         await using var stream = openRead(path, maximumBytes);
         var fileLength = stream.Length;
         afterLengthObserved?.Invoke(path);
-        var logicalTailOffset = readTail ? Math.Max(0, fileLength - maximumBytes) : 0;
-        var tailContextBytes = readTail
-            ? (int)Math.Min(Math.Min(3, maximumBytes - 1), logicalTailOffset)
-            : 0;
-        var physicalOffset = logicalTailOffset - tailContextBytes;
+        var physicalOffset = readTail ? Math.Max(0, fileLength - maximumBytes) : 0;
         stream.Seek(physicalOffset, SeekOrigin.Begin);
         var buffer = new byte[(int)Math.Min(maximumBytes, Math.Max(0, fileLength - physicalOffset))];
         var bytesRead = 0;
@@ -116,9 +112,7 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
             bytesRead += read;
         }
         var finalFileLength = stream.Length;
-        var textStart = readTail
-            ? tailContextBytes + SkipLeadingContinuationBytes(buffer, tailContextBytes, bytesRead)
-            : 0;
+        var textStart = readTail ? SkipLeadingContinuationBytes(buffer, bytesRead) : 0;
         var textLength = readTail ? bytesRead - textStart :
             bytesRead < fileLength ? TrimIncompleteTrailingSequence(buffer, bytesRead) : bytesRead;
         return new BoundedTextRead(
@@ -136,31 +130,13 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
         bufferSize,
         FileOptions.Asynchronous | FileOptions.SequentialScan);
 
-    private static int SkipLeadingContinuationBytes(byte[] buffer, int boundary, int length)
+    private static int SkipLeadingContinuationBytes(byte[] buffer, int length)
     {
         var skipped = 0;
-        while (boundary + skipped < length && skipped < 3 && IsContinuationByte(buffer[boundary + skipped]))
+        while (skipped < length && skipped < 3 && IsContinuationByte(buffer[skipped]))
             skipped++;
 
-        if (skipped == 0)
-            return 0;
-
-        var continuationCountBeforeOffset = 0;
-        var position = boundary - 1;
-        while (position >= 0 && continuationCountBeforeOffset < 3)
-        {
-            var value = buffer[position];
-            if (!IsContinuationByte(value))
-            {
-                var sequenceLength = Utf8SequenceLength(value);
-                return sequenceLength == 1 + continuationCountBeforeOffset + skipped ? skipped : 0;
-            }
-
-            continuationCountBeforeOffset++;
-            position--;
-        }
-
-        return 0;
+        return skipped;
     }
 
     private static int TrimIncompleteTrailingSequence(byte[] buffer, int length)
