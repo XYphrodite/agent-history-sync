@@ -24,14 +24,20 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
 {
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private readonly Action<string>? afterLengthObserved;
+    private readonly Func<string, int, Stream> openRead;
 
-    public SystemSessionCatalogIo()
+    public SystemSessionCatalogIo() : this(OpenRead)
     {
     }
 
-    internal SystemSessionCatalogIo(Action<string> afterLengthObserved)
+    internal SystemSessionCatalogIo(Action<string> afterLengthObserved) : this(OpenRead)
     {
         this.afterLengthObserved = afterLengthObserved;
+    }
+
+    internal SystemSessionCatalogIo(Func<string, int, Stream> openRead)
+    {
+        this.openRead = openRead;
     }
 
     public IReadOnlyList<string> EnumerateFiles(string root, string pattern) =>
@@ -90,18 +96,16 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
         CancellationToken cancellationToken)
     {
         ValidateMaximumBytes(maximumBytes);
-        await using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            bufferSize: maximumBytes,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = openRead(path, maximumBytes);
         var fileLength = stream.Length;
         afterLengthObserved?.Invoke(path);
-        var offset = readTail ? Math.Max(0, fileLength - maximumBytes) : 0;
-        stream.Seek(offset, SeekOrigin.Begin);
-        var buffer = new byte[(int)Math.Min(maximumBytes, Math.Max(0, fileLength - offset))];
+        var logicalTailOffset = readTail ? Math.Max(0, fileLength - maximumBytes) : 0;
+        var tailContextBytes = readTail
+            ? (int)Math.Min(Math.Min(3, maximumBytes - 1), logicalTailOffset)
+            : 0;
+        var physicalOffset = logicalTailOffset - tailContextBytes;
+        stream.Seek(physicalOffset, SeekOrigin.Begin);
+        var buffer = new byte[(int)Math.Min(maximumBytes, Math.Max(0, fileLength - physicalOffset))];
         var bytesRead = 0;
         while (bytesRead < buffer.Length)
         {
@@ -112,32 +116,40 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
             bytesRead += read;
         }
         var finalFileLength = stream.Length;
-        var textStart = readTail && offset > 0
-            ? SkipLeadingContinuationBytes(stream, offset, buffer, bytesRead)
+        var textStart = readTail
+            ? tailContextBytes + SkipLeadingContinuationBytes(buffer, tailContextBytes, bytesRead)
             : 0;
         var textLength = readTail ? bytesRead - textStart :
             bytesRead < fileLength ? TrimIncompleteTrailingSequence(buffer, bytesRead) : bytesRead;
         return new BoundedTextRead(
             StrictUtf8.GetString(buffer, textStart, textLength),
-            offset == 0 && bytesRead == fileLength && fileLength == finalFileLength,
+            physicalOffset == 0 && bytesRead == fileLength && fileLength == finalFileLength,
             bytesRead,
             finalFileLength);
     }
 
-    private static int SkipLeadingContinuationBytes(FileStream stream, long offset, byte[] buffer, int length)
+    private static Stream OpenRead(string path, int bufferSize) => new FileStream(
+        path,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.ReadWrite | FileShare.Delete,
+        bufferSize,
+        FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+    private static int SkipLeadingContinuationBytes(byte[] buffer, int boundary, int length)
     {
         var skipped = 0;
-        while (skipped < length && skipped < 3 && IsContinuationByte(buffer[skipped]))
+        while (boundary + skipped < length && skipped < 3 && IsContinuationByte(buffer[boundary + skipped]))
             skipped++;
 
         if (skipped == 0)
             return 0;
 
         var continuationCountBeforeOffset = 0;
-        var position = offset - 1;
+        var position = boundary - 1;
         while (position >= 0 && continuationCountBeforeOffset < 3)
         {
-            var value = ReadByteAt(stream, position);
+            var value = buffer[position];
             if (!IsContinuationByte(value))
             {
                 var sequenceLength = Utf8SequenceLength(value);
@@ -149,12 +161,6 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
         }
 
         return 0;
-    }
-
-    private static byte ReadByteAt(FileStream stream, long position)
-    {
-        stream.Seek(position, SeekOrigin.Begin);
-        return checked((byte)stream.ReadByte());
     }
 
     private static int TrimIncompleteTrailingSequence(byte[] buffer, int length)
