@@ -111,6 +111,26 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task CodexSourceKeepsOldestOfLast64IndexRecordsWhenTerminalNewlineIsPresent()
+    {
+        // Keeping the synthetic empty split token consumes one of the 64 retained-record slots and drops this title.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("oldest-last-64", "Metadata fallback", "question", "2026-08-09T15:00:00Z");
+        var records = new[]
+        {
+            JsonSerializer.Serialize(new { id = "oldest-last-64", thread_name = "Oldest retained title" })
+        }.Concat(Enumerable.Range(0, 63).Select(index =>
+            JsonSerializer.Serialize(new { id = $"noise-{index}", thread_name = "noise" }))).ToArray();
+        await fixture.WriteCodexIndexTextAsync(string.Join("\n", records) + "\n");
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Oldest retained title", row.Title);
+    }
+
+    [Fact]
     public async Task CodexSourceUsesMeaningfulPreviewWhenMetadataTitleIsBlank()
     {
         // Treating blank metadata as a title would fall through to the ID instead of the actual user request.
