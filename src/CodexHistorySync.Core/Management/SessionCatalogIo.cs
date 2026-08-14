@@ -1,0 +1,138 @@
+using System.Text;
+
+namespace CodexHistorySync.Core.Management;
+
+internal readonly record struct BoundedTextRead(
+    string Text,
+    bool IsComplete,
+    int BytesRead,
+    long FileLength);
+
+internal interface ISessionCatalogIo
+{
+    IReadOnlyList<string> EnumerateFiles(string root, string pattern);
+    IReadOnlyList<string> EnumerateDirectories(string root);
+    bool FileExists(string path);
+    DateTimeOffset LastWriteTime(string path);
+    Task<BoundedTextRead> ReadPrefixAsync(
+        string path, int maximumBytes, CancellationToken cancellationToken);
+    Task<BoundedTextRead> ReadTailAsync(
+        string path, int maximumBytes, CancellationToken cancellationToken);
+}
+
+internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
+{
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    public IReadOnlyList<string> EnumerateFiles(string root, string pattern) =>
+        Enumerate(root, pattern, SearchTarget.Files);
+
+    public IReadOnlyList<string> EnumerateDirectories(string root) =>
+        Enumerate(root, "*", SearchTarget.Directories);
+
+    public bool FileExists(string path) => File.Exists(path);
+
+    public DateTimeOffset LastWriteTime(string path) => File.GetLastWriteTimeUtc(path);
+
+    public Task<BoundedTextRead> ReadPrefixAsync(
+        string path,
+        int maximumBytes,
+        CancellationToken cancellationToken) =>
+        ReadAsync(path, maximumBytes, readTail: false, cancellationToken);
+
+    public Task<BoundedTextRead> ReadTailAsync(
+        string path,
+        int maximumBytes,
+        CancellationToken cancellationToken) =>
+        ReadAsync(path, maximumBytes, readTail: true, cancellationToken);
+
+    private static IReadOnlyList<string> Enumerate(string root, string pattern, SearchTarget target)
+    {
+        try
+        {
+            if (!Directory.Exists(root) || IsReparsePoint(root))
+                return [];
+
+            var options = new EnumerationOptions
+            {
+                AttributesToSkip = FileAttributes.ReparsePoint,
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = true,
+            };
+            var entries = target == SearchTarget.Files
+                ? Directory.EnumerateFiles(root, pattern, options)
+                : Directory.EnumerateDirectories(root, pattern, options);
+            return entries.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
+    }
+
+    private static bool IsReparsePoint(string path) =>
+        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+
+    private static async Task<BoundedTextRead> ReadAsync(
+        string path,
+        int maximumBytes,
+        bool readTail,
+        CancellationToken cancellationToken)
+    {
+        ValidateMaximumBytes(maximumBytes);
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: maximumBytes,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var fileLength = stream.Length;
+        var offset = readTail ? Math.Max(0, fileLength - maximumBytes) : 0;
+        stream.Seek(offset, SeekOrigin.Begin);
+        var buffer = new byte[(int)Math.Min(maximumBytes, Math.Max(0, fileLength - offset))];
+        var bytesRead = 0;
+        while (bytesRead < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(bytesRead), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+                break;
+
+            bytesRead += read;
+        }
+        return new BoundedTextRead(
+            StrictUtf8.GetString(buffer, 0, bytesRead),
+            offset == 0 && bytesRead == fileLength,
+            bytesRead,
+            fileLength);
+    }
+
+    private static void ValidateMaximumBytes(int maximumBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
+    }
+
+    private enum SearchTarget
+    {
+        Files,
+        Directories,
+    }
+}
+
+internal sealed class SessionCatalogReadLimiter(int maximumConcurrency) : IDisposable
+{
+    private readonly SemaphoreSlim gate = maximumConcurrency > 0
+        ? new(maximumConcurrency, maximumConcurrency)
+        : throw new ArgumentOutOfRangeException(nameof(maximumConcurrency));
+
+    public async Task<T> RunAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await operation(cancellationToken).ConfigureAwait(false); }
+        finally { gate.Release(); }
+    }
+
+    public void Dispose() => gate.Dispose();
+}
