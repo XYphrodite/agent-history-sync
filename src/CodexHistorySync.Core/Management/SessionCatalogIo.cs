@@ -23,6 +23,16 @@ internal interface ISessionCatalogIo
 internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
 {
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private readonly Action<string>? afterLengthObserved;
+
+    public SystemSessionCatalogIo()
+    {
+    }
+
+    internal SystemSessionCatalogIo(Action<string> afterLengthObserved)
+    {
+        this.afterLengthObserved = afterLengthObserved;
+    }
 
     public IReadOnlyList<string> EnumerateFiles(string root, string pattern) =>
         Enumerate(root, pattern, SearchTarget.Files);
@@ -73,7 +83,7 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
     private static bool IsReparsePoint(string path) =>
         (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
 
-    private static async Task<BoundedTextRead> ReadAsync(
+    private async Task<BoundedTextRead> ReadAsync(
         string path,
         int maximumBytes,
         bool readTail,
@@ -88,6 +98,7 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
             bufferSize: maximumBytes,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         var fileLength = stream.Length;
+        afterLengthObserved?.Invoke(path);
         var offset = readTail ? Math.Max(0, fileLength - maximumBytes) : 0;
         stream.Seek(offset, SeekOrigin.Begin);
         var buffer = new byte[(int)Math.Min(maximumBytes, Math.Max(0, fileLength - offset))];
@@ -100,12 +111,76 @@ internal sealed class SystemSessionCatalogIo : ISessionCatalogIo
 
             bytesRead += read;
         }
+        var finalFileLength = stream.Length;
+        var textStart = readTail && offset > 0
+            ? SkipLeadingContinuationBytes(stream, offset, buffer, bytesRead)
+            : 0;
+        var textLength = readTail ? bytesRead - textStart :
+            bytesRead < fileLength ? TrimIncompleteTrailingSequence(buffer, bytesRead) : bytesRead;
         return new BoundedTextRead(
-            StrictUtf8.GetString(buffer, 0, bytesRead),
-            offset == 0 && bytesRead == fileLength,
+            StrictUtf8.GetString(buffer, textStart, textLength),
+            offset == 0 && bytesRead == fileLength && fileLength == finalFileLength,
             bytesRead,
-            fileLength);
+            finalFileLength);
     }
+
+    private static int SkipLeadingContinuationBytes(FileStream stream, long offset, byte[] buffer, int length)
+    {
+        var skipped = 0;
+        while (skipped < length && skipped < 3 && IsContinuationByte(buffer[skipped]))
+            skipped++;
+
+        if (skipped == 0)
+            return 0;
+
+        var continuationCountBeforeOffset = 0;
+        var position = offset - 1;
+        while (position >= 0 && continuationCountBeforeOffset < 3)
+        {
+            var value = ReadByteAt(stream, position);
+            if (!IsContinuationByte(value))
+            {
+                var sequenceLength = Utf8SequenceLength(value);
+                return sequenceLength == 1 + continuationCountBeforeOffset + skipped ? skipped : 0;
+            }
+
+            continuationCountBeforeOffset++;
+            position--;
+        }
+
+        return 0;
+    }
+
+    private static byte ReadByteAt(FileStream stream, long position)
+    {
+        stream.Seek(position, SeekOrigin.Begin);
+        return checked((byte)stream.ReadByte());
+    }
+
+    private static int TrimIncompleteTrailingSequence(byte[] buffer, int length)
+    {
+        var sequenceStart = length - 1;
+        while (sequenceStart >= 0 && IsContinuationByte(buffer[sequenceStart]))
+            sequenceStart--;
+
+        if (sequenceStart < 0)
+            return length;
+
+        var sequenceLength = Utf8SequenceLength(buffer[sequenceStart]);
+        return sequenceLength > 0 && length - sequenceStart < sequenceLength
+            ? sequenceStart
+            : length;
+    }
+
+    private static bool IsContinuationByte(byte value) => (value & 0b1100_0000) == 0b1000_0000;
+
+    private static int Utf8SequenceLength(byte value) => value switch
+    {
+        >= 0b1100_0010 and <= 0b1101_1111 => 2,
+        >= 0b1110_0000 and <= 0b1110_1111 => 3,
+        >= 0b1111_0000 and <= 0b1111_0100 => 4,
+        _ => 0,
+    };
 
     private static void ValidateMaximumBytes(int maximumBytes)
     {

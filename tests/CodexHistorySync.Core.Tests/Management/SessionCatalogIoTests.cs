@@ -1,3 +1,5 @@
+using System.Text;
+
 using CodexHistorySync.Core.Management;
 
 namespace CodexHistorySync.Core.Tests.Management;
@@ -19,6 +21,80 @@ public sealed class SessionCatalogIoTests
         Assert.Equal(64 * 1024, tail.BytesRead);
         Assert.False(prefix.IsComplete);
         Assert.False(tail.IsComplete);
+    }
+
+    [Fact]
+    public async Task ReadPrefixAsyncTrimsAnIncompleteTrailingUtf8Sequence()
+    {
+        // Passing an incomplete terminal sequence to strict UTF-8 would reject an otherwise valid bounded prefix.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0x61, 0xE2, 0x82, 0xAC]);
+
+        var read = await new SystemSessionCatalogIo().ReadPrefixAsync(path, 2, CancellationToken.None);
+
+        Assert.Equal("a", read.Text);
+        Assert.Equal(2, read.BytesRead);
+        Assert.False(read.IsComplete);
+    }
+
+    [Fact]
+    public async Task ReadTailAsyncSkipsAnIncompleteLeadingUtf8Sequence()
+    {
+        // Decoding a tail beginning in a multibyte character must retain the valid text after that character.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0xE2, 0x82, 0xAC, 0x78]);
+
+        var read = await new SystemSessionCatalogIo().ReadTailAsync(path, 3, CancellationToken.None);
+
+        Assert.Equal("x", read.Text);
+        Assert.Equal(3, read.BytesRead);
+        Assert.False(read.IsComplete);
+    }
+
+    [Fact]
+    public async Task ReadTailAsyncRejectsMalformedLeadingContinuationWithinTheWindow()
+    {
+        // A continuation byte without a preceding multibyte lead must remain visible to strict UTF-8.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0x61, 0x80, 0x62]);
+
+        await Assert.ThrowsAsync<DecoderFallbackException>(() =>
+            new SystemSessionCatalogIo().ReadTailAsync(path, 2, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReadPrefixAsyncMarksAFileThatGrowsDuringReadAsIncomplete()
+    {
+        // Treating the pre-read length as final would falsely claim this raced read is a complete file snapshot.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteAsync("a");
+        var io = new SystemSessionCatalogIo(changedPath => File.AppendAllText(changedPath, "b"));
+
+        var read = await io.ReadPrefixAsync(path, 2, CancellationToken.None);
+
+        Assert.Equal("a", read.Text);
+        Assert.False(read.IsComplete);
+    }
+
+    [Fact]
+    public async Task ReadPrefixAsyncRejectsMalformedUtf8InsideTheRetainedWindow()
+    {
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0x61, 0xFF]);
+
+        await Assert.ThrowsAsync<DecoderFallbackException>(() =>
+            new SystemSessionCatalogIo().ReadPrefixAsync(path, 2, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReadPrefixAsyncRejectsAnIncompleteSequenceWhenTheWholeFileIsRetained()
+    {
+        // Trimming is only valid at a truncated read boundary, not when malformed bytes are wholly retained.
+        await using var fixture = new CatalogIoFixture();
+        var path = await fixture.WriteBytesAsync([0x61, 0xE2]);
+
+        await Assert.ThrowsAsync<DecoderFallbackException>(() =>
+            new SystemSessionCatalogIo().ReadPrefixAsync(path, 2, CancellationToken.None));
     }
 
     [Fact]
@@ -69,6 +145,14 @@ public sealed class SessionCatalogIoTests
             Directory.CreateDirectory(root);
             var path = Path.Combine(root, "history.jsonl");
             await File.WriteAllTextAsync(path, content);
+            return path;
+        }
+
+        public async Task<string> WriteBytesAsync(byte[] content)
+        {
+            Directory.CreateDirectory(root);
+            var path = Path.Combine(root, "history.jsonl");
+            await File.WriteAllBytesAsync(path, content);
             return path;
         }
 
