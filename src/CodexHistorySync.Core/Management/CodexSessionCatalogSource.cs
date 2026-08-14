@@ -84,7 +84,7 @@ internal sealed class CodexSessionCatalogSource(CodexPaths paths, ISessionCatalo
         {
             var index = await limiter.RunAsync(token => io.ReadTailAsync(
                 Path.Combine(paths.Home, "session_index.jsonl"), MaximumMetadataBytes, token), cancellationToken).ConfigureAwait(false);
-            var lines = CompleteLines(index.Text, discardFirst: !index.IsComplete, discardLast: !index.IsComplete)
+            var lines = CompleteLines(index.Text, discardFirst: !index.IsComplete, discardLast: false)
                 .TakeLast(MaximumMetadataRecords);
             foreach (var line in lines)
             {
