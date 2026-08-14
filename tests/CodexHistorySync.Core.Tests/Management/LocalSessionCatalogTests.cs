@@ -776,6 +776,124 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncStartsBothSourcesBeforeEitherCompletes()
+    {
+        // Awaiting one source before starting the other would deadlock at the rendezvous.
+        var rendezvous = new AsyncRendezvous(2);
+        var codex = new BlockingCatalogSource(ManagedAgent.Codex, rendezvous);
+        var grok = new BlockingCatalogSource(ManagedAgent.Grok, rendezvous);
+        var catalog = new LocalSessionCatalog(codex, grok, new FakeActiveState());
+
+        var snapshot = await catalog.ScanAsync(CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, codex.ScanCount);
+        Assert.Equal(1, grok.ScanCount);
+        Assert.Single(snapshot.Codex);
+        Assert.Single(snapshot.Grok);
+    }
+
+    [Fact]
+    public async Task ScanAsyncUsesOneSharedReadLimiterCappedAtEightAcrossSources()
+    {
+        // Giving each source its own limiter would permit sixteen simultaneous reads.
+        var probe = new ReadConcurrencyProbe(16);
+        var codex = new ProbedCatalogSource(ManagedAgent.Codex, probe);
+        var grok = new ProbedCatalogSource(ManagedAgent.Grok, probe);
+        var catalog = new LocalSessionCatalog(codex, grok, new FakeActiveState());
+
+        await catalog.ScanAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Same(codex.ObservedLimiter, grok.ObservedLimiter);
+        Assert.Equal(16, probe.CompletedCount);
+        Assert.Equal(8, probe.PeakConcurrency);
+    }
+
+    [Fact]
+    public async Task ScanAsyncChecksActivityOncePerAgentAndQueriesOverlap()
+    {
+        // Running a synchronous Codex process query before starting Grok's would time out at the rendezvous.
+        using var activeState = new SynchronousRendezvousActiveState();
+        var catalog = new LocalSessionCatalog(
+            new FixedCatalogSource(ManagedAgent.Codex),
+            new FixedCatalogSource(ManagedAgent.Grok),
+            activeState);
+
+        var snapshot = await Task.Run(() => catalog.ScanAsync(CancellationToken.None))
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Single(snapshot.Codex);
+        Assert.Single(snapshot.Grok);
+        Assert.Equal(1, activeState.QueryCount(ManagedAgent.Codex));
+        Assert.Equal(1, activeState.QueryCount(ManagedAgent.Grok));
+        Assert.Equal(0, activeState.TimedOutQueries);
+    }
+
+    [Fact]
+    public async Task ScanAsyncPropagatesRequestedSourceCancellation()
+    {
+        // Converting requested source cancellation to an empty snapshot would report an incomplete refresh.
+        using var cancellation = new CancellationTokenSource();
+        var source = new CancelingCatalogSource(ManagedAgent.Codex, cancellation);
+        var catalog = new LocalSessionCatalog(source, null, new FakeActiveState());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            catalog.ScanAsync(cancellation.Token));
+    }
+
+    [Fact]
+    public async Task ScanAsyncTreatsSourceFailureAsWholeRefreshFailure()
+    {
+        // Swallowing a source fault would publish a partial snapshot as complete.
+        var failure = new InvalidOperationException("metadata scan failed");
+        var catalog = new LocalSessionCatalog(
+            new ThrowingCatalogSource(ManagedAgent.Codex, failure),
+            new FixedCatalogSource(ManagedAgent.Grok),
+            new FakeActiveState());
+
+        var actual = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            catalog.ScanAsync(CancellationToken.None));
+
+        Assert.Same(failure, actual);
+    }
+
+    [Fact]
+    public async Task ScanAsyncOrdersRowsByDescendingTimestampThenId()
+    {
+        // Returning source order would make equal-time rows unstable and place older rows first.
+        var timestamp = DateTimeOffset.Parse("2026-08-09T12:00:00Z");
+        var codex = new FixedCatalogSource(ManagedAgent.Codex,
+        [
+            Candidate("charlie", timestamp.AddMinutes(-1)),
+            Candidate("bravo", timestamp),
+            Candidate("Alpha", timestamp)
+        ]);
+        var catalog = new LocalSessionCatalog(codex, null, new FakeActiveState());
+
+        var snapshot = await catalog.ScanAsync(CancellationToken.None);
+
+        Assert.Equal(["Alpha", "bravo", "charlie"], snapshot.Codex.Select(row => row.SessionId));
+    }
+
+    [Fact]
+    public async Task ScanAsyncReturnsEmptyColumnWithoutQueryingMissingSourceActivity()
+    {
+        // Querying activity without a configured source would do unnecessary process work.
+        var activeState = new FakeActiveState();
+        var catalog = new LocalSessionCatalog(
+            null,
+            new FixedCatalogSource(ManagedAgent.Grok),
+            activeState);
+
+        var snapshot = await catalog.ScanAsync(CancellationToken.None);
+
+        Assert.Empty(snapshot.Codex);
+        Assert.Single(snapshot.Grok);
+        Assert.False(activeState.TotalQueries.ContainsKey(ManagedAgent.Codex));
+        Assert.Equal(1, activeState.TotalQueries[ManagedAgent.Grok]);
+    }
+
+    [Fact]
     public async Task ScanAsyncChecksActivityOncePerAgent()
     {
         // Per-row process queries make startup cost grow with the number of displayed sessions.
@@ -873,7 +991,7 @@ public sealed class LocalSessionCatalogTests
         Assert.Equal(("malformed-codex", Path.GetFullPath(codexPath), "malformed-codex", false),
             (codex.SessionId, codex.NativePath, codex.Title, codex.CanRead));
         var grok = Assert.Single(snapshot.Grok);
-        Assert.Equal((grokId, Path.GetFullPath(grokPath), grokId, false),
+        Assert.Equal((grokId, Path.GetFullPath(grokPath), "question", false),
             (grok.SessionId, grok.NativePath, grok.Title, grok.CanRead));
     }
 
@@ -986,12 +1104,7 @@ public sealed class LocalSessionCatalogTests
         public FakeActiveState ActiveState { get; } = new();
         public List<string> ReparsePaths { get; } = [];
 
-        public LocalSessionCatalog CreateCatalog() => new(
-            CodexPaths,
-            GrokPaths,
-            ActiveState,
-            new SessionScanner(TimeSpan.Zero),
-            new GrokSessionScanner(TimeSpan.Zero));
+        public LocalSessionCatalog CreateCatalog() => new(CodexPaths, GrokPaths, ActiveState);
 
         public async Task<string> WriteCodexAsync(string id, string? title, string userText, string modifiedAt)
         {
@@ -1194,7 +1307,7 @@ public sealed class LocalSessionCatalogTests
     private sealed class FakeActiveState : IManagedSessionActiveState
     {
         public HashSet<string> ActiveIds { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<ManagedAgent, int> TotalQueries { get; } = new();
+        public System.Collections.Concurrent.ConcurrentDictionary<ManagedAgent, int> TotalQueries { get; } = new();
         public Exception? AgentFailure { get; set; }
         public Action? BeforeAgentQuery { get; set; }
 
@@ -1202,7 +1315,7 @@ public sealed class LocalSessionCatalogTests
         {
             BeforeAgentQuery?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
-            TotalQueries[agent] = TotalQueries.GetValueOrDefault(agent) + 1;
+            TotalQueries.AddOrUpdate(agent, 1, (_, count) => count + 1);
             if (AgentFailure is not null) throw AgentFailure;
             return Task.FromResult(ActiveIds.Count != 0);
         }
@@ -1214,28 +1327,199 @@ public sealed class LocalSessionCatalogTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            TotalQueries[agent] = TotalQueries.GetValueOrDefault(agent) + 1;
+            TotalQueries.AddOrUpdate(agent, 1, (_, count) => count + 1);
             return Task.FromResult(ActiveIds.Contains(sessionId));
         }
     }
 
+    private sealed class AsyncRendezvous(int participants)
+    {
+        private int arrivals;
+        private readonly TaskCompletionSource released =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task SignalAndWaitAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref arrivals) == participants)
+                released.TrySetResult();
+            await released.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private sealed class BlockingCatalogSource(
+        ManagedAgent agent,
+        AsyncRendezvous rendezvous) : ILocalSessionCatalogSource
+    {
+        public ManagedAgent Agent => agent;
+        public int ScanCount { get; private set; }
+
+        public async Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(
+            SessionCatalogReadLimiter limiter,
+            CancellationToken cancellationToken)
+        {
+            ScanCount++;
+            await rendezvous.SignalAndWaitAsync(cancellationToken);
+            return [new SessionCatalogCandidate(
+                "session", Path.GetFullPath("session.jsonl"), "Session",
+                DateTimeOffset.UnixEpoch, CanRead: true)];
+        }
+    }
+
+    private sealed class FixedCatalogSource(
+        ManagedAgent agent,
+        IReadOnlyList<SessionCatalogCandidate>? candidates = null) : ILocalSessionCatalogSource
+    {
+        public ManagedAgent Agent => agent;
+
+        public Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(
+            SessionCatalogReadLimiter limiter,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(candidates ?? [Candidate(agent.ToString().ToLowerInvariant(), DateTimeOffset.UnixEpoch)]);
+        }
+    }
+
+    private sealed class ThrowingCatalogSource(ManagedAgent agent, Exception failure) : ILocalSessionCatalogSource
+    {
+        public ManagedAgent Agent => agent;
+
+        public Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(
+            SessionCatalogReadLimiter limiter,
+            CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<SessionCatalogCandidate>>(failure);
+    }
+
+    private sealed class CancelingCatalogSource(
+        ManagedAgent agent,
+        CancellationTokenSource cancellation) : ILocalSessionCatalogSource
+    {
+        public ManagedAgent Agent => agent;
+
+        public Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(
+            SessionCatalogReadLimiter limiter,
+            CancellationToken cancellationToken)
+        {
+            cancellation.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<SessionCatalogCandidate>>([]);
+        }
+    }
+
+    private sealed class ProbedCatalogSource(ManagedAgent agent, ReadConcurrencyProbe probe) : ILocalSessionCatalogSource
+    {
+        public ManagedAgent Agent => agent;
+        public SessionCatalogReadLimiter? ObservedLimiter { get; private set; }
+
+        public async Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(
+            SessionCatalogReadLimiter limiter,
+            CancellationToken cancellationToken)
+        {
+            ObservedLimiter = limiter;
+            await Task.WhenAll(Enumerable.Range(0, 8).Select(async _ =>
+            {
+                probe.NoteAttempt();
+                await limiter.RunAsync(probe.RunAsync, cancellationToken);
+            }));
+            return [Candidate(agent.ToString().ToLowerInvariant(), DateTimeOffset.UnixEpoch)];
+        }
+    }
+
+    private sealed class ReadConcurrencyProbe(int operationCount)
+    {
+        private int attempts;
+        private int active;
+        private int completed;
+        private int peak;
+        private readonly TaskCompletionSource allAttempted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int CompletedCount => Volatile.Read(ref completed);
+        public int PeakConcurrency => Volatile.Read(ref peak);
+
+        public void NoteAttempt()
+        {
+            if (Interlocked.Increment(ref attempts) == operationCount)
+                allAttempted.TrySetResult();
+        }
+
+        public async Task<int> RunAsync(CancellationToken cancellationToken)
+        {
+            var current = Interlocked.Increment(ref active);
+            UpdatePeak(current);
+            try
+            {
+                await allAttempted.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return current;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref active);
+                Interlocked.Increment(ref completed);
+            }
+        }
+
+        private void UpdatePeak(int current)
+        {
+            var observed = Volatile.Read(ref peak);
+            while (current > observed)
+            {
+                var previous = Interlocked.CompareExchange(ref peak, current, observed);
+                if (previous == observed) return;
+                observed = previous;
+            }
+        }
+    }
+
+    private sealed class SynchronousRendezvousActiveState : IManagedSessionActiveState, IDisposable
+    {
+        private readonly Barrier rendezvous = new(2);
+        private readonly int[] queryCounts = new int[2];
+        private int timedOutQueries;
+
+        public int QueryCount(ManagedAgent agent) => Volatile.Read(ref queryCounts[(int)agent]);
+        public int TimedOutQueries => Volatile.Read(ref timedOutQueries);
+
+        public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref queryCounts[(int)agent]);
+            if (!rendezvous.SignalAndWait(TimeSpan.FromMilliseconds(500), cancellationToken))
+                Interlocked.Increment(ref timedOutQueries);
+            return Task.FromResult(false);
+        }
+
+        public Task<bool> IsActiveAsync(
+            ManagedAgent agent,
+            string sessionId,
+            string nativePath,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public void Dispose() => rendezvous.Dispose();
+    }
+
+    private static SessionCatalogCandidate Candidate(string id, DateTimeOffset modifiedAt) =>
+        new(id, Path.GetFullPath($"{id}.jsonl"), id, modifiedAt, CanRead: true);
+
     private sealed class RecordingCatalogIo(ISessionCatalogIo inner) : ISessionCatalogIo
     {
+        private readonly object sync = new();
         private readonly Dictionary<string, int> enumerations = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<int> readBudgets = [];
+        private readonly List<string> readPaths = [];
+        private int directoryEnumerationCount;
 
-        public List<int> ReadBudgets { get; } = [];
-        public List<string> ReadPaths { get; } = [];
-        public int DirectoryEnumerationCount { get; private set; }
+        public IReadOnlyList<int> ReadBudgets { get { lock (sync) return readBudgets.ToArray(); } }
+        public IReadOnlyList<string> ReadPaths { get { lock (sync) return readPaths.ToArray(); } }
+        public int DirectoryEnumerationCount { get { lock (sync) return directoryEnumerationCount; } }
 
         public IReadOnlyList<string> EnumerateFiles(string root, string pattern)
         {
-            enumerations[root] = EnumerationCount(root) + 1;
+            lock (sync) enumerations[root] = enumerations.GetValueOrDefault(root) + 1;
             return inner.EnumerateFiles(root, pattern);
         }
 
         public IReadOnlyList<string> EnumerateDirectories(string root)
         {
-            DirectoryEnumerationCount++;
+            lock (sync) directoryEnumerationCount++;
             return inner.EnumerateDirectories(root);
         }
         public bool FileExists(string path) => inner.FileExists(path);
@@ -1243,19 +1527,28 @@ public sealed class LocalSessionCatalogTests
 
         public Task<BoundedTextRead> ReadPrefixAsync(string path, int maximumBytes, CancellationToken cancellationToken)
         {
-            ReadPaths.Add(path);
-            ReadBudgets.Add(maximumBytes);
+            lock (sync)
+            {
+                readPaths.Add(path);
+                readBudgets.Add(maximumBytes);
+            }
             return inner.ReadPrefixAsync(path, maximumBytes, cancellationToken);
         }
 
         public Task<BoundedTextRead> ReadTailAsync(string path, int maximumBytes, CancellationToken cancellationToken)
         {
-            ReadPaths.Add(path);
-            ReadBudgets.Add(maximumBytes);
+            lock (sync)
+            {
+                readPaths.Add(path);
+                readBudgets.Add(maximumBytes);
+            }
             return inner.ReadTailAsync(path, maximumBytes, cancellationToken);
         }
 
-        public int EnumerationCount(string root) => enumerations.GetValueOrDefault(root);
+        public int EnumerationCount(string root)
+        {
+            lock (sync) return enumerations.GetValueOrDefault(root);
+        }
     }
 
     private sealed class CancelingCatalogIo(ISessionCatalogIo inner, CancellationTokenSource cancellation) : ISessionCatalogIo
