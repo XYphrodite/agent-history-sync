@@ -10,6 +10,70 @@ namespace CodexHistorySync.Core.Tests.Management;
 public sealed class LocalSessionOperationsTests
 {
     [Fact]
+    public async Task MetadataOnlyCatalogAdmissionDoesNotBypassFullCodexValidationForCopyOrDelete()
+    {
+        // Replacing either action-time full parse with catalog admission would publish or delete this malformed session.
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync(
+            "catalog-admitted-codex", "Catalog title", "question", "answer");
+        var ignored = JsonSerializer.Serialize(new
+        {
+            type = "event_msg",
+            payload = new { ignored = new string('x', 64 * 1024) }
+        });
+        await File.AppendAllTextAsync(
+            path,
+            ignored + "\n{bad-json}\n",
+            new UTF8Encoding(false));
+        await AssertFirstMalformedRecordStartsAfterBoundedPrefixAsync(path);
+        var selected = Assert.Single(
+            (await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.True(selected.CanRead);
+        var operations = fixture.CreateOperations();
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            operations.CopyAsync(selected, CancellationToken.None));
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            operations.DeleteAsync(selected, CancellationToken.None));
+
+        Assert.Empty(fixture.GrokWriter.Conversations);
+        Assert.True(File.Exists(selected.NativePath));
+    }
+
+    [Fact]
+    public async Task MetadataOnlyCatalogAdmissionDoesNotBypassFullGrokValidationForCopyOrDelete()
+    {
+        // Replacing either action-time full parse with catalog admission would publish or delete this malformed session.
+        await using var fixture = new OperationsFixture();
+        const string id = "05000000-0000-0000-0000-000000000001";
+        var directory = await fixture.WriteGrokAsync(id, null!, "question", "answer");
+        var chatPath = Path.Combine(directory, "chat_history.jsonl");
+        var ignored = JsonSerializer.Serialize(new
+        {
+            role = "system",
+            content = new string('x', 64 * 1024)
+        });
+        await File.AppendAllTextAsync(
+            chatPath,
+            ignored + "\n{bad-json}\n",
+            new UTF8Encoding(false));
+        await AssertFirstMalformedRecordStartsAfterBoundedPrefixAsync(chatPath);
+        var selected = Assert.Single(
+            (await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.True(selected.CanRead);
+        var operations = fixture.CreateOperations();
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            operations.CopyAsync(selected, CancellationToken.None));
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            operations.DeleteAsync(selected, CancellationToken.None));
+
+        Assert.Empty(fixture.CodexWriter.Conversations);
+        Assert.Empty(fixture.DirectoryDeleter.Deletions);
+        Assert.True(Directory.Exists(selected.NativePath));
+    }
+
+    [Fact]
     public async Task CopyAsyncReadsCodexAndDispatchesPortableConversationOnlyToGrokWriter()
     {
         await using var fixture = new OperationsFixture();
@@ -484,6 +548,8 @@ public sealed class LocalSessionOperationsTests
             new GrokConversationReader(),
             fingerprintProvider);
 
+        public LocalSessionCatalog CreateCatalog() => new(CodexPaths, GrokPaths, ActiveState);
+
         public ManagedSession Session(ManagedAgent agent, string id, string path) =>
             new(agent, id, Path.GetFullPath(path), id, DateTimeOffset.UtcNow, IsActive: false, CanRead: true);
 
@@ -691,6 +757,20 @@ public sealed class LocalSessionOperationsTests
     {
         public Task<PortableConversation> ReadAsync(string nativePath, CancellationToken cancellationToken) =>
             throw new InvalidDataException(message);
+    }
+
+    private static async Task AssertFirstMalformedRecordStartsAfterBoundedPrefixAsync(string path)
+    {
+        const string malformed = "{bad-json}";
+        var content = await File.ReadAllTextAsync(path);
+        var malformedIndex = content.IndexOf(malformed, StringComparison.Ordinal);
+        Assert.True(malformedIndex >= 0);
+        Assert.True(Encoding.UTF8.GetByteCount(content.AsSpan(0, malformedIndex)) > 64 * 1024);
+        foreach (var line in content[..malformedIndex].Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var failure = Record.Exception(() => JsonDocument.Parse(line));
+            Assert.Null(failure);
+        }
     }
 
     private sealed class RacingCodexFingerprintProvider : IManagedSessionFingerprintProvider

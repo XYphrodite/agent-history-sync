@@ -46,12 +46,18 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
-    public async Task CodexSourceIgnoresMalformedBytesAfterMetadataPrefix()
+    public async Task CodexMetadataOnlyCatalogAdmissionIgnoresMalformedBytesAfterMetadataPrefix()
     {
         // Continuing past the prefix would treat trailing malformed bytes as a metadata failure.
         await using var fixture = new CatalogFixture();
         var path = await fixture.WriteCodexAsync("prefix-only", "Prefix title", "question", "2026-08-09T15:00:00Z");
-        await File.AppendAllTextAsync(path, new string('x', 64 * 1024) + "{bad-json}");
+        var ignored = JsonSerializer.Serialize(new
+        {
+            type = "event_msg",
+            payload = new { ignored = new string('x', 64 * 1024) }
+        });
+        await File.AppendAllTextAsync(path, ignored + "\n{bad-json}\n");
+        await AssertFirstMalformedRecordStartsAfterBoundedPrefixAsync(path);
 
         using var limiter = new SessionCatalogReadLimiter(8);
         var row = Assert.Single(await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
@@ -256,6 +262,35 @@ public sealed class LocalSessionCatalogTests
         Assert.Equal(1, io.ReadPaths.Count(path => string.Equals(path,
             Path.Combine(directory, "chat_history.jsonl"), StringComparison.OrdinalIgnoreCase)));
         Assert.All(io.ReadBudgets, value => Assert.InRange(value, 1, 64 * 1024));
+    }
+
+    [Fact]
+    public async Task GrokMetadataOnlyCatalogAdmissionIgnoresMalformedBytesAfterChatPrefix()
+    {
+        // Replacing the bounded catalog read with full conversation parsing would make this row unreadable.
+        await using var fixture = new CatalogFixture();
+        const string id = "62500000-0000-0000-0000-000000000012";
+        var directory = await fixture.WriteGrokAsync(
+            id, null, "Fallback question", "2026-08-09T15:00:00Z");
+        var chatPath = Path.Combine(directory, "chat_history.jsonl");
+        var ignored = JsonSerializer.Serialize(new
+        {
+            role = "system",
+            content = new string('x', 64 * 1024)
+        });
+        await File.AppendAllTextAsync(
+            chatPath,
+            ignored + "\n{bad-json}\n",
+            new UTF8Encoding(false));
+        await AssertFirstMalformedRecordStartsAfterBoundedPrefixAsync(chatPath);
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Fallback question", row.Title);
+        Assert.True(row.CanRead);
+        Assert.True(new FileInfo(chatPath).Length > 64 * 1024);
     }
 
     [Fact]
@@ -1329,6 +1364,20 @@ public sealed class LocalSessionCatalogTests
             cancellationToken.ThrowIfCancellationRequested();
             TotalQueries.AddOrUpdate(agent, 1, (_, count) => count + 1);
             return Task.FromResult(ActiveIds.Contains(sessionId));
+        }
+    }
+
+    private static async Task AssertFirstMalformedRecordStartsAfterBoundedPrefixAsync(string path)
+    {
+        const string malformed = "{bad-json}";
+        var content = await File.ReadAllTextAsync(path);
+        var malformedIndex = content.IndexOf(malformed, StringComparison.Ordinal);
+        Assert.True(malformedIndex >= 0);
+        Assert.True(Encoding.UTF8.GetByteCount(content.AsSpan(0, malformedIndex)) > 64 * 1024);
+        foreach (var line in content[..malformedIndex].Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var failure = Record.Exception(() => JsonDocument.Parse(line));
+            Assert.Null(failure);
         }
     }
 
