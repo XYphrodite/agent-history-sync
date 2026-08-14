@@ -352,9 +352,9 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
-    public async Task GrokSourceUsesChatTimestampWhenSummaryHasNoTimestamp()
+    public async Task GrokSourceUsesChatWriteTimeWithoutReadingContentWhenSummaryHasNoTimestamp()
     {
-        // Falling back to directory write time loses the last known conversation timestamp.
+        // Reading conversation content for a timestamp-only fallback violates metadata-only scanning.
         await using var fixture = new CatalogFixture();
         const string id = "69000000-0000-0000-0000-000000000019";
         var directory = fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, id);
@@ -363,16 +363,39 @@ public sealed class LocalSessionCatalogTests
         {
             info = new { id, cwd = fixture.WorkingDirectory, title = "Official title" }
         }));
-        await File.WriteAllTextAsync(Path.Combine(directory, "chat_history.jsonl"), JsonSerializer.Serialize(new
+        var chatPath = Path.Combine(directory, "chat_history.jsonl");
+        await File.WriteAllTextAsync(chatPath, JsonSerializer.Serialize(new
         {
             role = "user", timestamp = "2026-08-09T16:00:00Z", content = "question"
         }) + "\n");
+        var fallbackTime = DateTimeOffset.Parse("2026-08-09T17:00:00Z");
+        File.SetLastWriteTimeUtc(chatPath, fallbackTime.UtcDateTime);
+        var io = new RecordingCatalogIo(new SystemSessionCatalogIo());
 
         using var limiter = new SessionCatalogReadLimiter(8);
-        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, io)
             .ScanAsync(limiter, CancellationToken.None));
 
-        Assert.Equal(DateTimeOffset.Parse("2026-08-09T16:00:00Z"), row.LastModifiedAt);
+        Assert.Equal(fallbackTime, row.LastModifiedAt);
+        Assert.DoesNotContain(io.ReadPaths, path => string.Equals(path, chatPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task GrokSourceUsesLowerPriorityOfficialTitleWhenGeneratedTitleIsWhitespace()
+    {
+        // Selecting the first raw string would let a blank generated title hide the valid session summary.
+        await using var fixture = new CatalogFixture();
+        const string id = "69200000-0000-0000-0000-000000000019";
+        await fixture.WriteGrokSummaryAsync(id, " \t", "Useful session summary", "Legacy title", "Root title", "fallback");
+        var chatPath = Path.Combine(fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, id), "chat_history.jsonl");
+        var io = new RecordingCatalogIo(new SystemSessionCatalogIo());
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, io)
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Useful session summary", row.Title);
+        Assert.DoesNotContain(io.ReadPaths, path => string.Equals(path, chatPath, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
