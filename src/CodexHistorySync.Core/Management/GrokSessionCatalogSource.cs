@@ -102,10 +102,11 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
                         {
                             var metadataId = GetString(info, "id");
                             summaryReadable = string.Equals(metadataId, sessionId, StringComparison.OrdinalIgnoreCase);
-                            title = NormalizeTitle(GetString(root, "generated_title")
-                                                   ?? GetString(root, "session_summary")
-                                                   ?? GetString(info, "title")
-                                                   ?? GetString(root, "title"));
+                            title = FirstNormalizedTitle(
+                                GetString(root, "generated_title"),
+                                GetString(root, "session_summary"),
+                                GetString(info, "title"),
+                                GetString(root, "title"));
                             AddLatestTimestamp(info, ref modified);
                             AddLatestTimestamp(root, ref modified);
                         }
@@ -115,12 +116,16 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
             }
 
             chatExists = io.FileExists(chatPath);
-            if (chatExists && (title is null || modified is null))
+            if (chatExists && title is null)
             {
                 var chat = await ReadChatMetadataAsync(chatPath, limiter, cancellationToken).ConfigureAwait(false);
                 chatReadable = chat.IsReadable;
                 title ??= chat.Title;
                 modified ??= chat.LastModifiedAt;
+            }
+            else if (chatExists && modified is null)
+            {
+                modified = LastWriteTime(chatPath);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -236,6 +241,9 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
 
     private static string? NormalizeTitle(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static string? FirstNormalizedTitle(params string?[] values) =>
+        values.Select(NormalizeTitle).FirstOrDefault(value => value is not null);
 
     private static string DisplayTitle(string? value, string fallback)
     {
