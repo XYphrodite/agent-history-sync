@@ -416,6 +416,36 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task GrokSourceUsesChatWriteTimeAfterTitlelessTimestampLessChatRead()
+    {
+        // Falling back to the directory timestamp would miss later appends to an existing chat file.
+        await using var fixture = new CatalogFixture();
+        const string id = "69100000-0000-0000-0000-000000000019";
+        var directory = fixture.GrokPaths.SessionDirectory(fixture.WorkingDirectory, id);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "summary.json"), JsonSerializer.Serialize(new
+        {
+            info = new { id, cwd = fixture.WorkingDirectory, title = (string?)null }
+        }));
+        var chatPath = Path.Combine(directory, "chat_history.jsonl");
+        await File.WriteAllTextAsync(chatPath, JsonSerializer.Serialize(new
+        {
+            role = "user", content = "Fallback question"
+        }) + "\n");
+        var directoryWriteTime = DateTimeOffset.Parse("2026-08-09T16:00:00Z");
+        var chatWriteTime = DateTimeOffset.Parse("2026-08-09T17:00:00Z");
+        File.SetLastWriteTimeUtc(chatPath, chatWriteTime.UtcDateTime);
+        Directory.SetLastWriteTimeUtc(directory, directoryWriteTime.UtcDateTime);
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var row = Assert.Single(await new GrokSessionCatalogSource(fixture.GrokPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None));
+
+        Assert.Equal("Fallback question", row.Title);
+        Assert.Equal(chatWriteTime, row.LastModifiedAt);
+    }
+
+    [Fact]
     public async Task GrokSourceUsesLowerPriorityOfficialTitleWhenGeneratedTitleIsWhitespace()
     {
         // Selecting the first raw string would let a blank generated title hide the valid session summary.

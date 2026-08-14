@@ -122,6 +122,7 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
                 chatReadable = chat.IsReadable;
                 title ??= chat.Title;
                 modified ??= chat.LastModifiedAt;
+                modified ??= LastWriteTime(chatPath);
             }
             else if (chatExists && modified is null)
             {
