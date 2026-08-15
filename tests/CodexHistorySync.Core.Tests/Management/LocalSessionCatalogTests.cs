@@ -87,27 +87,65 @@ public sealed class LocalSessionCatalogTests
     [Fact]
     public async Task CodexSourceExcludesExplicitSubagentsButKeepsParentedUserSession()
     {
-        // Either authoritative marker must hide a row, while parent_thread_id alone must not.
+        // Only the two authoritative marker shapes hide rows; unsupported shapes remain visible.
         await using var fixture = new CatalogFixture();
         await fixture.WriteCodexSourceMetadataAsync(
             "spawned-subagent", "subagent", source: null, parentThreadId: "top-level");
+        await fixture.WriteCodexSourceMetadataAsync(
+            "mixed-case-subagent", "SuBaGeNt", source: null, parentThreadId: null);
+        await fixture.WriteCodexSourceMetadataAsync(
+            "uppercase-subagent", "SUBAGENT", source: null, parentThreadId: null);
         await fixture.WriteCodexSourceMetadataAsync(
             "guardian-subagent", threadSource: null,
             source: new { subagent = new { other = "guardian" } },
             parentThreadId: "spawned-subagent");
         await fixture.WriteCodexSourceMetadataAsync(
             "parented-user", threadSource: null, source: null, parentThreadId: "top-level");
-        await fixture.WriteCodexIndexAsync(
-            new { id = "spawned-subagent", thread_name = "Index must not restore this row" },
-            new { id = "parented-user", thread_name = "Visible user session" });
+        await fixture.WriteCodexSourceMetadataAsync(
+            "numeric-thread-source", threadSource: 42, source: null, parentThreadId: null);
+        await fixture.WriteCodexSourceMetadataAsync(
+            "string-source", threadSource: null, source: "subagent", parentThreadId: null);
+        await fixture.WriteCodexSourceMetadataAsync(
+            "string-subagent", threadSource: null, source: new { subagent = "worker" }, parentThreadId: null);
+        await fixture.WriteCodexSourceMetadataAsync(
+            "boolean-subagent", threadSource: null, source: new { subagent = true }, parentThreadId: null);
+        await fixture.WriteCodexSourceMetadataAsync(
+            "array-subagent", threadSource: null, source: new { subagent = new[] { "worker" } }, parentThreadId: null);
+        await fixture.WriteCodexSourceMetadataAsync(
+            "null-subagent", threadSource: null, source: new { subagent = (object?)null }, parentThreadId: null);
+
+        var hiddenIds = new[]
+        {
+            "spawned-subagent", "mixed-case-subagent", "uppercase-subagent", "guardian-subagent"
+        };
+        var expectedRows = new Dictionary<string, string>
+        {
+            ["parented-user"] = "Visible parented user session",
+            ["numeric-thread-source"] = "Visible numeric thread source",
+            ["string-source"] = "Visible string source",
+            ["string-subagent"] = "Visible string subagent",
+            ["boolean-subagent"] = "Visible boolean subagent",
+            ["array-subagent"] = "Visible array subagent",
+            ["null-subagent"] = "Visible null subagent"
+        };
+        var indexRecords = hiddenIds
+            .Select(id => (object)new { id, thread_name = $"Index must not restore {id}" })
+            .Concat(expectedRows.Select(pair => (object)new { id = pair.Key, thread_name = pair.Value }))
+            .ToArray();
+        await fixture.WriteCodexIndexAsync(indexRecords);
 
         using var limiter = new SessionCatalogReadLimiter(8);
         var rows = await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
             .ScanAsync(limiter, CancellationToken.None);
 
-        var row = Assert.Single(rows);
-        Assert.Equal("parented-user", row.SessionId);
-        Assert.Equal("Visible user session", row.Title);
+        Assert.Equal(expectedRows.Count, rows.Count);
+        foreach (var expected in expectedRows)
+        {
+            var row = Assert.Single(rows, candidate => candidate.SessionId == expected.Key);
+            Assert.Equal(expected.Value, row.Title);
+        }
+        foreach (var hiddenId in hiddenIds)
+            Assert.DoesNotContain(rows, candidate => candidate.SessionId == hiddenId);
     }
 
     [Fact]
@@ -1223,7 +1261,7 @@ public sealed class LocalSessionCatalogTests
 
         public async Task WriteCodexSourceMetadataAsync(
             string id,
-            string? threadSource,
+            object? threadSource,
             object? source,
             string? parentThreadId)
         {
