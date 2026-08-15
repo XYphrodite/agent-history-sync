@@ -143,6 +143,7 @@ public sealed class LocalSessionCatalogTests
         {
             var row = Assert.Single(rows, candidate => candidate.SessionId == expected.Key);
             Assert.Equal(expected.Value, row.Title);
+            Assert.True(row.CanRead);
         }
         foreach (var hiddenId in hiddenIds)
             Assert.DoesNotContain(rows, candidate => candidate.SessionId == hiddenId);
