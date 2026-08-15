@@ -62,6 +62,8 @@ The screen has separate **Codex** and **Grok** panels. Each panel shows **Title*
 
 Each refresh scans the Codex and Grok homes concurrently under one bounded-read limit. It reads only the bounded metadata needed to build the catalog; full native conversation parsing is deferred until the user selects a copy or delete action.
 
+Native Codex sessions explicitly marked as subagents (including spawned workers, reviewers, nested workers, and guardians) are internal implementation records and are excluded from the manager. Their files remain untouched. Grok sessions are not classified heuristically from names, paths, or message text.
+
 `C` converts the selected readable, inactive session into the other agent's native format. The copied conversation keeps its title, available timestamps, and ordered user/assistant turns. System, reasoning, and tool content are omitted. The destination is always a newly generated native session identifier: the source remains unchanged and an existing destination session is never overwritten. Before a Codex destination is published, a configured or discovered Codex executable is checked with the disposable-profile compatibility probe; an automatically unavailable executable is the only normal case in which that probe is skipped.
 
 Copy and delete refuse an active, unreadable, malformed, changed, or out-of-root session. The manager rechecks activity and the exact source immediately before the final action. `Delete` first asks for confirmation and removes only the selected local native session: the selected Codex JSONL file or the selected Grok native session directory. It does not publish a deletion or write a tombstone. **Local deletion may be restored by sync** on a later pull or bidirectional synchronization.
