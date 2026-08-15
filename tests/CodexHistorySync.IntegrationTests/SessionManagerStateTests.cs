@@ -147,9 +147,60 @@ public sealed class SessionManagerStateTests
         Assert.Equal("stable-grok", state.ApplyNavigation(SessionManagerCommand.FocusRight).SelectedSession!.SessionId);
     }
 
+    [Fact]
+    public void Search_filters_both_panels_by_title_only_ignoring_case_and_resets_selection()
+    {
+        var state = new SessionManagerState(Snapshot(
+            [
+                Session(ManagedAgent.Codex, "codex-beta", "Beta task"),
+                Session(ManagedAgent.Codex, "codex-alpha", "Alpha task"),
+                Session(ManagedAgent.Codex, "alpha-only-in-id", "Different title")
+            ],
+            [
+                Session(ManagedAgent.Grok, "grok-beta", "Another task"),
+                Session(ManagedAgent.Grok, "grok-alpha", "ALPHA notes")
+            ]))
+            .ApplyNavigation(SessionManagerCommand.MoveDown)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.MoveDown);
+
+        state = state.WithSearchQuery("alpha");
+
+        Assert.Equal("alpha", state.SearchQuery);
+        Assert.Equal(["codex-alpha"], state.Snapshot.Codex.Select(session => session.SessionId));
+        Assert.Equal(["grok-alpha"], state.Snapshot.Grok.Select(session => session.SessionId));
+        Assert.Equal(0, state.SelectedIndex(ManagedAgent.Codex));
+        Assert.Equal(0, state.SelectedIndex(ManagedAgent.Grok));
+        Assert.Equal(0, state.ViewportOffset(ManagedAgent.Codex));
+        Assert.Equal(0, state.ViewportOffset(ManagedAgent.Grok));
+        Assert.Equal("grok-alpha", state.SelectedSession!.SessionId);
+    }
+
+    [Fact]
+    public void Clearing_search_restores_the_owned_snapshot_and_refresh_keeps_an_active_filter()
+    {
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "one", "Needle one"), Session(ManagedAgent.Codex, "two", "Other")],
+            [Session(ManagedAgent.Grok, "three", "Needle three")]))
+            .WithSearchQuery("needle");
+
+        state = state.ReplaceSnapshot(Snapshot(
+            [Session(ManagedAgent.Codex, "four", "Needle four"), Session(ManagedAgent.Codex, "five", "Other")],
+            [Session(ManagedAgent.Grok, "six", "Needle six")]));
+
+        Assert.Equal(["four"], state.Snapshot.Codex.Select(session => session.SessionId));
+        Assert.Equal(["six"], state.Snapshot.Grok.Select(session => session.SessionId));
+
+        state = state.WithSearchQuery(string.Empty);
+
+        Assert.Equal(string.Empty, state.SearchQuery);
+        Assert.Equal(["four", "five"], state.Snapshot.Codex.Select(session => session.SessionId));
+        Assert.Equal(["six"], state.Snapshot.Grok.Select(session => session.SessionId));
+    }
+
     private static SessionCatalogSnapshot Snapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok) =>
         new(codex, grok);
 
-    private static ManagedSession Session(ManagedAgent agent, string id) =>
-        new(agent, id, $"C:\\injected\\{id}", id, DateTimeOffset.UnixEpoch, false, true);
+    private static ManagedSession Session(ManagedAgent agent, string id, string? title = null) =>
+        new(agent, id, $"C:\\injected\\{id}", title ?? id, DateTimeOffset.UnixEpoch, false, true);
 }

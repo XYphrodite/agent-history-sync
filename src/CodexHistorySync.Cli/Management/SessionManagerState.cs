@@ -8,23 +8,26 @@ public sealed class SessionManagerState
         SessionCatalogSnapshot snapshot,
         ManagedAgent focusedAgent = ManagedAgent.Codex,
         int viewportRows = 10)
-        : this(snapshot, focusedAgent, viewportRows, 0, 0, 0, 0)
+        : this(snapshot, focusedAgent, viewportRows, string.Empty, 0, 0, 0, 0)
     {
     }
 
     private SessionManagerState(
-        SessionCatalogSnapshot snapshot,
+        SessionCatalogSnapshot sourceSnapshot,
         ManagedAgent focusedAgent,
         int viewportRows,
+        string searchQuery,
         int codexSelectedIndex,
         int grokSelectedIndex,
         int codexViewportOffset,
         int grokViewportOffset)
     {
-        ArgumentNullException.ThrowIfNull(snapshot);
-        Snapshot = new SessionCatalogSnapshot(
-            Array.AsReadOnly(snapshot.Codex.ToArray()),
-            Array.AsReadOnly(snapshot.Grok.ToArray()));
+        ArgumentNullException.ThrowIfNull(sourceSnapshot);
+        SourceSnapshot = new SessionCatalogSnapshot(
+            Array.AsReadOnly(sourceSnapshot.Codex.ToArray()),
+            Array.AsReadOnly(sourceSnapshot.Grok.ToArray()));
+        SearchQuery = searchQuery ?? string.Empty;
+        Snapshot = FilterSnapshot(SourceSnapshot, SearchQuery);
         FocusedAgent = focusedAgent;
         ViewportRows = Math.Max(1, viewportRows);
         CodexSelectedIndex = ClampSelection(codexSelectedIndex, Snapshot.Codex.Count);
@@ -34,6 +37,7 @@ public sealed class SessionManagerState
     }
 
     public SessionCatalogSnapshot Snapshot { get; }
+    public string SearchQuery { get; }
     public ManagedAgent FocusedAgent { get; }
     public int ViewportRows { get; }
     public int CodexSelectedIndex { get; }
@@ -73,22 +77,44 @@ public sealed class SessionManagerState
                 break;
         }
 
-        return new SessionManagerState(Snapshot, focusedAgent, ViewportRows, codexSelectedIndex, grokSelectedIndex,
+        return new SessionManagerState(SourceSnapshot, focusedAgent, ViewportRows, SearchQuery,
+            codexSelectedIndex, grokSelectedIndex,
             CodexViewportOffset, GrokViewportOffset);
     }
 
     public SessionManagerState ReplaceSnapshot(SessionCatalogSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        var codexSelected = SelectionForReplacement(ManagedAgent.Codex, snapshot.Codex, CodexSelectedIndex);
-        var grokSelected = SelectionForReplacement(ManagedAgent.Grok, snapshot.Grok, GrokSelectedIndex);
-        return new SessionManagerState(snapshot, FocusedAgent, ViewportRows, codexSelected, grokSelected,
+        var filtered = FilterSnapshot(snapshot, SearchQuery);
+        var codexSelected = SelectionForReplacement(ManagedAgent.Codex, filtered.Codex, CodexSelectedIndex);
+        var grokSelected = SelectionForReplacement(ManagedAgent.Grok, filtered.Grok, GrokSelectedIndex);
+        return new SessionManagerState(snapshot, FocusedAgent, ViewportRows, SearchQuery,
+            codexSelected, grokSelected,
             CodexViewportOffset, GrokViewportOffset);
     }
 
+    public SessionManagerState WithSearchQuery(string? query) =>
+        new(SourceSnapshot, FocusedAgent, ViewportRows, query ?? string.Empty, 0, 0, 0, 0);
+
     public SessionManagerState SetViewportRows(int rows) =>
-        new(Snapshot, FocusedAgent, rows, CodexSelectedIndex, GrokSelectedIndex,
+        new(SourceSnapshot, FocusedAgent, rows, SearchQuery, CodexSelectedIndex, GrokSelectedIndex,
             CodexViewportOffset, GrokViewportOffset);
+
+    private SessionCatalogSnapshot SourceSnapshot { get; }
+
+    private static SessionCatalogSnapshot FilterSnapshot(SessionCatalogSnapshot snapshot, string query)
+    {
+        if (query.Length == 0)
+            return new SessionCatalogSnapshot(
+                Array.AsReadOnly(snapshot.Codex.ToArray()),
+                Array.AsReadOnly(snapshot.Grok.ToArray()));
+
+        return new SessionCatalogSnapshot(
+            Array.AsReadOnly(snapshot.Codex
+                .Where(session => session.Title.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray()),
+            Array.AsReadOnly(snapshot.Grok
+                .Where(session => session.Title.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray()));
+    }
 
     private int SelectionForReplacement(ManagedAgent agent, IReadOnlyList<ManagedSession> replacement, int fallback)
     {

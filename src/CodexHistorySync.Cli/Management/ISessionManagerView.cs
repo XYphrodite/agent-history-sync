@@ -7,6 +7,7 @@ public interface ISessionManagerView
     Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken);
     void Render(SessionManagerState state);
     SessionManagerCommand ReadCommand(CancellationToken cancellationToken);
+    string ReadSearchQuery(SessionManagerState state, CancellationToken cancellationToken);
     bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken);
     void ShowMessage(string message, bool isError);
 }

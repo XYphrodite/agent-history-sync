@@ -34,6 +34,62 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
+    public void ReadCommand_maps_slash_to_search_and_escape_to_clear_an_active_filter()
+    {
+        var input = new FakeInput(Key('/', ConsoleKey.Oem2), Key(ConsoleKey.Escape));
+        var view = new SpectreSessionManagerView(CreateConsole(out _, 80, 24), input);
+
+        Assert.Equal(SessionManagerCommand.Search, view.ReadCommand(CancellationToken.None));
+
+        view.Render(new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "one", "One")], [])).WithSearchQuery("one"));
+
+        Assert.Equal(SessionManagerCommand.ClearSearch, view.ReadCommand(CancellationToken.None));
+    }
+
+    [Fact]
+    public void ReadSearchQuery_supports_live_typing_backspace_enter_and_escape_clear()
+    {
+        var input = new FakeInput(
+            Key('a', ConsoleKey.A),
+            Key('l', ConsoleKey.L),
+            Key(ConsoleKey.Backspace),
+            Key('p', ConsoleKey.P),
+            Key(ConsoleKey.Enter),
+            Key(ConsoleKey.Escape));
+        var console = CreateConsole(out var output, 100, 24);
+        var view = new SpectreSessionManagerView(console, input);
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "alpha", "Alpha")],
+            [Session(ManagedAgent.Grok, "beta", "Beta")]));
+
+        var committed = view.ReadSearchQuery(state, CancellationToken.None);
+        var cleared = view.ReadSearchQuery(state.WithSearchQuery(committed), CancellationToken.None);
+
+        Assert.Equal("ap", committed);
+        Assert.Equal(string.Empty, cleared);
+        Assert.Contains("Search: al", output.ToString());
+        Assert.Contains("Search: ap", output.ToString());
+    }
+
+    [Fact]
+    public void Render_shows_search_query_and_no_matching_sessions_in_both_panels()
+    {
+        var console = CreateConsole(out var output, 100, 24);
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "one", "Alpha")],
+            [Session(ManagedAgent.Grok, "two", "Beta")]))
+            .WithSearchQuery("missing");
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        Assert.Contains("Search: missing", rendered);
+        Assert.Equal(2, Count(rendered, "No matching sessions"));
+        Assert.Contains("/ search", rendered);
+    }
+
+    [Fact]
     public void Render_writes_two_panels_exact_headings_markers_and_footer()
     {
         var console = CreateConsole(out var output, 100, 24);
@@ -51,7 +107,7 @@ public sealed class SpectreSessionManagerViewTests
         Assert.Equal(2, Count(rendered, "Last modified"));
         Assert.Contains("[A]", rendered);
         Assert.Contains("[U]", rendered);
-        Assert.Contains("↑/↓ select  ←/→ panel  C copy  Del delete  R refresh  Q/Esc exit", rendered);
+        Assert.Contains("↑↓ select  ←→ panel  C copy  Del delete  R refresh  / search  Esc clear  Q exit", rendered);
     }
 
     [Fact]
@@ -86,6 +142,7 @@ public sealed class SpectreSessionManagerViewTests
 
         new SpectreSessionManagerView(console, new FakeInput()).Render(state);
 
+        Assert.Contains("title-6", output.ToString());
         Assert.Contains("title-7", output.ToString());
         Assert.DoesNotContain("title-0", output.ToString());
     }
@@ -203,7 +260,7 @@ public sealed class SpectreSessionManagerViewTests
         var subsequentFrame = input.RenderedBeforeReads[1];
         var panels = subsequentFrame.LastIndexOf("Last modified", StringComparison.Ordinal);
         var refusal = subsequentFrame.LastIndexOf("Active sessions cannot be copied.", StringComparison.Ordinal);
-        var footer = subsequentFrame.LastIndexOf("Q/Esc exit", StringComparison.Ordinal);
+        var footer = subsequentFrame.LastIndexOf("Q exit", StringComparison.Ordinal);
         Assert.True(panels < refusal && refusal < footer,
             "Expected the refusal inside the subsequent live frame.");
     }
@@ -222,7 +279,7 @@ public sealed class SpectreSessionManagerViewTests
         var confirmationFrame = input.RenderedBeforeReads[1];
         var panels = confirmationFrame.LastIndexOf("Last modified", StringComparison.Ordinal);
         var warning = confirmationFrame.LastIndexOf("Local only: delete", StringComparison.Ordinal);
-        var footer = confirmationFrame.LastIndexOf("Q/Esc exit", StringComparison.Ordinal);
+        var footer = confirmationFrame.LastIndexOf("Q exit", StringComparison.Ordinal);
         Assert.True(panels < warning && warning < footer,
             "Expected the confirmation inside the live frame.");
         var rendered = output.ToString();
@@ -466,6 +523,7 @@ public sealed class SpectreSessionManagerViewTests
             DateTimeOffset.Parse("2026-08-09T12:34:56Z"), isActive, canRead);
 
     private static ConsoleKeyInfo Key(ConsoleKey key) => new('\0', key, false, false, false);
+    private static ConsoleKeyInfo Key(char character, ConsoleKey key) => new(character, key, false, false, false);
 
     private static IAnsiConsole CreateConsole(
         out StringWriter writer,

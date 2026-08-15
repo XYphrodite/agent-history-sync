@@ -9,5 +9,7 @@ public enum SessionManagerCommand
     Copy,
     Delete,
     Refresh,
+    Search,
+    ClearSearch,
     Exit
 }
