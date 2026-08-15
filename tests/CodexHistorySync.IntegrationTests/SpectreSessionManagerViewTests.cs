@@ -101,13 +101,41 @@ public sealed class SpectreSessionManagerViewTests
         view.Render(state);
 
         var rendered = output.ToString();
-        Assert.Contains("Codex", rendered);
-        Assert.Contains("Grok", rendered);
-        Assert.Equal(2, Count(rendered, "Title"));
-        Assert.Equal(2, Count(rendered, "Last modified"));
-        Assert.Contains("[A]", rendered);
-        Assert.Contains("[U]", rendered);
-        Assert.Contains("↑↓ select  ←→ panel  C copy  Del delete  R refresh  / search  Esc clear  Q exit", rendered);
+        Assert.Contains("CODEX", rendered);
+        Assert.Contains("GROK", rendered);
+        Assert.Equal(2, Count(rendered, "SESSION"));
+        Assert.Equal(2, Count(rendered, "UPDATED"));
+        Assert.Contains("●", rendered);
+        Assert.Contains("!", rendered);
+        Assert.Contains("↑↓ move", rendered);
+        Assert.Contains("←→ panel", rendered);
+        Assert.Contains("/ search", rendered);
+        Assert.Contains("Q exit", rendered);
+    }
+
+    [Fact]
+    public void Render_uses_compact_grok_inspired_visual_language()
+    {
+        var console = CreateConsole(out var output, 120, 24);
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "codex", "Codex title", isActive: true)],
+            [Session(ManagedAgent.Grok, "grok", "Grok title", canRead: false)]));
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        Assert.Contains("● CODEX", rendered);
+        Assert.Contains("GROK", rendered);
+        Assert.Equal(2, Count(rendered, "SESSION"));
+        Assert.Equal(2, Count(rendered, "UPDATED"));
+        Assert.Contains("› ● Codex title", rendered);
+        Assert.Contains("! Grok title", rendered);
+        Assert.Contains("↑↓ move", rendered);
+        Assert.Contains("/ search", rendered);
+        Assert.Contains("● active", rendered);
+        Assert.Contains("! unreadable", rendered);
+        Assert.DoesNotContain("[A]", rendered);
+        Assert.DoesNotContain("[U]", rendered);
     }
 
     [Fact]
@@ -162,7 +190,7 @@ public sealed class SpectreSessionManagerViewTests
         new SpectreSessionManagerView(console, new FakeInput()).Render(state);
 
         var rendered = output.ToString();
-        Assert.Contains("Selected sess…", rendered);
+        Assert.Contains("Selected se…", rendered);
         Assert.DoesNotContain("Selected\r", rendered);
         Assert.DoesNotContain("title-0", rendered);
     }
@@ -200,7 +228,7 @@ public sealed class SpectreSessionManagerViewTests
         new SpectreSessionManagerView(console, new FakeInput()).Render(
             new SessionManagerState(Snapshot([session], [])));
 
-        Assert.Contains("[AU]", output.ToString());
+        Assert.Contains("●!", output.ToString());
     }
 
     [Fact]
@@ -258,9 +286,9 @@ public sealed class SpectreSessionManagerViewTests
 
         Assert.DoesNotContain("Active sessions cannot be copied.", input.RenderedBeforeReads[0]);
         var subsequentFrame = input.RenderedBeforeReads[1];
-        var panels = subsequentFrame.LastIndexOf("Last modified", StringComparison.Ordinal);
+        var panels = subsequentFrame.LastIndexOf("UPDATED", StringComparison.Ordinal);
         var refusal = subsequentFrame.LastIndexOf("Active sessions cannot be copied.", StringComparison.Ordinal);
-        var footer = subsequentFrame.LastIndexOf("Q exit", StringComparison.Ordinal);
+        var footer = subsequentFrame.LastIndexOf("exit", StringComparison.Ordinal);
         Assert.True(panels < refusal && refusal < footer,
             "Expected the refusal inside the subsequent live frame.");
     }
@@ -277,9 +305,9 @@ public sealed class SpectreSessionManagerViewTests
         await application.RunAsync(CancellationToken.None);
 
         var confirmationFrame = input.RenderedBeforeReads[1];
-        var panels = confirmationFrame.LastIndexOf("Last modified", StringComparison.Ordinal);
+        var panels = confirmationFrame.LastIndexOf("UPDATED", StringComparison.Ordinal);
         var warning = confirmationFrame.LastIndexOf("Local only: delete", StringComparison.Ordinal);
-        var footer = confirmationFrame.LastIndexOf("Q exit", StringComparison.Ordinal);
+        var footer = confirmationFrame.LastIndexOf("exit", StringComparison.Ordinal);
         Assert.True(panels < warning && warning < footer,
             "Expected the confirmation inside the live frame.");
         var rendered = output.ToString();
