@@ -85,6 +85,32 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task CodexSourceExcludesExplicitSubagentsButKeepsParentedUserSession()
+    {
+        // Either authoritative marker must hide a row, while parent_thread_id alone must not.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexSourceMetadataAsync(
+            "spawned-subagent", "subagent", source: null, parentThreadId: "top-level");
+        await fixture.WriteCodexSourceMetadataAsync(
+            "guardian-subagent", threadSource: null,
+            source: new { subagent = new { other = "guardian" } },
+            parentThreadId: "spawned-subagent");
+        await fixture.WriteCodexSourceMetadataAsync(
+            "parented-user", threadSource: null, source: null, parentThreadId: "top-level");
+        await fixture.WriteCodexIndexAsync(
+            new { id = "spawned-subagent", thread_name = "Index must not restore this row" },
+            new { id = "parented-user", thread_name = "Visible user session" });
+
+        using var limiter = new SessionCatalogReadLimiter(8);
+        var rows = await new CodexSessionCatalogSource(fixture.CodexPaths, new SystemSessionCatalogIo())
+            .ScanAsync(limiter, CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("parented-user", row.SessionId);
+        Assert.Equal("Visible user session", row.Title);
+    }
+
+    [Fact]
     public async Task CodexSourceUsesCompleteEofIndexRecordWithoutTerminalNewline()
     {
         // Discarding every final line from a bounded tail would lose the newest official title at EOF.
@@ -1193,6 +1219,44 @@ public sealed class LocalSessionCatalogTests
             await File.WriteAllTextAsync(path,
                 JsonSerializer.Serialize(metadata) + "\n" + JsonSerializer.Serialize(message) + "\n", Utf8);
             return path;
+        }
+
+        public async Task WriteCodexSourceMetadataAsync(
+            string id,
+            string? threadSource,
+            object? source,
+            string? parentThreadId)
+        {
+            var directory = Path.Combine(CodexPaths.Sessions, "2026", "08", "09");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, $"rollout-{id}.jsonl");
+            var metadata = new
+            {
+                type = "session_meta",
+                payload = new
+                {
+                    id,
+                    timestamp = "2026-08-09T08:00:00Z",
+                    cwd = WorkingDirectory,
+                    title = $"{id} title",
+                    thread_source = threadSource,
+                    source,
+                    parent_thread_id = parentThreadId
+                }
+            };
+            var message = new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message",
+                    role = "user",
+                    timestamp = "2026-08-09T12:00:00Z",
+                    content = new[] { new { type = "input_text", text = $"{id} request" } }
+                }
+            };
+            await File.WriteAllTextAsync(path,
+                JsonSerializer.Serialize(metadata) + "\n" + JsonSerializer.Serialize(message) + "\n", Utf8);
         }
 
         public async Task WriteCodexUsersAsync(string id, string? title, params string[] userTexts)

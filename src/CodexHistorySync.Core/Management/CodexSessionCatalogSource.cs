@@ -132,6 +132,7 @@ internal sealed class CodexSessionCatalogSource(CodexPaths paths, ISessionCatalo
                     AddLatestTimestamp(payload, ref modified);
                     if (string.Equals(type.GetString(), "session_meta", StringComparison.Ordinal))
                     {
+                        if (IsSubagent(payload)) return null;
                         var id = GetString(payload, "id");
                         if (!IsSafeSessionId(id) || sessionId is not null && !string.Equals(sessionId, id, StringComparison.OrdinalIgnoreCase))
                             readable = false;
@@ -193,6 +194,10 @@ internal sealed class CodexSessionCatalogSource(CodexPaths paths, ISessionCatalo
     }
 
     private static bool IsTechnicalPreview(string preview) => TechnicalPreviewOpeningTags.Any(tag => preview.StartsWith(tag, StringComparison.OrdinalIgnoreCase));
+    private static bool IsSubagent(JsonElement payload) =>
+        string.Equals(GetString(payload, "thread_source"), "subagent", StringComparison.OrdinalIgnoreCase) ||
+        payload.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object &&
+        source.TryGetProperty("subagent", out var subagent) && subagent.ValueKind == JsonValueKind.Object;
     private static string? GetString(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static bool IsSafeSessionId(string? value) => !string.IsNullOrWhiteSpace(value) && char.IsAsciiLetterOrDigit(value[0]) && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
     private static string DisplayTitle(string? value, string fallback)
