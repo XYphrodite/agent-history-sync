@@ -31,11 +31,14 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private const int LayoutRows = 8;
     private const int MinimumPanelWidth = 28;
     private static readonly Style FocusedBorder = new(Color.Cyan1);
-    private static readonly Style UnfocusedBorder = new(Color.Grey);
-    private static readonly Style FocusedSelection = new(Color.Black, Color.Cyan1, Decoration.Bold);
-    private static readonly Style UnfocusedSelection = new(Color.White, Color.Grey);
+    private static readonly Style UnfocusedBorder = new(Color.Grey23);
+    private static readonly Style FocusedSelection = new(Color.Cyan1, decoration: Decoration.Bold);
+    private static readonly Style NormalText = new(Color.Grey82);
+    private static readonly Style MutedText = new(Color.Grey58);
+    private static readonly Style ActiveText = new(Color.Orange1);
+    private static readonly Style UnreadableText = new(Color.Red);
     private static readonly Style ErrorStyle = new(Color.Red);
-    private static readonly Style InformationStyle = new(Color.Yellow);
+    private static readonly Style InformationStyle = new(Color.Orange1);
 
     private readonly IAnsiConsole console;
     private readonly ISessionManagerInput input;
@@ -124,9 +127,14 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         var message = pendingMessage is { } pending
             ? new Text(pending.Message, pending.IsError ? ErrorStyle : InformationStyle)
             : new Text(string.Empty);
-        var search = new Text($"Search: {state.SearchQuery}", InformationStyle);
-        var footer = new Text("↑↓ select  ←→ panel  C copy  Del delete  R refresh  / search  Esc clear  Q exit",
-            new Style(Color.Grey));
+        var search = new Markup(
+            $"[cyan1 bold]›[/] [grey58]Search:[/] [grey82]{Markup.Escape(state.SearchQuery)}[/]");
+        var footer = new Markup(
+            "[cyan1]↑↓[/] [grey58]move[/]   [cyan1]←→[/] [grey58]panel[/]   " +
+            "[cyan1]/[/] [grey58]search[/]   [cyan1]C[/] [grey58]copy[/]   " +
+            "[cyan1]Del[/] [grey58]delete[/]   [cyan1]R[/] [grey58]refresh[/]   " +
+            "[cyan1]Esc[/] [grey58]clear[/]   [cyan1]Q[/] [grey58]exit[/]   " +
+            "[orange1]●[/] [grey58]active[/]   [red]![/] [grey58]unreadable[/]");
         pendingMessage = null;
         return showSearch
             ? new Rows(panels, search, message, footer)
@@ -241,12 +249,12 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
             ShowHeaders = true
         };
         var timestampWidth = 16;
-        table.AddColumn(new TableColumn("Title")
+        table.AddColumn(new TableColumn(new Text("SESSION", MutedText))
         {
             Width = Math.Max(4, width - timestampWidth - 6),
             NoWrap = true
         });
-        table.AddColumn(new TableColumn("Last modified")
+        table.AddColumn(new TableColumn(new Text("UPDATED", MutedText))
         {
             Width = timestampWidth,
             NoWrap = true
@@ -265,18 +273,23 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
                 var absoluteIndex = offset + index;
                 var selected = absoluteIndex == selectedIndex;
                 var session = visible[index];
-                var style = selected
-                    ? focused ? FocusedSelection : UnfocusedSelection
-                    : Style.Plain;
+                var titleStyle = selected && focused
+                    ? FocusedSelection
+                    : !session.CanRead
+                        ? UnreadableText
+                        : session.IsActive
+                            ? ActiveText
+                            : NormalText;
+                var timestampStyle = selected && focused ? FocusedSelection : MutedText;
                 table.AddRow(
-                    new Text(FormatTitle(session, width), style),
+                    new Text(FormatTitle(session, width, selected && focused), titleStyle),
                     new Text(session.LastModifiedAt.ToLocalTime()
-                        .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), style));
+                        .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), timestampStyle));
             }
         }
 
-        var name = agent == ManagedAgent.Codex ? "Codex" : "Grok";
-        var header = new PanelHeader(focused ? $"[cyan1]{name}[/]" : $"[grey]{name}[/]");
+        var name = agent == ManagedAgent.Codex ? "CODEX" : "GROK";
+        var header = new PanelHeader(focused ? $"[cyan1 bold]● {name}[/]" : $"[grey58]  {name}[/]");
         return new Panel(table)
         {
             Header = header,
@@ -288,23 +301,25 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         };
     }
 
-    private static string FormatTitle(ManagedSession session, int panelWidth)
+    private static string FormatTitle(ManagedSession session, int panelWidth, bool focusedSelection)
     {
         var marker = (session.IsActive, session.CanRead) switch
         {
-            (true, false) => "[AU]",
-            (true, true) => "[A] ",
-            (false, false) => "[U] ",
+            (true, false) => "●! ",
+            (true, true) => "● ",
+            (false, false) => "! ",
             _ => string.Empty
         };
+        var selection = focusedSelection ? "› " : "  ";
         var maximum = Math.Max(4, panelWidth - 25);
-        if (marker.Length >= maximum) return marker[..maximum];
-        var availableTitle = maximum - marker.Length;
+        var prefix = selection + marker;
+        if (prefix.Length >= maximum) return prefix[..maximum];
+        var availableTitle = maximum - prefix.Length;
         var title = NormalizeWhitespace(session.Title);
         if (title.Length == 0) title = session.SessionId;
         if (title.Length > availableTitle)
             title = availableTitle == 1 ? "…" : string.Concat(title.AsSpan(0, availableTitle - 1), "…");
-        return marker + title;
+        return prefix + title;
     }
 
     private static string NormalizeWhitespace(string? value)
