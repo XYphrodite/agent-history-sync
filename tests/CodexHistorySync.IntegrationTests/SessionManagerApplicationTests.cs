@@ -103,6 +103,48 @@ public sealed class SessionManagerApplicationTests
             message => message.Message == "Copy failed for session session_1.2." && message.IsError);
     }
 
+    [Fact]
+    public async Task Search_and_clear_commands_filter_then_restore_both_panels()
+    {
+        var catalog = new MutableCatalog(Snapshot(
+            [Session(ManagedAgent.Codex, "codex-needle"), Session(ManagedAgent.Codex, "codex-other")],
+            [Session(ManagedAgent.Grok, "grok-needle"), Session(ManagedAgent.Grok, "grok-other")]));
+        var view = new ScriptedView(
+            SessionManagerCommand.Search,
+            SessionManagerCommand.ClearSearch,
+            SessionManagerCommand.Exit);
+        view.SearchQueries.Enqueue("needle");
+        var application = new SessionManagerApplication(catalog, new MutatingOperations(catalog), view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        var filtered = Assert.Single(view.RenderedStates, state => state.SearchQuery == "needle");
+        Assert.Equal(["codex-needle"], filtered.Snapshot.Codex.Select(session => session.SessionId));
+        Assert.Equal(["grok-needle"], filtered.Snapshot.Grok.Select(session => session.SessionId));
+        var restored = view.RenderedStates.Last();
+        Assert.Equal(string.Empty, restored.SearchQuery);
+        Assert.Equal(2, restored.Snapshot.Codex.Count);
+        Assert.Equal(2, restored.Snapshot.Grok.Count);
+    }
+
+    [Fact]
+    public async Task Copy_uses_the_selected_visible_search_result()
+    {
+        var catalog = new MutableCatalog(Snapshot(
+            [Session(ManagedAgent.Codex, "other"), Session(ManagedAgent.Codex, "needle")], []));
+        var view = new ScriptedView(
+            SessionManagerCommand.Search,
+            SessionManagerCommand.Copy,
+            SessionManagerCommand.Exit);
+        view.SearchQueries.Enqueue("needle");
+        var operations = new RecordingOperations();
+        var application = new SessionManagerApplication(catalog, operations, view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Equal("needle", Assert.Single(operations.Copied).SessionId);
+    }
+
     private static SessionCatalogSnapshot Snapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok) =>
         new(codex, grok);
 
@@ -115,6 +157,7 @@ public sealed class SessionManagerApplicationTests
         private readonly Queue<SessionManagerCommand> commands = new(commands);
 
         public Queue<bool> DeleteConfirmations { get; } = new();
+        public Queue<string> SearchQueries { get; } = new();
         public List<SessionManagerState> RenderedStates { get; } = [];
         public List<(string Message, bool IsError)> Messages { get; } = [];
         public int DisplaySessions { get; private set; }
@@ -132,6 +175,12 @@ public sealed class SessionManagerApplicationTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return commands.Dequeue();
+        }
+
+        public string ReadSearchQuery(SessionManagerState state, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return SearchQueries.Dequeue();
         }
 
         public bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken)
@@ -183,5 +232,20 @@ public sealed class SessionManagerApplicationTests
 
         public Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken) =>
             Task.FromException(failure);
+    }
+
+    private sealed class RecordingOperations : ILocalSessionOperations
+    {
+        public List<ManagedSession> Copied { get; } = [];
+
+        public Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Copied.Add(source);
+            return Task.FromResult("unused");
+        }
+
+        public Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 }

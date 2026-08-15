@@ -43,6 +43,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private SessionManagerState? latestState;
     private PendingMessage? pendingMessage;
     private PendingMessage? exitMessage;
+    private bool searchEditing;
     private int displayActive;
 
     public SpectreSessionManagerView(IAnsiConsole console, ISessionManagerInput input)
@@ -106,7 +107,8 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
 
     private Rows BuildFrame(SessionManagerState state)
     {
-        var visibleRows = Math.Max(1, console.Profile.Height - LayoutRows);
+        var showSearch = searchEditing || state.SearchQuery.Length > 0;
+        var visibleRows = Math.Max(1, console.Profile.Height - LayoutRows - (showSearch ? 1 : 0));
         var displayState = state.SetViewportRows(visibleRows);
         var availableWidth = Math.Max(MinimumPanelWidth * 2 + 1, console.Profile.Width);
         var panelWidth = Math.Max(MinimumPanelWidth, (availableWidth - 1) / 2);
@@ -122,20 +124,22 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         var message = pendingMessage is { } pending
             ? new Text(pending.Message, pending.IsError ? ErrorStyle : InformationStyle)
             : new Text(string.Empty);
+        var search = new Text($"Search: {state.SearchQuery}", InformationStyle);
+        var footer = new Text("↑↓ select  ←→ panel  C copy  Del delete  R refresh  / search  Esc clear  Q exit",
+            new Style(Color.Grey));
         pendingMessage = null;
-        return new Rows(
-            panels,
-            message,
-            new Text("↑/↓ select  ←/→ panel  C copy  Del delete  R refresh  Q/Esc exit",
-                new Style(Color.Grey)));
+        return showSearch
+            ? new Rows(panels, search, message, footer)
+            : new Rows(panels, message, footer);
     }
 
     public SessionManagerCommand ReadCommand(CancellationToken cancellationToken)
     {
         while (true)
         {
-            var key = input.ReadKey(cancellationToken).Key;
-            switch (key)
+            var key = input.ReadKey(cancellationToken);
+            if (key.KeyChar == '/') return SessionManagerCommand.Search;
+            switch (key.Key)
             {
                 case ConsoleKey.UpArrow: return SessionManagerCommand.MoveUp;
                 case ConsoleKey.DownArrow: return SessionManagerCommand.MoveDown;
@@ -145,9 +149,48 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
                 case ConsoleKey.Delete: return SessionManagerCommand.Delete;
                 case ConsoleKey.R: return SessionManagerCommand.Refresh;
                 case ConsoleKey.Q:
-                case ConsoleKey.Escape:
                     return SessionManagerCommand.Exit;
+                case ConsoleKey.Escape:
+                    return latestState?.SearchQuery.Length > 0
+                        ? SessionManagerCommand.ClearSearch
+                        : SessionManagerCommand.Exit;
             }
+        }
+    }
+
+    public string ReadSearchQuery(SessionManagerState state, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        var query = state.SearchQuery;
+        searchEditing = true;
+        try
+        {
+            Render(state.WithSearchQuery(query));
+            while (true)
+            {
+                var key = input.ReadKey(cancellationToken);
+                switch (key.Key)
+                {
+                    case ConsoleKey.Enter:
+                        return query;
+                    case ConsoleKey.Escape:
+                        query = string.Empty;
+                        Render(state.WithSearchQuery(query));
+                        return query;
+                    case ConsoleKey.Backspace:
+                        if (query.Length > 0) query = query[..^1];
+                        break;
+                    default:
+                        if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar)) query += key.KeyChar;
+                        else continue;
+                        break;
+                }
+                Render(state.WithSearchQuery(query));
+            }
+        }
+        finally
+        {
+            searchEditing = false;
         }
     }
 
@@ -212,7 +255,8 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         var visible = sessions.Skip(offset).Take(state.ViewportRows).ToArray();
         if (visible.Length == 0)
         {
-            table.AddRow(new Text("None", new Style(Color.Grey)), new Text("—", new Style(Color.Grey)));
+            var emptyMessage = state.SearchQuery.Length > 0 ? "No matching sessions" : "None";
+            table.AddRow(new Text(emptyMessage, new Style(Color.Grey)), new Text("—", new Style(Color.Grey)));
         }
         else
         {

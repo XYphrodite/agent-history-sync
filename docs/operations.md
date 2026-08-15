@@ -58,7 +58,9 @@ agent-sync --manage
 
 It is a local-only tool: it does not construct the Git/GitHub sync runtime, contact the network, open the configured repository, or write sync state, conflict evidence, tombstones, or background-task configuration. It reads only the native Codex and Grok session homes and performs an explicit local copy or local delete when requested.
 
-The screen has separate **Codex** and **Grok** panels. Each panel shows **Title** and **Last modified** columns; `[A]` marks an active session and `[U]` marks one that cannot safely be read. Use `Up`/`Down` to select, `Left`/`Right` to change panels, `C` to copy, `Delete` to request deletion, `R` to refresh, and `Q` or `Esc` to exit.
+The screen has separate **Codex** and **Grok** panels. Each panel shows **Title** and **Last modified** columns; `[A]` marks an active session and `[U]` marks one that cannot safely be read. Use `Up`/`Down` to select, `Left`/`Right` to change panels, `C` to copy, `Delete` to request deletion, `R` to refresh, `Q` to exit, and `Esc` to exit when no search filter is active.
+
+Press `/` to search both panels by session title without reading conversation content. Filtering updates as you type and ignores case. `Backspace` edits the query, `Enter` keeps the current filter and returns to list navigation, and `Esc` clears the filter. An active query is shown below the panels; a panel with no matches displays `No matching sessions`.
 
 Each refresh scans the Codex and Grok homes concurrently under one bounded-read limit. It reads only the bounded metadata needed to build the catalog; full native conversation parsing is deferred until the user selects a copy or delete action.
 

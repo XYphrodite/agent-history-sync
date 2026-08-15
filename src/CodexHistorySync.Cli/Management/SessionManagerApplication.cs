@@ -46,6 +46,12 @@ public sealed class SessionManagerApplication(
                 case SessionManagerCommand.Refresh:
                     state = await RefreshAsync(state, cancellationToken);
                     break;
+                case SessionManagerCommand.Search:
+                    state = state.WithSearchQuery(view.ReadSearchQuery(state, cancellationToken));
+                    break;
+                case SessionManagerCommand.ClearSearch:
+                    state = state.WithSearchQuery(string.Empty);
+                    break;
                 case SessionManagerCommand.Copy:
                     state = await CopyAsync(state, cancellationToken);
                     break;
