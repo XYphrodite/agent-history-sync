@@ -7,6 +7,8 @@
     <Deterministic>true</Deterministic>
     <Version>0.4.0</Version>
     <InformationalVersion>0.4.0</InformationalVersion>
+    <Authors>XYphrodite</Authors>
+    <Company>XYphrodite</Company>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>

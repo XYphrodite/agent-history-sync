@@ -105,10 +105,10 @@ public sealed class SpectreSessionManagerViewTests
         Assert.Contains("GROK", rendered);
         Assert.Equal(2, Count(rendered, "SESSION"));
         Assert.Equal(2, Count(rendered, "UPDATED"));
-        Assert.Contains("●", rendered);
+        Assert.Contains("*", rendered);
         Assert.Contains("!", rendered);
-        Assert.Contains("↑↓ move", rendered);
-        Assert.Contains("←→ panel", rendered);
+        Assert.Contains("Up/Dn move", rendered);
+        Assert.Contains("Lt/Rt panel", rendered);
         Assert.Contains("/ search", rendered);
         Assert.Contains("Q exit", rendered);
     }
@@ -124,18 +124,43 @@ public sealed class SpectreSessionManagerViewTests
         new SpectreSessionManagerView(console, new FakeInput()).Render(state);
 
         var rendered = output.ToString();
-        Assert.Contains("● CODEX", rendered);
+        Assert.Contains("* CODEX", rendered);
         Assert.Contains("GROK", rendered);
         Assert.Equal(2, Count(rendered, "SESSION"));
         Assert.Equal(2, Count(rendered, "UPDATED"));
-        Assert.Contains("› ● Codex title", rendered);
+        Assert.Contains("> * Codex title", rendered);
         Assert.Contains("! Grok title", rendered);
-        Assert.Contains("↑↓ move", rendered);
+        Assert.Contains("Up/Dn move", rendered);
         Assert.Contains("/ search", rendered);
-        Assert.Contains("● active", rendered);
+        Assert.Contains("* active", rendered);
         Assert.Contains("! unreadable", rendered);
         Assert.DoesNotContain("[A]", rendered);
         Assert.DoesNotContain("[U]", rendered);
+    }
+
+    [Fact]
+    public void Render_places_ascii_logo_above_panels_and_uses_terminal_safe_active_marker()
+    {
+        var console = CreateConsole(out var output, 120, 24);
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "codex", "Codex title", isActive: true)], []));
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        var logoTop = rendered.IndexOf('╭');
+        var logo = rendered.IndexOf("<> agent-sync", StringComparison.Ordinal);
+        var logoBottom = rendered.IndexOf('╰');
+        var panel = rendered.IndexOf("* CODEX", StringComparison.Ordinal);
+        Assert.True(logoTop >= 0 && logoTop < logo && logo < logoBottom && logoBottom < panel,
+            "Expected the compact logo inside its own frame above the panels.");
+        Assert.Equal(3, Count(rendered, "╭"));
+        Assert.Contains("version 0.4.0", rendered);
+        Assert.Matches("commit [0-9a-f]{7}", rendered);
+        Assert.Contains("by XYphrodite", rendered);
+        Assert.Contains("> * Codex title", rendered);
+        Assert.Contains("* active", rendered);
+        Assert.DoesNotContain("●", rendered);
     }
 
     [Fact]
@@ -170,8 +195,8 @@ public sealed class SpectreSessionManagerViewTests
 
         new SpectreSessionManagerView(console, new FakeInput()).Render(state);
 
-        Assert.Contains("title-6", output.ToString());
         Assert.Contains("title-7", output.ToString());
+        Assert.DoesNotContain("title-6", output.ToString());
         Assert.DoesNotContain("title-0", output.ToString());
     }
 
@@ -228,7 +253,7 @@ public sealed class SpectreSessionManagerViewTests
         new SpectreSessionManagerView(console, new FakeInput()).Render(
             new SessionManagerState(Snapshot([session], [])));
 
-        Assert.Contains("●!", output.ToString());
+        Assert.Contains("*!", output.ToString());
     }
 
     [Fact]
@@ -348,6 +373,7 @@ public sealed class SpectreSessionManagerViewTests
 
         var rendered = output.ToString();
         Assert.Equal(1, Count(rendered, "\u001b[?1049h"));
+        Assert.Contains("\u001b[?1049h\u001b[H", rendered, StringComparison.Ordinal);
         Assert.Equal(1, Count(rendered, "\u001b[?1049l"));
         Assert.Equal(1, Count(rendered, "\u001b[?25l"));
         Assert.Equal(1, Count(rendered, "\u001b[?25h"));

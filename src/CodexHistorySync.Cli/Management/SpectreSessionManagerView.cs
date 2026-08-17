@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using CodexHistorySync.Core.Management;
 using Spectre.Console;
@@ -26,9 +27,9 @@ public sealed class SpectreSessionManagerInput(IAnsiConsole console) : ISessionM
 
 public sealed class SpectreSessionManagerView : ISessionManagerView
 {
-    private const string EnterDisplay = "\u001b[?1049h";
+    private const string EnterDisplay = "\u001b[?1049h\u001b[H";
     private const string LeaveDisplay = "\u001b[?1049l";
-    private const int LayoutRows = 8;
+    private const int LayoutRows = 12;
     private const int MinimumPanelWidth = 28;
     private static readonly Style FocusedBorder = new(Color.Cyan1);
     private static readonly Style UnfocusedBorder = new(Color.Grey23);
@@ -39,6 +40,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private static readonly Style UnreadableText = new(Color.Red);
     private static readonly Style ErrorStyle = new(Color.Red);
     private static readonly Style InformationStyle = new(Color.Orange1);
+    private static readonly BuildDetails Build = ReadBuildDetails();
 
     private readonly IAnsiConsole console;
     private readonly ISessionManagerInput input;
@@ -124,21 +126,34 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         {
             Expand = true
         };
+        var brand = new Panel(new Rows(
+            new Markup("[cyan1 bold]<>[/] [white bold]agent[/][grey58]-[/][orange1 bold]sync[/]"),
+            new Markup(
+                $"[grey58]version[/] [white]{Markup.Escape(Build.Version)}[/]  " +
+                $"[grey58]commit[/] [cyan1]{Markup.Escape(Build.Commit)}[/]  " +
+                $"[grey58]by[/] [orange1]{Markup.Escape(Build.Author)}[/]")))
+        {
+            Border = BoxBorder.Rounded,
+            BorderStyle = FocusedBorder,
+            Padding = new Padding(1, 0, 1, 0),
+            Width = 49,
+            Expand = false
+        };
         var message = pendingMessage is { } pending
             ? new Text(pending.Message, pending.IsError ? ErrorStyle : InformationStyle)
             : new Text(string.Empty);
         var search = new Markup(
-            $"[cyan1 bold]›[/] [grey58]Search:[/] [grey82]{Markup.Escape(state.SearchQuery)}[/]");
+            $"[cyan1 bold]>[/] [grey58]Search:[/] [grey82]{Markup.Escape(state.SearchQuery)}[/]");
         var footer = new Markup(
-            "[cyan1]↑↓[/] [grey58]move[/]   [cyan1]←→[/] [grey58]panel[/]   " +
+            "[cyan1]Up/Dn[/] [grey58]move[/]   [cyan1]Lt/Rt[/] [grey58]panel[/]   " +
             "[cyan1]/[/] [grey58]search[/]   [cyan1]C[/] [grey58]copy[/]   " +
             "[cyan1]Del[/] [grey58]delete[/]   [cyan1]R[/] [grey58]refresh[/]   " +
             "[cyan1]Esc[/] [grey58]clear[/]   [cyan1]Q[/] [grey58]exit[/]   " +
-            "[orange1]●[/] [grey58]active[/]   [red]![/] [grey58]unreadable[/]");
+            "[orange1]*[/] [grey58]active[/]   [red]![/] [grey58]unreadable[/]");
         pendingMessage = null;
         return showSearch
-            ? new Rows(panels, search, message, footer)
-            : new Rows(panels, message, footer);
+            ? new Rows(brand, panels, search, message, footer)
+            : new Rows(brand, panels, message, footer);
     }
 
     public SessionManagerCommand ReadCommand(CancellationToken cancellationToken)
@@ -289,7 +304,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         }
 
         var name = agent == ManagedAgent.Codex ? "CODEX" : "GROK";
-        var header = new PanelHeader(focused ? $"[cyan1 bold]● {name}[/]" : $"[grey58]  {name}[/]");
+        var header = new PanelHeader(focused ? $"[cyan1 bold]* {name}[/]" : $"[grey58]  {name}[/]");
         return new Panel(table)
         {
             Header = header,
@@ -305,12 +320,12 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     {
         var marker = (session.IsActive, session.CanRead) switch
         {
-            (true, false) => "●! ",
-            (true, true) => "● ",
+            (true, false) => "*! ",
+            (true, true) => "* ",
             (false, false) => "! ",
             _ => string.Empty
         };
-        var selection = focusedSelection ? "› " : "  ";
+        var selection = focusedSelection ? "> " : "  ";
         var maximum = Math.Max(4, panelWidth - 25);
         var prefix = selection + marker;
         if (prefix.Length >= maximum) return prefix[..maximum];
@@ -341,6 +356,22 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         return builder.ToString();
     }
 
+    private static BuildDetails ReadBuildDetails()
+    {
+        var assembly = typeof(SpectreSessionManagerView).Assembly;
+        var informationalVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        var versionParts = (informationalVersion ?? assembly.GetName().Version?.ToString(3) ?? "unknown")
+            .Split('+', 2);
+        var revision = versionParts.Length == 2 ? versionParts[1] : string.Empty;
+        var commit = revision.Length > 7 ? revision[..7] : revision;
+        var author = assembly.GetCustomAttribute<AssemblyCompanyAttribute>()?.Company;
+        return new BuildDetails(
+            versionParts[0],
+            string.IsNullOrWhiteSpace(commit) ? "unknown" : commit,
+            string.IsNullOrWhiteSpace(author) ? "unknown" : author);
+    }
+
     private void WriteMessage(string message, bool isError)
     {
         console.Write(new Text(message, isError ? ErrorStyle : InformationStyle));
@@ -348,4 +379,5 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     }
 
     private sealed record PendingMessage(string Message, bool IsError);
+    private sealed record BuildDetails(string Version, string Commit, string Author);
 }
