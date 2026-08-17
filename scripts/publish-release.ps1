@@ -4,10 +4,10 @@
   Create a git tag and push it to trigger the GitHub Actions release workflow.
 
 .PARAMETER Version
-  SemVer without leading v, e.g. 0.4.0  → tag v0.4.0
+  SemVer without leading v, e.g. 0.4.1  → tag v0.4.1
 
 .EXAMPLE
-  .\scripts\publish-release.ps1 -Version 0.4.0
+  .\scripts\publish-release.ps1 -Version 0.4.1
 #>
 [CmdletBinding()]
 param(
@@ -22,7 +22,7 @@ if ($Version.StartsWith("v")) {
     $Version = $Version.Substring(1)
 }
 if ($Version -notmatch '^\d+\.\d+\.\d+([.-].+)?$') {
-    throw "Version must look like 0.4.0 (got '$Version')"
+    throw "Version must look like 0.4.1 (got '$Version')"
 }
 
 $tag = "v$Version"
