@@ -155,7 +155,7 @@ public sealed class SpectreSessionManagerViewTests
         Assert.True(logoTop >= 0 && logoTop < logo && logo < logoBottom && logoBottom < panel,
             "Expected the compact logo inside its own frame above the panels.");
         Assert.Equal(3, Count(rendered, "╭"));
-        Assert.Contains("version 0.4.1", rendered);
+        Assert.Contains("version 0.4.2", rendered);
         Assert.Matches("commit [0-9a-f]{7}", rendered);
         Assert.Contains("by XYphrodite", rendered);
         Assert.Contains("> * Codex title", rendered);

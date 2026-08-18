@@ -228,6 +228,11 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                     // Live Grok/Codex sessions can mutate between scan and stage; defer them.
                                     deferred.Add(action.ObjectId);
                                 }
+                                catch (IOException exception) when (IsTransientSharingViolation(exception))
+                                {
+                                    // A live process may lock a session after scanning; publish the rest and retry it later.
+                                    deferred.Add(action.ObjectId);
+                                }
                                 break;
                             }
                             case SyncActionKind.PublishTombstone when mode != SyncMode.Pull:
@@ -1186,6 +1191,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         await File.WriteAllBytesAsync(path, ciphertext, ct).ConfigureAwait(false);
         return new(id, kind, hash, deleted, opaque, _deviceId + ":" + Guid.NewGuid().ToString("N"), path);
     }
+
+    private static bool IsTransientSharingViolation(IOException exception) =>
+        OperatingSystem.IsWindows() && (exception.HResult & 0xFFFF) is 32 or 33;
 
     private async Task<string> StageIndexAsync(IEnumerable<IndexEntry> entries, string directory, CancellationToken ct)
     {

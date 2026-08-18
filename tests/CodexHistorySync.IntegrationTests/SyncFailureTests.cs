@@ -47,6 +47,42 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task SharingViolationAfterScan_DefersOnlyLockedSessionAndPublishesOthers()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var initial = CreateDevice("sharing-violation", key, provider);
+        await WriteSessionAsync(initial.Paths.Sessions, "available-session");
+        await WriteSessionAsync(initial.Paths.Sessions, "locked-session");
+        var lockedPath = Path.Combine(initial.Paths.Sessions, "locked-session.jsonl");
+        FileStream? heldLock = null;
+        var hooked = new ReadHookProvider(provider, () =>
+        {
+            heldLock = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            return Task.CompletedTask;
+        });
+        var device = CreateDevice("sharing-violation", key, hooked);
+
+        try
+        {
+            var first = await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+            Assert.Equal(1, first.Uploaded);
+            Assert.Equal("available-session", Assert.Single(
+                (await device.State.LoadAsync("repository", CancellationToken.None)).Objects).Id.Value);
+        }
+        finally
+        {
+            heldLock?.Dispose();
+        }
+
+        var second = await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        Assert.Equal(1, second.Uploaded);
+        Assert.Equal(2, (await device.State.LoadAsync("repository", CancellationToken.None)).Objects.Count);
+    }
+
+    [Fact]
     public async Task MissingSessionRoot_WithBaseline_DoesNotPublishTombstone()
     {
         var key = RandomNumberGenerator.GetBytes(32);

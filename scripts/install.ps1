@@ -9,7 +9,7 @@
   and installs it under %LOCALAPPDATA%\Programs\CodexHistorySync by default.
 
 .PARAMETER Version
-  Release tag without or with leading v, e.g. 0.4.1 or v0.4.1. Default: latest.
+  Release tag without or with leading v, e.g. 0.4.2 or v0.4.2. Default: latest.
 
 .PARAMETER InstallDir
   Target directory. Default: $env:LOCALAPPDATA\Programs\CodexHistorySync
@@ -31,7 +31,7 @@
   irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1 | iex
 
 .EXAMPLE
-  .\scripts\install.ps1 -Version v0.4.1 -AddToPath
+  .\scripts\install.ps1 -Version v0.4.2 -AddToPath
 #>
 [CmdletBinding()]
 param(
