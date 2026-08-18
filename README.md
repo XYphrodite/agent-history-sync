@@ -40,8 +40,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Pin a version; force PATH yes/no without prompting
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.1 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.1 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -NoPath
 ```
 
 **From a local build:**
@@ -88,6 +88,8 @@ agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # or --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
 ```
+
+If an active Codex or Grok process locks a session after scanning, `push`/`sync` publishes the remaining sessions and safely retries the locked session on a later run.
 
 ### Local session manager
 
@@ -148,8 +150,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Конкретная версия; PATH без вопроса
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.1 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.1 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -NoPath
 ```
 
 **Из локальной сборки:**
