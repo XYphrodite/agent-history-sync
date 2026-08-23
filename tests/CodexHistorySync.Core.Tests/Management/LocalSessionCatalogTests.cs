@@ -1044,6 +1044,29 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsyncMarksOnlyListedSessionIdsActive()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("activity-codex-one", null, "one", "2026-08-09T10:00:00Z");
+        await fixture.WriteCodexAsync("activity-codex-two", null, "two", "2026-08-09T11:00:00Z");
+        await fixture.WriteGrokAsync(
+            "51000000-0000-0000-0000-000000000001", null, "one", "2026-08-09T12:00:00Z");
+        await fixture.WriteGrokAsync(
+            "52000000-0000-0000-0000-000000000002", null, "two", "2026-08-09T13:00:00Z");
+        fixture.ActiveState.ActiveIds.Add("activity-codex-one");
+        fixture.ActiveState.ActiveIds.Add("51000000-0000-0000-0000-000000000001");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal(
+            [("activity-codex-one", true), ("activity-codex-two", false)],
+            snapshot.Codex.OrderBy(session => session.SessionId).Select(session => (session.SessionId, session.IsActive)));
+        Assert.Equal(
+            [("51000000-0000-0000-0000-000000000001", true), ("52000000-0000-0000-0000-000000000002", false)],
+            snapshot.Grok.OrderBy(session => session.SessionId).Select(session => (session.SessionId, session.IsActive)));
+    }
+
+    [Fact]
     public async Task ScanAsyncTreatsActivityQueryFailureAsActive()
     {
         // Losing fail-closed handling would expose copy/delete actions while process state is unknown.
@@ -1479,13 +1502,15 @@ public sealed class LocalSessionCatalogTests
         public Exception? AgentFailure { get; set; }
         public Action? BeforeAgentQuery { get; set; }
 
-        public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
+        public Task<IReadOnlySet<string>> GetActiveSessionIdsAsync(
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
         {
             BeforeAgentQuery?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             TotalQueries.AddOrUpdate(agent, 1, (_, count) => count + 1);
             if (AgentFailure is not null) throw AgentFailure;
-            return Task.FromResult(ActiveIds.Count != 0);
+            return Task.FromResult<IReadOnlySet<string>>(ActiveIds);
         }
 
         public Task<bool> IsActiveAsync(
@@ -1661,12 +1686,14 @@ public sealed class LocalSessionCatalogTests
         public int QueryCount(ManagedAgent agent) => Volatile.Read(ref queryCounts[(int)agent]);
         public int TimedOutQueries => Volatile.Read(ref timedOutQueries);
 
-        public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
+        public Task<IReadOnlySet<string>> GetActiveSessionIdsAsync(
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref queryCounts[(int)agent]);
             if (!rendezvous.SignalAndWait(TimeSpan.FromMilliseconds(500), cancellationToken))
                 Interlocked.Increment(ref timedOutQueries);
-            return Task.FromResult(false);
+            return Task.FromResult<IReadOnlySet<string>>(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         }
 
         public Task<bool> IsActiveAsync(

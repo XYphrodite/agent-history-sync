@@ -77,10 +77,20 @@ public sealed class GrokSessionScanner
         if (candidates.Count != 0)
             await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        foreach (var candidate in candidates)
+        var results = new LocalObject?[candidates.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0, candidates.Count), new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8)
+        }, async (index, ct) =>
+        {
+            results[index] = await Task.Run(() => ReadStable(candidates[index], ct), ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+
+        for (var index = 0; index < candidates.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var item = ReadStable(candidate, cancellationToken);
+            var item = results[index];
             if (item is null) { complete = false; continue; }
             if (objectsById.TryAdd(item.Id, item)) objects.Add(item);
             else

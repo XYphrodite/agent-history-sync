@@ -74,6 +74,21 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ReadSnapshotMetadataAsyncReturnsReferencesAndLoadsCiphertextOnlyOnDemand()
+    {
+        var id = new LogicalObjectId(new string('b', 64));
+        var ciphertext = "CHS1-lazy-object"u8.ToArray();
+        await SeedRemoteAsync("CHS1-lazy-index"u8.ToArray(), id, ciphertext, "lazy");
+        var provider = CreateProvider("lazy-reader");
+
+        var metadata = await provider.ReadSnapshotMetadataAsync(CancellationToken.None);
+
+        Assert.Empty(metadata.Objects);
+        Assert.Equal(id, Assert.Single(metadata.EffectiveObjectReferences));
+        Assert.Equal(ciphertext, await provider.ReadObjectAsync(metadata, id, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ReadSnapshotAsync_PrunesDeletedRemoteMain()
     {
         var id = new LogicalObjectId(new string('a', 64));

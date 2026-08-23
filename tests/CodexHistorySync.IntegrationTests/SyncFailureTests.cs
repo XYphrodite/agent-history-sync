@@ -1,8 +1,10 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
@@ -80,6 +82,76 @@ public sealed class SyncFailureTests : IDisposable
 
         Assert.Equal(1, second.Uploaded);
         Assert.Equal(2, (await device.State.LoadAsync("repository", CancellationToken.None)).Objects.Count);
+    }
+
+    [Fact]
+    public async Task NoOpSynchronizationAuthenticatesIndexWithoutReadingRemoteObjects()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var device = CreateDevice("lazy-no-op", key, provider);
+        await WriteSessionAsync(device.Paths.Sessions, "unchanged-session");
+        await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        var result = await device.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(0, result.Uploaded);
+        Assert.Equal(0, result.Downloaded);
+        Assert.Equal(0, provider.ObjectReadCalls);
+    }
+
+    [Fact]
+    public async Task SynchronizationReportsOrderedProgressPhases()
+    {
+        var phases = new List<SyncProgressPhase>();
+        var device = CreateDevice("progress", RandomNumberGenerator.GetBytes(32), new MemoryProvider(),
+            progress: item => phases.Add(item.Phase));
+        await WriteSessionAsync(device.Paths.Sessions, "progress-session");
+
+        await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        Assert.Equal([
+            SyncProgressPhase.WaitingForLock,
+            SyncProgressPhase.ScanningLocal,
+            SyncProgressPhase.ReadingRemote,
+            SyncProgressPhase.AuthenticatingIndex,
+            SyncProgressPhase.Planning,
+            SyncProgressPhase.StagingChanges,
+            SyncProgressPhase.Publishing,
+            SyncProgressPhase.SavingState
+        ], phases);
+    }
+
+    [Fact]
+    public async Task CodexAndGrokScansRunConcurrently()
+    {
+        var name = "parallel-scans";
+        var grokHome = Path.Combine(_root, name, "grok");
+        var grokPaths = new GrokPaths(grokHome, Path.Combine(grokHome, "sessions"));
+        var grokId = "71000000-0000-0000-0000-000000000099";
+        var grokDirectory = grokPaths.SessionDirectory(_root, grokId);
+        Directory.CreateDirectory(grokDirectory);
+        await File.WriteAllTextAsync(Path.Combine(grokDirectory, "chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":\"parallel\"}\n{\"type\":\"assistant\",\"content\":\"yes\"}\n");
+        await File.WriteAllTextAsync(Path.Combine(grokDirectory, "summary.json"),
+            $"{{\"info\":{{\"id\":\"{grokId}\",\"cwd\":\"{JsonEncodedText.Encode(_root)}\"}}}}");
+        var arrivals = 0;
+        var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task Rendezvous(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref arrivals) == 2) bothStarted.TrySetResult();
+            return bothStarted.Task.WaitAsync(cancellationToken);
+        }
+        var device = CreateDevice(name, RandomNumberGenerator.GetBytes(32), new MemoryProvider(),
+            grokPaths: grokPaths, scanner: new SessionScanner(Rendezvous),
+            grokScanner: new GrokSessionScanner(Rendezvous));
+        await WriteSessionAsync(device.Paths.Sessions, "parallel-codex");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var result = await device.Engine.SynchronizeAsync(SyncMode.Push, timeout.Token);
+
+        Assert.Equal(2, arrivals);
+        Assert.Equal(2, result.Uploaded);
     }
 
     [Fact]
@@ -1341,7 +1413,8 @@ public sealed class SyncFailureTests : IDisposable
 
     private Device CreateDevice(string name, byte[] key, IStorageProvider provider, ICodexProcessDetector? detector = null,
         IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null, ISyncEngineHooks? hooks = null,
-        IOperationDirectoryCleaner? cleaner = null)
+        IOperationDirectoryCleaner? cleaner = null, Action<SyncProgress>? progress = null,
+        GrokPaths? grokPaths = null, SessionScanner? scanner = null, GrokSessionScanner? grokScanner = null)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -1350,14 +1423,15 @@ public sealed class SyncFailureTests : IDisposable
         var local = Path.Combine(_root, name, "local");
         var state = stateReplacer is null ? new LocalStateStore(local) : new LocalStateStore(local, stateReplacer);
         var backups = new BackupStore("repository", local, paths, fileSystem);
-        var writer = new CodexHistoryWriter(paths, backups, detector ?? new StoppedDetector(), fileSystem);
+        var writer = new CodexHistoryWriter(paths, backups, detector ?? new StoppedDetector(), fileSystem,
+            grokPaths: grokPaths);
         var conflicts = new ConflictStore("repository", local, paths);
         var engine = hooks is null && cleaner is null
-            ? new SyncEngine("repository", name, paths, key, new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
-                writer, conflicts, provider, Path.Combine(local, "staging"))
-            : new SyncEngine("repository", name, paths, key, new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
+            ? new SyncEngine("repository", name, paths, key, scanner ?? new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
+                writer, conflicts, provider, Path.Combine(local, "staging"), grokPaths, grokScanner, progress)
+            : new SyncEngine("repository", name, paths, key, scanner ?? new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
                 writer, conflicts, provider, Path.Combine(local, "staging"), hooks ?? NoopTestSyncEngineHooks.Instance,
-                cleaner ?? new OperationDirectoryCleaner());
+                cleaner ?? new OperationDirectoryCleaner(), grokPaths, grokScanner, progress);
         return new(paths, state, conflicts, writer, Path.Combine(local, "staging"), engine);
     }
 
@@ -1635,6 +1709,7 @@ public sealed class SyncFailureTests : IDisposable
         public int RejectionsRemaining { get; set; }
         public int PublishCalls { get; private set; }
         public int ReadCalls { get; private set; }
+        public int ObjectReadCalls { get; private set; }
         public byte[] Index => _index!.ToArray();
         public LogicalObjectId SingleObjectId => _objects.Keys.Single();
         public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
@@ -1642,6 +1717,18 @@ public sealed class SyncFailureTests : IDisposable
             ReadCalls++;
             return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(), _index?.ToArray(),
                 _objects.Select(pair => new EncryptedRemoteObject(pair.Key, pair.Value.ToArray())).ToArray()));
+        }
+        public Task<RemoteSnapshot> ReadSnapshotMetadataAsync(CancellationToken ct)
+        {
+            ReadCalls++;
+            return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(),
+                _index?.ToArray(), [], _objects.Keys.ToArray()));
+        }
+        public Task<byte[]> ReadObjectAsync(RemoteSnapshot snapshot, LogicalObjectId objectId, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            ObjectReadCalls++;
+            return Task.FromResult(_objects[objectId].ToArray());
         }
         public async Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct)
         {

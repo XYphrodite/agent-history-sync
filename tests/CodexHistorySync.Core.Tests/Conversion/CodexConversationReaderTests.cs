@@ -48,6 +48,45 @@ public sealed class CodexConversationReaderTests
     }
 
     [Fact]
+    public async Task ReadAsyncSkipsTechnicalUserWrappersAndKeepsTheVisibleQuestion()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var path = await fixture.WriteFileAsync("session.jsonl", """
+            {"type":"session_meta","payload":{"id":"test-id","cwd":"C:\\Repos\\Demo","title":"тест"}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\Repos\\Demo</cwd>\n</environment_context>"}]}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"\n# Files mentioned by the user:\n\n## TODO.md: C:\\\\Repos\\\\Demo\\\\TODO.md\n"}]}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"тест\n"}]}}
+            {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ответ"}]}}
+            """);
+
+        var result = await new CodexConversationReader().ReadAsync(path, CancellationToken.None);
+
+        Assert.Equal("тест", result.Title);
+        Assert.Collection(result.Turns,
+            turn => Assert.Equal(new PortableTurn(ConversationRole.User, "тест\n"), turn),
+            turn => Assert.Equal(new PortableTurn(ConversationRole.Assistant, "ответ"), turn));
+    }
+
+    [Fact]
+    public async Task ReadAsyncAcceptsRepeatedSessionMetaWhenTheIdMatches()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var path = await fixture.WriteFileAsync("session.jsonl", """
+            {"type":"session_meta","payload":{"id":"same-id","timestamp":"2026-08-09T10:00:00Z","cwd":"C:\\Repos\\Demo"}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}}
+            {"type":"session_meta","payload":{"id":"same-id","timestamp":"2026-08-09T10:05:00Z","cwd":"C:\\Repos\\Demo"}}
+            {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}
+            """);
+
+        var result = await new CodexConversationReader().ReadAsync(path, CancellationToken.None);
+
+        Assert.Equal("same-id", result.SourceSessionId);
+        Assert.Collection(result.Turns,
+            turn => Assert.Equal(new PortableTurn(ConversationRole.User, "question"), turn),
+            turn => Assert.Equal(new PortableTurn(ConversationRole.Assistant, "answer"), turn));
+    }
+
+    [Fact]
     public async Task ReadAsyncExcludesReasoningAndToolBlocksNestedInMessages()
     {
         await using var fixture = await ConversationFixture.CreateAsync();

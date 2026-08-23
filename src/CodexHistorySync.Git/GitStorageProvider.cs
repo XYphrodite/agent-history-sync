@@ -100,6 +100,15 @@ public sealed class GitStorageProvider : IStorageProvider
 
     public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
     {
+        var metadata = await ReadSnapshotMetadataAsync(ct).ConfigureAwait(false);
+        var objects = new List<EncryptedRemoteObject>(metadata.EffectiveObjectReferences.Count);
+        foreach (var objectId in metadata.EffectiveObjectReferences)
+            objects.Add(new EncryptedRemoteObject(objectId, await ReadObjectAsync(metadata, objectId, ct).ConfigureAwait(false)));
+        return metadata with { Objects = objects };
+    }
+
+    public async Task<RemoteSnapshot> ReadSnapshotMetadataAsync(CancellationToken ct)
+    {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -115,7 +124,7 @@ public sealed class GitStorageProvider : IStorageProvider
                 indexCiphertext = await File.ReadAllBytesAsync(indexPath, ct).ConfigureAwait(false);
             }
 
-            var objects = new List<EncryptedRemoteObject>();
+            var objectReferences = new List<LogicalObjectId>();
             var objectsPath = Path.Combine(_clonePath, "objects");
             if (Directory.Exists(objectsPath))
             {
@@ -129,13 +138,34 @@ public sealed class GitStorageProvider : IStorageProvider
                         : string.Empty;
                     if (!ObjectIdPattern.IsMatch(opaqueId))
                         throw new InvalidDataException("Repository contains an invalid encrypted object path.");
-                    objects.Add(new EncryptedRemoteObject(
-                        new LogicalObjectId(opaqueId),
-                        await File.ReadAllBytesAsync(file, ct).ConfigureAwait(false)));
+                    objectReferences.Add(new LogicalObjectId(opaqueId));
                 }
             }
 
-            return new RemoteSnapshot(revision, indexCiphertext, objects);
+            return new RemoteSnapshot(revision, indexCiphertext, [], objectReferences);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<byte[]> ReadObjectAsync(RemoteSnapshot snapshot, LogicalObjectId objectId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            EnsureOwnedClone();
+            var current = await ResolveRevisionAsync("HEAD", ct, allowMissing: true).ConfigureAwait(false);
+            if (!StringComparer.Ordinal.Equals(current, snapshot.Revision))
+                throw new InvalidOperationException("The materialized repository revision changed before object access.");
+            var value = objectId.Value ?? string.Empty;
+            if (!ObjectIdPattern.IsMatch(value)) throw new InvalidDataException("The encrypted object ID is invalid.");
+            var path = Path.Combine(_clonePath, "objects", value[..2], value[2..] + ".chs");
+            AssertContained(path, _clonePath);
+            EnsureSafeFile(path);
+            return await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
         }
         finally
         {

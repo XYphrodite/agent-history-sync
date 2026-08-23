@@ -71,10 +71,21 @@ public sealed class SessionScanner
         if (candidates.Count != 0)
             await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        foreach (var candidate in candidates)
+        var results = new LocalObject?[candidates.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0, candidates.Count), new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8)
+        }, async (index, ct) =>
+        {
+            results[index] = await ReadStableSessionAsync(candidates[index], ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+
+        for (var index = 0; index < candidates.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var session = await ReadStableSessionAsync(candidate, cancellationToken).ConfigureAwait(false);
+            var candidate = candidates[index];
+            var session = results[index];
             if (session is null) uncertainKinds.Add(candidate.Kind);
             else if (objectsById.TryAdd(session.Id, session)) objects.Add(session);
             else

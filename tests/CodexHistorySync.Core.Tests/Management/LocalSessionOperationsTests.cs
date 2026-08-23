@@ -96,6 +96,23 @@ public sealed class LocalSessionOperationsTests
     }
 
     [Fact]
+    public async Task CopyAsyncUsesTheCatalogTitleInsteadOfATechnicalUserPreview()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync(
+            "codex-source", "# Files mentioned by the user:", "question", "answer");
+        fixture.GrokWriter.Result = new ConversationWriteResult("grok-copy", "grok-destination");
+        var selected = fixture.Session(ManagedAgent.Codex, "codex-source", path) with
+        {
+            Title = "Уточнить тестирование КС2"
+        };
+
+        await fixture.CreateOperations().CopyAsync(selected, CancellationToken.None);
+
+        Assert.Equal("Уточнить тестирование КС2", Assert.Single(fixture.GrokWriter.Conversations).Title);
+    }
+
+    [Fact]
     public async Task CopyAsyncReadsGrokAndDispatchesPortableConversationOnlyToCodexWriter()
     {
         await using var fixture = new OperationsFixture();
@@ -684,10 +701,12 @@ public sealed class LocalSessionOperationsTests
         public Exception? Failure { get; set; }
         public Func<Task>? BeforeResult { get; set; }
 
-        public Task<bool> IsAgentActiveAsync(ManagedAgent agent, CancellationToken cancellationToken)
+        public Task<IReadOnlySet<string>> GetActiveSessionIdsAsync(
+            ManagedAgent agent,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(ActiveIds.Count != 0);
+            return Task.FromResult<IReadOnlySet<string>>(ActiveIds);
         }
 
         public async Task<bool> IsActiveAsync(

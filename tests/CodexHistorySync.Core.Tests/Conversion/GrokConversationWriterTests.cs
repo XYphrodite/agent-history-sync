@@ -14,7 +14,8 @@ public sealed class GrokConversationWriterTests
         // Reusing the source ID, choosing the wrong cwd directory, or dropping metadata/turns must fail this test.
         await using var fixture = await GrokWriterFixture.CreateAsync();
         var conversation = fixture.Conversation(sourceSessionId: FirstId.ToString());
-        var writer = new GrokConversationWriter(fixture.Paths, () => SecondId);
+        var copyTime = new DateTimeOffset(2026, 8, 23, 17, 30, 0, TimeSpan.Zero);
+        var writer = new GrokConversationWriter(fixture.Paths, () => SecondId, () => copyTime);
 
         var result = await writer.WriteAsync(conversation, CancellationToken.None);
 
@@ -23,7 +24,25 @@ public sealed class GrokConversationWriterTests
         Assert.Equal(fixture.Paths.SessionDirectory(conversation.WorkingDirectory!, result.SessionId), result.NativePath);
         Assert.True(File.Exists(Path.Combine(result.NativePath, "chat_history.jsonl")));
         Assert.True(File.Exists(Path.Combine(result.NativePath, "summary.json")));
-        AssertPortableConversation(conversation, await new GrokConversationReader().ReadAsync(result.NativePath, CancellationToken.None), result.SessionId);
+        Assert.True(File.Exists(Path.Combine(result.NativePath, "updates.jsonl")));
+        Assert.True(File.Exists(Path.Combine(result.NativePath, "rewind_points.jsonl")));
+        Assert.True(File.Exists(Path.Combine(result.NativePath, "signals.json")));
+        Assert.True(File.Exists(Path.Combine(result.NativePath, "plan.json")));
+        AssertPortableConversation(
+            conversation with { LastModifiedAt = copyTime },
+            await new GrokConversationReader().ReadAsync(result.NativePath, CancellationToken.None),
+            result.SessionId);
+        var chat = await File.ReadAllTextAsync(Path.Combine(result.NativePath, "chat_history.jsonl"));
+        var summary = await File.ReadAllTextAsync(Path.Combine(result.NativePath, "summary.json"));
+        Assert.Contains("\"type\":\"text\"", chat);
+        Assert.DoesNotContain("input_text", chat);
+        Assert.DoesNotContain("output_text", chat);
+        Assert.Contains("\"generated_title\"", summary);
+        Assert.Contains("\"current_model_id\"", summary);
+        var updates = await File.ReadAllTextAsync(Path.Combine(result.NativePath, "updates.jsonl"));
+        Assert.Contains("user_message_chunk", updates);
+        Assert.Contains("agent_message_chunk", updates);
+        Assert.Contains(result.SessionId, updates);
         AssertNoStaging(fixture.Paths.Sessions);
     }
 

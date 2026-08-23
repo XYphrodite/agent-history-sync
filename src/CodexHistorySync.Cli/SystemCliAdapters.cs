@@ -10,6 +10,7 @@ using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
@@ -70,10 +71,17 @@ public static class CliComposition
         var codexExecutable = codexResolution.ExecutablePath ?? string.Empty;
         var detectorExecutable = string.IsNullOrWhiteSpace(codexExecutable) ? Path.GetFullPath("codex.exe") : codexExecutable;
         var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(detectorExecutable));
+        Stopwatch? syncTimer = null;
+        void ReportSyncProgress(SyncProgress progress)
+        {
+            if (progress.Phase == SyncProgressPhase.WaitingForLock) syncTimer = Stopwatch.StartNew();
+            var elapsed = syncTimer?.Elapsed ?? TimeSpan.Zero;
+            console.WriteLine($"sync [{elapsed:mm\\:ss}] {progress.Message}...");
+        }
         var runtime = new CoreCliSyncRuntime(localAppData, gateway, detector,
             (fixture, cancellationToken) => new CodexCompatibilityProbe().ProbeAsync(
                 string.IsNullOrWhiteSpace(codexExecutable) ? "codex.exe" : codexExecutable, fixture, cancellationToken),
-            null, scheduler, codexResolution.Source);
+            null, scheduler, codexResolution.Source, syncProgress: ReportSyncProgress);
         var services = new DefaultCliServices(gateway, local, runtime, new RepositoryCrypto());
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
             new WindowsNotifier(), new RotatingAgentLogger(localAppData));
@@ -88,9 +96,7 @@ public static class CliComposition
         var grokPaths = GrokPaths.TryResolve();
         var resolution = new CodexExecutableLocator().ResolveWithSource();
         var executable = ToCodexExecutableOption(resolution);
-        var detectorPath = resolution.ExecutablePath ?? Path.GetFullPath("codex.exe");
-        var detector = new CodexProcessDetector(new CodexProcessDetectorOptions(detectorPath));
-        var activeState = new WindowsManagedSessionActiveState(detector.IsRunning, WindowsManagedSessionActiveState.IsGrokRunning);
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths);
         var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState);
         var codexWriter = codexPaths is null
             ? null
@@ -130,54 +136,152 @@ internal sealed class DefaultSessionManagerRunner(SessionManagerApplication appl
 
 internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveState
 {
-    private readonly Func<bool> codexIsRunning;
-    private readonly Func<bool> grokIsRunning;
+    private const string GrokProcessName = "grok";
+    private static readonly IReadOnlySet<string> EmptyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-    public WindowsManagedSessionActiveState(Func<bool> codexIsRunning, Func<bool> grokIsRunning)
+    private readonly CodexPaths? codexPaths;
+    private readonly GrokPaths? grokPaths;
+    private readonly Func<int, string, bool> isNamedProcessRunning;
+    private readonly Func<string, bool> isExclusiveLockHeld;
+    private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
+    private readonly Func<string, string?> readAllText;
+
+    public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths)
+        : this(
+            codexPaths,
+            grokPaths,
+            IsNamedProcessRunning,
+            IsExclusiveLockHeld,
+            EnumerateFiles,
+            ReadAllText)
     {
-        this.codexIsRunning = codexIsRunning ?? throw new ArgumentNullException(nameof(codexIsRunning));
-        this.grokIsRunning = grokIsRunning ?? throw new ArgumentNullException(nameof(grokIsRunning));
+    }
+
+    internal WindowsManagedSessionActiveState(
+        CodexPaths? codexPaths,
+        GrokPaths? grokPaths,
+        Func<int, string, bool> isNamedProcessRunning,
+        Func<string, bool> isExclusiveLockHeld,
+        Func<string, string, IReadOnlyList<string>> enumerateFiles,
+        Func<string, string?> readAllText)
+    {
+        this.codexPaths = codexPaths;
+        this.grokPaths = grokPaths;
+        this.isNamedProcessRunning = isNamedProcessRunning
+            ?? throw new ArgumentNullException(nameof(isNamedProcessRunning));
+        this.isExclusiveLockHeld = isExclusiveLockHeld
+            ?? throw new ArgumentNullException(nameof(isExclusiveLockHeld));
+        this.enumerateFiles = enumerateFiles ?? throw new ArgumentNullException(nameof(enumerateFiles));
+        this.readAllText = readAllText ?? throw new ArgumentNullException(nameof(readAllText));
     }
 
     public Task<bool> IsActiveAsync(
         ManagedAgent agent,
         string sessionId,
         string nativePath,
-        CancellationToken cancellationToken) =>
-        IsAgentActiveAsync(agent, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(sessionId)) return Task.FromResult(true);
+        return Task.FromResult(ReadActiveIds(agent).Contains(sessionId));
+    }
 
-    public Task<bool> IsAgentActiveAsync(
+    public Task<IReadOnlySet<string>> GetActiveSessionIdsAsync(
         ManagedAgent agent,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(agent switch
-        {
-            ManagedAgent.Codex => codexIsRunning(),
-            ManagedAgent.Grok => grokIsRunning(),
-            _ => true
-        });
+        return Task.FromResult(ReadActiveIds(agent));
     }
 
-    internal static bool IsGrokRunning()
+    private IReadOnlySet<string> ReadActiveIds(ManagedAgent agent) => agent switch
     {
-        Process[]? processes = null;
+        ManagedAgent.Codex => ReadCodexActiveIds(),
+        ManagedAgent.Grok => ReadGrokActiveIds(),
+        _ => EmptyIds
+    };
+
+    private IReadOnlySet<string> ReadGrokActiveIds()
+    {
+        if (grokPaths is null) return EmptyIds;
+        var path = Path.Combine(grokPaths.Home, "active_sessions.json");
+        var json = readAllText(path);
+        if (json is null) return EmptyIds;
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var record in GrokActiveSessionList.Parse(json))
+        {
+            if (isNamedProcessRunning(record.ProcessId, GrokProcessName))
+                ids.Add(record.SessionId);
+        }
+
+        return ids;
+    }
+
+    private IReadOnlySet<string> ReadCodexActiveIds()
+    {
+        if (codexPaths is null) return EmptyIds;
+        var directory = Path.Combine(codexPaths.Home, "thread-writer-locks");
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in enumerateFiles(directory, "*.lock"))
+        {
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrWhiteSpace(name) || name.StartsWith('.')) continue;
+            var sessionId = Path.GetFileNameWithoutExtension(name);
+            if (!IsSafeSessionId(sessionId)) continue;
+            if (isExclusiveLockHeld(path)) ids.Add(sessionId);
+        }
+
+        return ids;
+    }
+
+    private static bool IsNamedProcessRunning(int processId, string processName)
+    {
         try
         {
-            processes = Process.GetProcessesByName("grok");
-            return processes.Length != 0;
+            using var process = Process.GetProcessById(processId);
+            return string.Equals(process.ProcessName, processName, StringComparison.OrdinalIgnoreCase);
         }
-        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException or
-                                          UnauthorizedAccessException or SecurityException)
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+        catch (Exception exception) when (exception is Win32Exception or UnauthorizedAccessException or SecurityException)
         {
             return true;
         }
-        finally
+    }
+
+    private static bool IsExclusiveLockHeld(string path)
+    {
+        try
         {
-            if (processes is not null)
-                foreach (var process in processes) process.Dispose();
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.None, 1, FileOptions.SequentialScan);
+            return false;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            return true;
         }
     }
+
+    private static IReadOnlyList<string> EnumerateFiles(string directory, string pattern)
+    {
+        if (!Directory.Exists(directory)) return [];
+        return Directory.GetFiles(directory, pattern);
+    }
+
+    private static string? ReadAllText(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
+
+    private static bool IsSafeSessionId(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        char.IsAsciiLetterOrDigit(value[0]) &&
+        value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
 }
 
 internal sealed class WindowsManagedSessionDirectoryDeleter : IManagedSessionDirectoryDeleter
@@ -521,6 +625,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly CodexExecutableSource codexExecutableSource;
     private readonly string? codexHome;
     private readonly string? grokHome;
+    private readonly Action<SyncProgress>? syncProgress;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
         : this(localAppData, gateway, processDetector,
@@ -547,7 +652,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         IAgentInstallationChecker? agentInstallationChecker,
         CodexExecutableSource codexExecutableSource = CodexExecutableSource.Discovered,
         string? codexHome = null,
-        string? grokHome = null)
+        string? grokHome = null,
+        Action<SyncProgress>? syncProgress = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -558,6 +664,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.codexExecutableSource = codexExecutableSource;
         this.codexHome = codexHome;
         this.grokHome = grokHome;
+        this.syncProgress = syncProgress;
     }
 
     public async Task<CliGateResult> ProbeCompatibilityAsync(CancellationToken cancellationToken)
@@ -691,7 +798,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
             configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
-            grokPaths: grokPaths);
+            grokPaths: grokPaths, progress: syncProgress);
         return new Components(paths, scanner, conflicts, engine);
     }
 
@@ -732,9 +839,24 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         public async Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken cancellationToken)
         {
             var snapshot = await inner.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            Validate(snapshot);
+            return snapshot;
+        }
+
+        public async Task<RemoteSnapshot> ReadSnapshotMetadataAsync(CancellationToken cancellationToken)
+        {
+            var snapshot = await inner.ReadSnapshotMetadataAsync(cancellationToken).ConfigureAwait(false);
+            Validate(snapshot);
+            return snapshot;
+        }
+
+        public Task<byte[]> ReadObjectAsync(RemoteSnapshot snapshot, LogicalObjectId objectId,
+            CancellationToken cancellationToken) => inner.ReadObjectAsync(snapshot, objectId, cancellationToken);
+
+        private void Validate(RemoteSnapshot snapshot)
+        {
             if (!StringComparer.Ordinal.Equals(snapshot.Revision, expectedRevision))
                 throw new CliGateException("The repository changed after join authentication; retry the join.");
-            return snapshot;
         }
 
         public Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken cancellationToken) =>

@@ -13,12 +13,13 @@ public sealed class CrossAgentCompatibilityTests
         // A writer format that only its implementation understands must fail at the destination-reader boundary.
         await using var fixture = await CrossAgentFixture.CreateAsync();
         var source = fixture.Conversation(ConversationAgent.Codex, "codex-source");
+        var copyTime = new DateTimeOffset(2026, 8, 23, 17, 30, 0, TimeSpan.Zero);
 
-        var result = await new GrokConversationWriter(fixture.GrokPaths, () => fixture.GrokId)
+        var result = await new GrokConversationWriter(fixture.GrokPaths, () => fixture.GrokId, () => copyTime)
             .WriteAsync(source, CancellationToken.None);
         var imported = await new GrokConversationReader().ReadAsync(result.NativePath, CancellationToken.None);
 
-        AssertConverted(source, imported, ConversationAgent.Grok, fixture.GrokId.ToString());
+        AssertConverted(source with { LastModifiedAt = copyTime }, imported, ConversationAgent.Grok, fixture.GrokId.ToString());
     }
 
     [Fact]
@@ -27,16 +28,18 @@ public sealed class CrossAgentCompatibilityTests
         // A rollout that loses portable metadata or ordered text must fail at the Codex reader boundary.
         await using var fixture = await CrossAgentFixture.CreateAsync();
         var source = fixture.Conversation(ConversationAgent.Grok, "grok-source");
+        var copyTime = new DateTimeOffset(2026, 8, 23, 17, 30, 0, TimeSpan.Zero);
         var writer = new CodexConversationWriter(
             fixture.CodexPaths,
             new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
             new CodexCompatibilityProbe(),
-            () => fixture.CodexId);
+            () => fixture.CodexId,
+            () => copyTime);
 
         var result = await writer.WriteAsync(source, CancellationToken.None);
         var imported = await new CodexConversationReader().ReadAsync(result.NativePath, CancellationToken.None);
 
-        AssertConverted(source, imported, ConversationAgent.Codex, fixture.CodexId.ToString());
+        AssertConverted(source with { LastModifiedAt = copyTime }, imported, ConversationAgent.Codex, fixture.CodexId.ToString());
     }
 
     [Fact]

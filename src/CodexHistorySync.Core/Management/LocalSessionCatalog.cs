@@ -62,28 +62,31 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             () => source.ScanAsync(limiter, cancellationToken),
             cancellationToken);
         var activityTask = Task.Run(
-            () => IsAgentActiveAsync(agent, cancellationToken),
+            () => ReadActiveIdsAsync(agent, cancellationToken),
             cancellationToken);
 
         await Task.WhenAll(sourceTask, activityTask).ConfigureAwait(false);
-        var isActive = activityTask.Result;
+        var activity = activityTask.Result;
         return sourceTask.Result.Select(candidate => new ManagedSession(
             agent,
             candidate.SessionId,
             candidate.NativePath,
             candidate.Title,
             candidate.LastModifiedAt,
-            isActive,
+            activity.Unknown || activity.SessionIds.Contains(candidate.SessionId),
             candidate.CanRead)).ToArray();
     }
 
-    private async Task<bool> IsAgentActiveAsync(
+    private async Task<ActiveIds> ReadActiveIdsAsync(
         ManagedAgent agent,
         CancellationToken cancellationToken)
     {
         try
         {
-            return await activeState.IsAgentActiveAsync(agent, cancellationToken).ConfigureAwait(false);
+            var ids = await activeState.GetActiveSessionIdsAsync(agent, cancellationToken).ConfigureAwait(false);
+            return new ActiveIds(
+                new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase),
+                Unknown: false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -91,9 +94,11 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         }
         catch
         {
-            return true;
+            return new ActiveIds(new HashSet<string>(StringComparer.OrdinalIgnoreCase), Unknown: true);
         }
     }
+
+    private readonly record struct ActiveIds(IReadOnlySet<string> SessionIds, bool Unknown);
 
     private static IReadOnlyList<ManagedSession> Order(IEnumerable<ManagedSession> sessions) =>
         sessions.OrderByDescending(session => session.LastModifiedAt)

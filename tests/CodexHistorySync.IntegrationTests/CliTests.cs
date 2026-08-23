@@ -2,6 +2,7 @@ using System.Diagnostics;
 using CodexHistorySync.Cli;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
+using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Sync;
 using CodexHistorySync.Windows;
@@ -78,23 +79,62 @@ public sealed class CliTests
     }
 
     [Fact]
-    public async Task Manage_active_state_dispatches_to_the_matching_local_agent_probe()
+    public async Task Manage_active_state_marks_only_live_grok_and_locked_codex_sessions()
     {
-        var codexCalls = 0;
-        var grokCalls = 0;
+        using var homes = new AgentHomes();
+        var liveGrok = "51000000-0000-0000-0000-000000000001";
+        var staleGrok = "52000000-0000-0000-0000-000000000002";
+        var lockedCodex = "61000000-0000-0000-0000-000000000001";
+        var staleCodex = "62000000-0000-0000-0000-000000000002";
+        await File.WriteAllTextAsync(
+            Path.Combine(homes.GrokHome, "active_sessions.json"),
+            $$"""[{"session_id":"{{liveGrok}}","pid":111},{"session_id":"{{staleGrok}}","pid":222}]""");
+        Directory.CreateDirectory(homes.CodexLocks);
+        var lockedPath = Path.Combine(homes.CodexLocks, lockedCodex + ".lock");
+        var stalePath = Path.Combine(homes.CodexLocks, staleCodex + ".lock");
+        await File.WriteAllBytesAsync(lockedPath, []);
+        await File.WriteAllBytesAsync(stalePath, []);
+        await File.WriteAllBytesAsync(Path.Combine(homes.CodexLocks, ".coordination.lock"), []);
+
         var activeState = new WindowsManagedSessionActiveState(
-            () => { codexCalls++; return true; },
-            () => { grokCalls++; return false; });
+            homes.CodexPaths,
+            homes.GrokPaths,
+            (processId, name) => processId == 111 && name == "grok",
+            path => string.Equals(path, lockedPath, StringComparison.OrdinalIgnoreCase),
+            Directory.GetFiles,
+            path => File.Exists(path) ? File.ReadAllText(path) : null);
 
-        var codex = await activeState.IsActiveAsync(
-            ManagedAgent.Codex, "codex", "unused", CancellationToken.None);
-        var grok = await activeState.IsActiveAsync(
-            ManagedAgent.Grok, "grok", "unused", CancellationToken.None);
+        var grokIds = await activeState.GetActiveSessionIdsAsync(ManagedAgent.Grok, CancellationToken.None);
+        var codexIds = await activeState.GetActiveSessionIdsAsync(ManagedAgent.Codex, CancellationToken.None);
 
-        Assert.True(codex);
-        Assert.False(grok);
-        Assert.Equal(1, codexCalls);
-        Assert.Equal(1, grokCalls);
+        Assert.Equal([liveGrok], grokIds.OrderBy(id => id, StringComparer.Ordinal));
+        Assert.Equal([lockedCodex], codexIds.OrderBy(id => id, StringComparer.Ordinal));
+        Assert.True(await activeState.IsActiveAsync(ManagedAgent.Grok, liveGrok, "unused", CancellationToken.None));
+        Assert.False(await activeState.IsActiveAsync(ManagedAgent.Grok, staleGrok, "unused", CancellationToken.None));
+        Assert.True(await activeState.IsActiveAsync(ManagedAgent.Codex, lockedCodex, "unused", CancellationToken.None));
+        Assert.False(await activeState.IsActiveAsync(ManagedAgent.Codex, staleCodex, "unused", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Manage_active_state_does_not_mark_all_sessions_because_an_agent_process_exists()
+    {
+        using var homes = new AgentHomes();
+        await File.WriteAllTextAsync(
+            Path.Combine(homes.GrokHome, "active_sessions.json"),
+            """[]""");
+
+        var activeState = new WindowsManagedSessionActiveState(
+            homes.CodexPaths,
+            homes.GrokPaths,
+            (_, _) => true,
+            _ => false,
+            Directory.GetFiles,
+            path => File.Exists(path) ? File.ReadAllText(path) : null);
+
+        Assert.Empty(await activeState.GetActiveSessionIdsAsync(ManagedAgent.Grok, CancellationToken.None));
+        Assert.Empty(await activeState.GetActiveSessionIdsAsync(ManagedAgent.Codex, CancellationToken.None));
+        Assert.False(await activeState.IsActiveAsync(
+            ManagedAgent.Grok, "51000000-0000-0000-0000-000000000001", "unused", CancellationToken.None));
     }
 
     [Fact]
@@ -708,6 +748,37 @@ public sealed class CliTests
 
         Assert.Equal(4, exitCode);
         Assert.Contains("conflicts=2", fixture.Console.OutputText);
+    }
+
+    private sealed class AgentHomes : IDisposable
+    {
+        private readonly string root = Path.Combine(Path.GetTempPath(), $"agent-sync-active-{Guid.NewGuid():N}");
+
+        public AgentHomes()
+        {
+            GrokHome = Path.Combine(root, "grok");
+            var grokSessions = Path.Combine(GrokHome, "sessions");
+            var codexHome = Path.Combine(root, "codex");
+            CodexLocks = Path.Combine(codexHome, "thread-writer-locks");
+            Directory.CreateDirectory(grokSessions);
+            Directory.CreateDirectory(CodexLocks);
+            GrokPaths = new GrokPaths(GrokHome, grokSessions);
+            CodexPaths = new CodexPaths(
+                codexHome,
+                Path.Combine(codexHome, "sessions"),
+                Path.Combine(codexHome, "archived_sessions"),
+                Path.Combine(codexHome, "attachments"));
+        }
+
+        public string GrokHome { get; }
+        public string CodexLocks { get; }
+        public GrokPaths GrokPaths { get; }
+        public CodexPaths CodexPaths { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     private sealed class Fixture

@@ -25,12 +25,14 @@ public sealed class CodexConversationWriter : IConversationWriter
     private readonly IConversationPublisher publisher;
     private readonly Func<string, string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe;
     private readonly IConversationStagingDirectoryFactory stagingFactory;
+    private readonly Func<DateTimeOffset> utcNow;
 
     public CodexConversationWriter(
         CodexPaths paths,
         CodexExecutableOption executable,
         CodexCompatibilityProbe compatibilityProbe,
-        Func<Guid>? idGenerator = null)
+        Func<Guid>? idGenerator = null,
+        Func<DateTimeOffset>? utcNow = null)
         : this(
             paths,
             executable,
@@ -38,7 +40,8 @@ public sealed class CodexConversationWriter : IConversationWriter
             new CodexConversationReader(),
             SystemConversationPublisher.Instance,
             (compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe))).ProbeAsync,
-            null)
+            null,
+            utcNow)
     {
     }
 
@@ -49,7 +52,8 @@ public sealed class CodexConversationWriter : IConversationWriter
         IConversationReader validator,
         IConversationPublisher publisher,
         Func<string, string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe,
-        IConversationStagingDirectoryFactory? stagingFactory = null)
+        IConversationStagingDirectoryFactory? stagingFactory = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
         this.executable = executable ?? throw new ArgumentNullException(nameof(executable));
@@ -58,6 +62,7 @@ public sealed class CodexConversationWriter : IConversationWriter
         this.publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
         this.compatibilityProbe = compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe));
         this.stagingFactory = stagingFactory ?? SystemConversationStagingDirectoryFactory.Instance;
+        this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     public async Task<ConversationWriteResult> WriteAsync(
@@ -67,6 +72,7 @@ public sealed class CodexConversationWriter : IConversationWriter
         ArgumentNullException.ThrowIfNull(conversation);
         if (string.IsNullOrWhiteSpace(conversation.WorkingDirectory))
             throw new ArgumentException("A working directory is required for a Codex conversation.", nameof(conversation));
+        conversation = conversation with { LastModifiedAt = utcNow() };
         var executablePath = ResolveExecutablePath();
         var createdUtc = conversation.CreatedAt.UtcDateTime;
         var destinationDirectory = Path.Combine(
@@ -177,7 +183,7 @@ public sealed class CodexConversationWriter : IConversationWriter
             json.WriteString("cwd", conversation.WorkingDirectory);
             json.WriteString("title", conversation.Title);
             json.WriteString("originator", "codex-history-sync");
-            json.WriteString("cli_version", "0.4.2");
+            json.WriteString("cli_version", "0.5.0");
             json.WriteNull("model_provider");
             json.WriteNull("base_instructions");
             json.WriteEndObject();

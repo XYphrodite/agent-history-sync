@@ -48,6 +48,8 @@ All three commands call the same `SyncEngine` used by automation. Each command d
 
 If Codex or Grok locks a session after the stable scan but before encryption, Windows sharing/lock violations defer only that session. Other eligible objects are still published, and the locked session remains pending for a later run. Other I/O failures remain fatal.
 
+Interactive `sync`, `push`, and `pull` print elapsed phase updates for lock acquisition, bounded-parallel local scanning, remote metadata fetch, index authentication, planning, staging, publication, local application, and state persistence. Codex and Grok scans run concurrently, with at most eight session bodies processed concurrently inside each scanner. For an unchanged repository, the engine authenticates the encrypted index and verifies that its opaque IDs exactly match the materialized object filenames; ciphertext bytes are loaded, hashed, decrypted, and plaintext-hash checked lazily only for objects required by download or conflict actions.
+
 Each successful publish rewrites `main` to a **single orphan commit** (force-with-lease against the CAS baseline). Previous commits become unreachable so GitHub can reclaim old encrypted blobs; the repository is a snapshot store, not an append-only audit log.
 
 ## Local cross-agent session manager
@@ -60,7 +62,7 @@ agent-sync --manage
 
 It is a local-only tool: it does not construct the Git/GitHub sync runtime, contact the network, open the configured repository, or write sync state, conflict evidence, tombstones, or background-task configuration. It reads only the native Codex and Grok session homes and performs an explicit local copy or local delete when requested.
 
-The screen has separate **Codex** and **Grok** panels. Each panel shows **Title** and **Last modified** columns; `[A]` marks an active session and `[U]` marks one that cannot safely be read. Use `Up`/`Down` to select, `Left`/`Right` to change panels, `C` to copy, `Delete` to request deletion, `R` to refresh, `Q` to exit, and `Esc` to exit when no search filter is active.
+The screen has separate **Codex** and **Grok** panels. Each panel shows **Title** and **Last modified** columns; `*` marks a session that is actually open and `!` marks one that cannot safely be read. A leftover agent process does not mark the whole column. Grok uses `active_sessions.json` plus a live `grok` PID; Codex uses a held `thread-writer-locks/*.lock`. Copy and delete remain blocked only for those starred rows. Use `Up`/`Down` to select, `Left`/`Right` to change panels, `C` to copy, `Delete` to request deletion, `R` to refresh, `Q` to exit, and `Esc` to exit when no search filter is active.
 
 Press `/` to search both panels by session title without reading conversation content. Filtering updates as you type and ignores case. `Backspace` edits the query, `Enter` keeps the current filter and returns to list navigation, and `Esc` clears the filter. An active query is shown below the panels; a panel with no matches displays `No matching sessions`.
 
@@ -68,11 +70,13 @@ Each refresh scans the Codex and Grok homes concurrently under one bounded-read 
 
 Native Codex sessions explicitly marked as subagents (including spawned workers, reviewers, nested workers, and guardians) are internal implementation records and are excluded from the manager. Their files remain untouched. Grok sessions are not classified heuristically from names, paths, or message text.
 
-`C` converts the selected readable, inactive session into the other agent's native format. The copied conversation keeps its title, available timestamps, and ordered user/assistant turns. System, reasoning, and tool content are omitted. The destination is always a newly generated native session identifier: the source remains unchanged and an existing destination session is never overwritten. Before a Codex destination is published, a configured or discovered Codex executable is checked with the disposable-profile compatibility probe; an automatically unavailable executable is the only normal case in which that probe is skipped.
+`C` converts the selected readable, inactive session into the other agent's native format. The copied conversation keeps its title, created timestamp, and ordered user/assistant turns. Copy skips IDE wrapper turns (environment context, files-mentioned headers, and similar) and keeps the catalog title when the source title would be a wrapper. The destination last-modified time is the copy time so the new row sorts as the newest session. System, reasoning, and tool content are omitted. The destination is always a newly generated native session identifier: the source remains unchanged and an existing destination session is never overwritten. Before a Codex destination is published, a configured or discovered Codex executable is checked with the disposable-profile compatibility probe; an automatically unavailable executable is the only normal case in which that probe is skipped.
+
+A Grok destination is a native package the Grok CLI can resume: a UUID v7 session id, `chat_history.jsonl` with Grok `type:text` user content, `summary.json` including `current_model_id` and `title_is_manual`, plus `updates.jsonl`, `rewind_points.jsonl`, `signals.json`, and `plan.json`. Cloud sync still stores only the compact `chat_history` + `summary` package.
 
 Copy and delete refuse an active, unreadable, malformed, changed, or out-of-root session. The manager rechecks activity and the exact source immediately before the final action. `Delete` first asks for confirmation and removes only the selected local native session: the selected Codex JSONL file or the selected Grok native session directory. It does not publish a deletion or write a tombstone. **Local deletion may be restored by sync** on a later pull or bidirectional synchronization.
 
-Refresh and action failures keep the displayed catalog safe and use stable messages such as `Session refresh failed.`, `Copy failed for session …`, or `Delete failed for session …`; they do not display native paths, conversation content, or raw exception details.
+A successful copy shows `Copied.`. Refresh and action failures keep the displayed catalog safe and use stable messages such as `Session refresh failed.`, `Copy failed for session …`, or `Delete failed for session …`; they do not display native paths, conversation content, or raw exception details.
 
 Before hashing and upload, each session JSONL is reduced deterministically to a compact rediscovery view:
 
