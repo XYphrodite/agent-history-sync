@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using CodexHistorySync.Windows;
 
 namespace CodexHistorySync.Windows.Tests;
@@ -5,6 +8,16 @@ namespace CodexHistorySync.Windows.Tests;
 public sealed class AgentSchedulerTests
 {
     private const string UserSid = "S-1-5-21-test";
+
+    [Fact]
+    public void Missing_task_lookup_treats_file_not_found_and_known_com_hresults_as_absent()
+    {
+        Assert.True(AgentScheduler.IsMissingScheduledTask(new FileNotFoundException()));
+        Assert.True(AgentScheduler.IsMissingScheduledTask(Com(unchecked((int)0x80070002))));
+        Assert.True(AgentScheduler.IsMissingScheduledTask(Com(unchecked((int)0x8004130F))));
+        Assert.False(AgentScheduler.IsMissingScheduledTask(new InvalidOperationException("not a missing task")));
+        Assert.False(AgentScheduler.IsMissingScheduledTask(Com(unchecked((int)0x80070005))));
+    }
 
     [Fact]
     public async Task Install_registers_exact_unquoted_path_arguments_and_per_user_logon_trigger()
@@ -184,6 +197,52 @@ public sealed class AgentSchedulerTests
         var registration = AgentTaskDefinitionParser.Parse(AgentScheduler.TaskName, xml);
 
         Assert.False(registration.ExactShape);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void Task_xml_treats_sid_and_account_name_for_the_current_user_as_exact()
+    {
+        var identity = WindowsIdentity.GetCurrent();
+        var sid = identity.User?.Value ?? throw new InvalidOperationException("The current user SID is unavailable.");
+        var name = identity.Name;
+        var xml = $"""
+            <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <Principals><Principal><UserId>{sid}</UserId></Principal></Principals>
+              <Triggers><LogonTrigger><UserId>{name}</UserId></LogonTrigger></Triggers>
+              <Actions><Exec><Command>C:\Program Files\Agent History Sync\agent-sync.exe</Command><Arguments>agent run</Arguments></Exec></Actions>
+            </Task>
+            """;
+
+        var registration = AgentTaskDefinitionParser.Parse(AgentScheduler.TaskName, xml);
+
+        Assert.True(registration.ExactShape);
+        Assert.True(AgentScheduler.SameWindowsUser(sid, name));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task Uninstall_accepts_account_name_user_id_equivalent_to_current_sid()
+    {
+        var identity = WindowsIdentity.GetCurrent();
+        var sid = identity.User?.Value ?? throw new InvalidOperationException("The current user SID is unavailable.");
+        var executable = Path.GetFullPath(@"C:\Tools\agent-sync.exe");
+        var store = new FakeTaskStore
+        {
+            Task = new AgentTaskRegistration(AgentScheduler.TaskName, executable, "agent run", identity.Name, true)
+        };
+        var scheduler = new AgentScheduler(store, () => executable, () => sid);
+
+        await scheduler.UninstallAsync();
+
+        Assert.Null(store.Task);
+    }
+
+    private static COMException Com(int hresult)
+    {
+        var exception = new COMException();
+        exception.HResult = hresult;
+        return exception;
     }
 
     private sealed class FakeTaskStore : IAgentTaskStore
