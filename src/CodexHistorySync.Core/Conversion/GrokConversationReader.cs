@@ -129,9 +129,10 @@ public sealed class GrokConversationReader : IConversationReader
     }
 
     private static bool IsTextBlock(string? type, ConversationRole role) =>
-        role == ConversationRole.User
+        string.Equals(type, "text", StringComparison.Ordinal) ||
+        (role == ConversationRole.User
             ? string.Equals(type, "input_text", StringComparison.Ordinal)
-            : string.Equals(type, "output_text", StringComparison.Ordinal);
+            : string.Equals(type, "output_text", StringComparison.Ordinal));
 
     private static DateTimeOffset? ReadTimestamp(JsonElement element, params string[] names)
     {

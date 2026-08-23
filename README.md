@@ -40,8 +40,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Pin a version; force PATH yes/no without prompting
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -NoPath
 ```
 
 **From a local build:**
@@ -90,6 +90,8 @@ agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
 ```
 
 If an active Codex or Grok process locks a session after scanning, `push`/`sync` publishes the remaining sessions and safely retries the locked session on a later run.
+
+Manual `sync`, `push`, and `pull` print elapsed phase updates while they run. Codex/Grok and per-session reads are bounded-parallel; unchanged repositories authenticate the encrypted index and exact opaque-object set without loading every remote ciphertext body.
 
 ### Local session manager
 
@@ -150,8 +152,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Конкретная версия; PATH без вопроса
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.4.2 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -NoPath
 ```
 
 **Из локальной сборки:**
@@ -198,6 +200,18 @@ agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # или --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
 ```
+
+Если активный процесс Codex или Grok блокирует сессию после сканирования, `push`/`sync` публикует остальные и безопасно повторит заблокированную сессию позже.
+
+Ручные `sync`, `push` и `pull` печатают фазы с затраченным временем. Чтение Codex/Grok и тел сессий идёт ограниченным параллелизмом; для неизменённого репозитория проверяются зашифрованный индекс и набор opaque-объектов, без загрузки каждого ciphertext.
+
+### Локальный менеджер сессий
+
+```powershell
+agent-sync --manage
+```
+
+Двухпанельный менеджер Codex/Grok для локального копирования и удаления. Не обращается к GitHub/Git и не меняет состояние синхронизации. Правила и клавиши — в [operations](docs/operations.md#local-cross-agent-session-manager).
 
 ### Документация
 

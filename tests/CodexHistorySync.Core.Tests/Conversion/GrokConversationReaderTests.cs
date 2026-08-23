@@ -52,6 +52,24 @@ public sealed class GrokConversationReaderTests
     }
 
     [Fact]
+    public async Task ReadAsyncExtractsNativeTextBlocksUsedByGrokCli()
+    {
+        await using var fixture = await GrokFixture.CreateAsync();
+        var directory = await fixture.WritePackageAsync(SessionId,
+            """
+            {"type":"user","content":[{"type":"text","text":"question"}]}
+            {"type":"assistant","content":"answer"}
+            """,
+            "{\"info\":{\"id\":\"" + SessionId + "\",\"cwd\":\"C:\\\\Repos\\\\Demo\"}}");
+
+        var result = await new GrokConversationReader().ReadAsync(directory, CancellationToken.None);
+
+        Assert.Collection(result.Turns,
+            turn => Assert.Equal(new PortableTurn(ConversationRole.User, "question"), turn),
+            turn => Assert.Equal(new PortableTurn(ConversationRole.Assistant, "answer"), turn));
+    }
+
+    [Fact]
     public async Task ReadAsyncExcludesReasoningAndToolBlocksNestedInMessages()
     {
         await using var fixture = await GrokFixture.CreateAsync();

@@ -41,7 +41,16 @@ public sealed class CodexConversationReader : IConversationReader
                 if (!root.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String) continue;
                 if (string.Equals(type.GetString(), "session_meta", StringComparison.Ordinal))
                 {
-                    if (hasMetadata || !TryReadMetadata(root, out metadata)) throw InvalidConversation();
+                    if (!TryReadMetadata(root, out var incoming)) throw InvalidConversation();
+                    if (hasMetadata)
+                    {
+                        if (!string.Equals(metadata.Id, incoming.Id, StringComparison.OrdinalIgnoreCase))
+                            throw InvalidConversation();
+                        if (incoming.Timestamp is { } repeatedTimestamp) timestamps.Add(repeatedTimestamp);
+                        continue;
+                    }
+
+                    metadata = incoming;
                     hasMetadata = true;
                     if (metadata.Timestamp is { } timestamp) timestamps.Add(timestamp);
                     continue;
@@ -117,7 +126,9 @@ public sealed class CodexConversationReader : IConversationReader
 
         timestamp = ReadTimestamp(payload) ?? ReadTimestamp(root);
         var text = ReadMessageText(payload, conversationRole.Value);
-        if (!string.IsNullOrWhiteSpace(text)) turn = new PortableTurn(conversationRole.Value, text);
+        if (string.IsNullOrWhiteSpace(text)) return true;
+        if (conversationRole == ConversationRole.User && ConversationTechnicalText.IsWrapper(text)) return true;
+        turn = new PortableTurn(conversationRole.Value, text);
         return true;
     }
 

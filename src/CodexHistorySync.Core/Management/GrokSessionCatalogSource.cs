@@ -12,7 +12,8 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
     private static readonly string[] TechnicalPreviewOpeningTags =
     [
         "<environment_context>", "<recommended_plugins>", "<user_info>", "<system-reminder>",
-        "<permissions instructions>", "<skills_instructions>", "<apps_instructions>", "<plugins_instructions>"
+        "<permissions instructions>", "<skills_instructions>", "<apps_instructions>", "<plugins_instructions>",
+        "# Files mentioned by the user:", "# Context from my IDE setup:"
     ];
 
     public ManagedAgent Agent => ManagedAgent.Grok;

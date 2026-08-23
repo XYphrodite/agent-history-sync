@@ -87,6 +87,7 @@ public sealed class SessionManagerApplication(
         try
         {
             await operations.CopyAsync(source, cancellationToken);
+            view.ShowMessage("Copied.", false);
             return await RefreshAsync(state, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

@@ -35,6 +35,7 @@ public sealed class SessionManagerApplicationTests
         var finalState = view.RenderedStates.Last();
         Assert.Equal(["keep"], finalState.Snapshot.Codex.Select(session => session.SessionId));
         Assert.Contains("copied-session", finalState.Snapshot.Grok.Select(session => session.SessionId));
+        Assert.Contains(view.Messages, message => message.Message == "Copied." && !message.IsError);
         Assert.Contains(view.Messages, message => message.Message == "Local deletion may be restored by sync." && !message.IsError);
     }
 

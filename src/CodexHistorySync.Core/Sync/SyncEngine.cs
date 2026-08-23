@@ -15,6 +15,9 @@ namespace CodexHistorySync.Core.Sync;
 
 public enum SyncMode { Pull, Push, Bidirectional }
 
+public enum SyncProgressPhase { WaitingForLock, ScanningLocal, ReadingRemote, AuthenticatingIndex, Planning, StagingChanges, Publishing, ApplyingLocalChanges, SavingState }
+public sealed record SyncProgress(SyncProgressPhase Phase, string Message);
+
 public sealed record SyncResult(
     string RemoteRevision,
     int Uploaded,
@@ -67,20 +70,22 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly SemaphoreSlim _mutex;
     private readonly ISyncEngineHooks _hooks;
     private readonly IOperationDirectoryCleaner _operationCleaner;
+    private readonly Action<SyncProgress>? _progress;
     private int _disposeState;
     private readonly TaskCompletionSource _disposeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory,
-        GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null)
+        GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null, Action<SyncProgress>? progress = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
-            provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner) { }
+            provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner, progress) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory, ISyncEngineHooks hooks,
-        IOperationDirectoryCleaner operationCleaner, GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null)
+        IOperationDirectoryCleaner operationCleaner, GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null,
+        Action<SyncProgress>? progress = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -103,16 +108,19 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths);
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
+        _progress = progress;
         _mutex = RepositoryMutexes.GetOrAdd(RepositorySyncLock.CanonicalStateIdentity(_stateStore.GetStatePath(repositoryId)),
             _ => new SemaphoreSlim(1, 1));
     }
 
     private async Task<SessionScanResult> ScanLocalAsync(CancellationToken ct)
     {
-        var codex = await _scanner.ScanDetailedAsync(_paths, ct).ConfigureAwait(false);
-        if (_grokPaths is null || _grokScanner is null) return codex;
-
-        var grok = await _grokScanner.ScanDetailedAsync(_grokPaths, ct).ConfigureAwait(false);
+        var codexTask = _scanner.ScanDetailedAsync(_paths, ct);
+        if (_grokPaths is null || _grokScanner is null) return await codexTask.ConfigureAwait(false);
+        var grokTask = _grokScanner.ScanDetailedAsync(_grokPaths, ct);
+        await Task.WhenAll(codexTask, grokTask).ConfigureAwait(false);
+        var codex = await codexTask.ConfigureAwait(false);
+        var grok = await grokTask.ConfigureAwait(false);
         var objects = new List<LocalObject>(codex.Objects.Count + grok.Objects.Count);
         objects.AddRange(codex.Objects);
         var byId = objects.ToDictionary(item => item.Id);
@@ -145,6 +153,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
+        Report(SyncProgressPhase.WaitingForLock, "waiting for the repository lock");
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -154,13 +163,18 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             var raced = false;
             for (var attempt = 1; attempt <= 5; attempt++)
             {
+                Report(SyncProgressPhase.ScanningLocal, "scanning Codex and Grok sessions in parallel");
                 var scan = await ScanLocalAsync(ct).ConfigureAwait(false);
                 EnsureScanUsable(scan);
                 var locals = scan.Objects;
                 var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
                 var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
-                var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
+                Report(SyncProgressPhase.ReadingRemote, "fetching remote metadata");
+                var snapshot = await _provider.ReadSnapshotMetadataAsync(ct).ConfigureAwait(false);
+                Report(SyncProgressPhase.AuthenticatingIndex, "authenticating the repository index");
                 var remote = await AuthenticateSnapshotAsync(snapshot, stateInitialized, baseline.Count, ct).ConfigureAwait(false);
+                Report(SyncProgressPhase.Planning,
+                    $"comparing {locals.Count} local and {remote.Versions.Count} remote sessions");
                 var localVersions = CreateLocalVersions(scan, baseline);
                 var remoteVersions = CreateRemoteVersions(remote.Versions, baseline);
                 var plan = ThreeWayPlanner.CreatePlan(localVersions, remoteVersions, baseline);
@@ -181,6 +195,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     var skippedOversized = 0;
                     var stagedImports = new Dictionary<LogicalObjectId, StagedImport>();
                     var pendingConflicts = new List<PendingConflict>();
+                    var actionable = plan.Actions.Count(action => IsApplicablePreviewChange(action.Kind, mode));
+                    Report(SyncProgressPhase.StagingChanges,
+                        actionable == 0 ? "no changes detected; finalizing" : $"validating and staging {actionable} changes");
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
                         stagedImports.Add(action.ObjectId, await StageDownloadAsync(action, locals, remote, directory, ct).ConfigureAwait(false));
 
@@ -256,6 +273,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     var revision = snapshot.Revision;
                     if (changes.Count != 0)
                     {
+                        Report(SyncProgressPhase.Publishing, "publishing encrypted changes");
                         var tombstones = plan.Actions.Where(action => action.Kind == SyncActionKind.PublishTombstone &&
                             mode != SyncMode.Pull && !deferred.Contains(action.ObjectId)).ToArray();
                         var referenced = entries.Values.Select(entry => entry.OpaqueObjectId).ToHashSet(StringComparer.Ordinal);
@@ -309,6 +327,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         mutationBatch = await HistoryMutationBatch.PrepareAsync(_historyWriter, directory, operationId, mutationPlans, ct).ConfigureAwait(false);
                     try
                     {
+                        if (mutationPlans.Count != 0)
+                            Report(SyncProgressPhase.ApplyingLocalChanges, "applying authenticated remote changes locally");
                         foreach (var action in plan.Actions)
                         {
                             if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
@@ -400,6 +420,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         if (!remote.HasAuthenticatedIndex && changes.Count == 0 && baseline.Count == 0)
                             return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
                                 await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized);
+                        Report(SyncProgressPhase.SavingState, "saving synchronization state");
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
                             next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
                         stateSaved = true;
@@ -450,7 +471,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             EnsureScanUsable(scan);
             var stateInitialized = File.Exists(_stateStore.GetStatePath(_repositoryId));
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
-            var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
+            var snapshot = await _provider.ReadSnapshotMetadataAsync(ct).ConfigureAwait(false);
             var remote = await AuthenticateSnapshotAsync(snapshot, stateInitialized, baseline.Count, ct).ConfigureAwait(false);
             var plan = ThreeWayPlanner.CreatePlan(CreateLocalVersions(scan, baseline),
                 CreateRemoteVersions(remote.Versions, baseline), baseline);
@@ -487,7 +508,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             EnsureScanUsable(scan);
             ValidateConflictLocal(conflict, scan, resolution);
             var baseline = await LoadBaselineAsync(ct).ConfigureAwait(false);
-            var snapshot = await _provider.ReadSnapshotAsync(ct).ConfigureAwait(false);
+            var snapshot = await _provider.ReadSnapshotMetadataAsync(ct).ConfigureAwait(false);
             var remote = await AuthenticateSnapshotAsync(snapshot,
                 File.Exists(_stateStore.GetStatePath(_repositoryId)), baseline.Count, ct).ConfigureAwait(false);
             ValidateConflictRemote(conflict, remote, resolution);
@@ -948,10 +969,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         if (snapshot.IndexCiphertext is null)
         {
-            if (snapshot.Objects.Count != 0) throw new InvalidDataException("Remote ciphertext exists without an authenticated repository index.");
+            if (snapshot.EffectiveObjectReferences.Count != 0) throw new InvalidDataException("Remote ciphertext exists without an authenticated repository index.");
             if (stateInitialized || baselineCount != 0 || !string.IsNullOrEmpty(snapshot.Revision))
                 throw new InvalidDataException("An initialized repository response is missing its authenticated index.");
-            return new(false, [], new Dictionary<LogicalObjectId, ObjectVersion>(), new Dictionary<LogicalObjectId, byte[]>(), new Dictionary<string, byte[]>(StringComparer.Ordinal));
+            return new AuthenticatedSnapshot(false, [], new Dictionary<LogicalObjectId, ObjectVersion>(), snapshot);
         }
         byte[] plaintext;
         try
@@ -964,35 +985,47 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         catch (CryptographicException exception) { throw new InvalidDataException("The repository index could not be authenticated.", exception); }
 
         var entries = ParseIndex(plaintext);
-        Dictionary<string, byte[]> encrypted;
-        try { encrypted = snapshot.Objects.ToDictionary(item => item.ObjectId.Value, item => item.Ciphertext, StringComparer.Ordinal); }
+        HashSet<string> encrypted;
+        try { encrypted = snapshot.EffectiveObjectReferences.Select(item => item.Value).ToHashSet(StringComparer.Ordinal); }
         catch (ArgumentException exception) { throw new InvalidDataException("Remote snapshot contains duplicate opaque object references.", exception); }
+        if (encrypted.Count != snapshot.EffectiveObjectReferences.Count)
+            throw new InvalidDataException("Remote snapshot contains duplicate opaque object references.");
         var referenced = entries.Select(entry => entry.OpaqueObjectId).ToHashSet(StringComparer.Ordinal);
         if (referenced.Count != entries.Count) throw new InvalidDataException("Repository index contains duplicate opaque object references.");
-        if (!referenced.SetEquals(encrypted.Keys)) throw new InvalidDataException("Remote ciphertext set does not exactly match the authenticated index.");
+        if (!referenced.SetEquals(encrypted)) throw new InvalidDataException("Remote ciphertext set does not exactly match the authenticated index.");
 
         var versions = new Dictionary<LogicalObjectId, ObjectVersion>();
-        var objects = new Dictionary<LogicalObjectId, byte[]>();
         foreach (var entry in entries)
-        {
-            var ciphertext = encrypted[entry.OpaqueObjectId];
-            if (!StringComparer.Ordinal.Equals(Sha256(ciphertext).Hex, entry.OpaqueObjectId))
-                throw new InvalidDataException("Encrypted object ID does not match its ciphertext hash.");
-            byte[] bytes;
-            try
-            {
-                await using var input = new MemoryStream(ciphertext, false);
-                await using var output = new MemoryStream();
-                await _crypto.DecryptAsync(input, output, _masterKey, new EnvelopeMetadata(IndexSchemaVersion, entry.Id, entry.Kind), ct).ConfigureAwait(false);
-                bytes = output.ToArray();
-            }
-            catch (CryptographicException exception) { throw new InvalidDataException($"Encrypted object '{entry.Id.Value}' could not be authenticated.", exception); }
-            if (!StringComparer.Ordinal.Equals(Sha256(bytes).Hex, entry.PlaintextHash.Hex))
-                throw new InvalidDataException("Encrypted object plaintext hash does not match the authenticated index.");
             versions.Add(entry.Id, Version(entry));
-            objects.Add(entry.Id, bytes);
+        return new AuthenticatedSnapshot(true, entries, versions, snapshot);
+    }
+
+    private async Task<RemotePayload> ReadAuthenticatedRemoteObjectAsync(
+        AuthenticatedSnapshot remote, IndexEntry entry, CancellationToken ct)
+    {
+        if (remote.Payloads.TryGetValue(entry.Id, out var cached)) return cached;
+        var ciphertext = await _provider.ReadObjectAsync(remote.Snapshot,
+            new LogicalObjectId(entry.OpaqueObjectId), ct).ConfigureAwait(false);
+        if (!StringComparer.Ordinal.Equals(Sha256(ciphertext).Hex, entry.OpaqueObjectId))
+            throw new InvalidDataException("Encrypted object ID does not match its ciphertext hash.");
+        byte[] plaintext;
+        try
+        {
+            await using var input = new MemoryStream(ciphertext, false);
+            await using var output = new MemoryStream();
+            await _crypto.DecryptAsync(input, output, _masterKey,
+                new EnvelopeMetadata(IndexSchemaVersion, entry.Id, entry.Kind), ct).ConfigureAwait(false);
+            plaintext = output.ToArray();
         }
-        return new(true, entries, versions, objects, encrypted);
+        catch (CryptographicException exception)
+        {
+            throw new InvalidDataException($"Encrypted object '{entry.Id.Value}' could not be authenticated.", exception);
+        }
+        if (!StringComparer.Ordinal.Equals(Sha256(plaintext).Hex, entry.PlaintextHash.Hex))
+            throw new InvalidDataException("Encrypted object plaintext hash does not match the authenticated index.");
+        var payload = new RemotePayload(ciphertext, plaintext);
+        remote.Payloads.Add(entry.Id, payload);
+        return payload;
     }
 
     private IReadOnlyList<IndexEntry> ParseIndex(byte[] plaintext)
@@ -1041,7 +1074,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         var version = action.Remote!;
         var existing = locals.SingleOrDefault(item => item.Id == action.ObjectId);
-        var plaintext = remote.Plaintext[action.ObjectId];
+        var entry = remote.Entries.Single(item => item.Id == action.ObjectId);
+        var plaintext = (await ReadAuthenticatedRemoteObjectAsync(remote, entry, ct).ConfigureAwait(false)).Plaintext;
         ValidateHistoryPayload(version.Kind, plaintext, action.ObjectId, ct);
 
         LocalObject? relocateFrom = null;
@@ -1195,6 +1229,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private static bool IsTransientSharingViolation(IOException exception) =>
         OperatingSystem.IsWindows() && (exception.HResult & 0xFFFF) is 32 or 33;
 
+    private void Report(SyncProgressPhase phase, string message) => _progress?.Invoke(new SyncProgress(phase, message));
+
     private async Task<string> StageIndexAsync(IEnumerable<IndexEntry> entries, string directory, CancellationToken ct)
     {
         await using var json = new MemoryStream();
@@ -1251,7 +1287,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         var remoteEntry = remote.Entries.SingleOrDefault(entry => entry.Id == action.ObjectId);
         if (remoteEntry is not null)
         {
-            await remoteEncrypted.WriteAsync(remote.Encrypted[remoteEntry.OpaqueObjectId], ct).ConfigureAwait(false);
+            var payload = await ReadAuthenticatedRemoteObjectAsync(remote, remoteEntry, ct).ConfigureAwait(false);
+            await remoteEncrypted.WriteAsync(payload.Ciphertext, ct).ConfigureAwait(false);
             remoteDevice = DeviceFromVersion(remoteEntry.Version);
         }
         else
@@ -1286,10 +1323,19 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
 
     private sealed record IndexEntry(LogicalObjectId Id, ObjectKind Kind, ContentHash PlaintextHash, bool Deleted,
         string OpaqueObjectId, string Version, string? StagedPath = null);
-    private sealed record AuthenticatedSnapshot(bool HasAuthenticatedIndex, IReadOnlyList<IndexEntry> Entries,
-        IReadOnlyDictionary<LogicalObjectId, ObjectVersion> Versions,
-        IReadOnlyDictionary<LogicalObjectId, byte[]> Plaintext,
-        IReadOnlyDictionary<string, byte[]> Encrypted);
+    private sealed class AuthenticatedSnapshot(
+        bool hasAuthenticatedIndex,
+        IReadOnlyList<IndexEntry> entries,
+        IReadOnlyDictionary<LogicalObjectId, ObjectVersion> versions,
+        RemoteSnapshot snapshot)
+    {
+        public bool HasAuthenticatedIndex { get; } = hasAuthenticatedIndex;
+        public IReadOnlyList<IndexEntry> Entries { get; } = entries;
+        public IReadOnlyDictionary<LogicalObjectId, ObjectVersion> Versions { get; } = versions;
+        public RemoteSnapshot Snapshot { get; } = snapshot;
+        public Dictionary<LogicalObjectId, RemotePayload> Payloads { get; } = [];
+    }
+    private sealed record RemotePayload(byte[] Ciphertext, byte[] Plaintext);
     private sealed record StagedImport(
         LocalObject Incoming,
         string Path,

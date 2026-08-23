@@ -123,6 +123,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         var reader = source.Agent == ManagedAgent.Codex ? codexReader : grokReader;
         var conversation = await reader.ReadAsync(target.NativePath, cancellationToken).ConfigureAwait(false);
         ValidateConversationIdentity(source, conversation);
+        conversation = WithCatalogTitle(source, conversation);
 
         var revalidated = ValidateTarget(source);
         if (!string.Equals(target.NativePath, revalidated.NativePath, StringComparison.OrdinalIgnoreCase) ||
@@ -295,6 +296,16 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         if (conversation.SourceAgent != expectedAgent ||
             !string.Equals(conversation.SourceSessionId, source.SessionId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected session identity changed.");
+    }
+
+    private static PortableConversation WithCatalogTitle(ManagedSession source, PortableConversation conversation)
+    {
+        var catalogTitle = source.Title?.Trim();
+        if (string.IsNullOrWhiteSpace(catalogTitle) ||
+            string.Equals(catalogTitle, source.SessionId, StringComparison.OrdinalIgnoreCase) ||
+            ConversationTechnicalText.IsWrapper(catalogTitle))
+            return conversation;
+        return conversation with { Title = catalogTitle };
     }
 
     private static async Task<byte[]> CaptureFingerprintAsync(

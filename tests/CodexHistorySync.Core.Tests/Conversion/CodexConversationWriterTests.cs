@@ -15,9 +15,11 @@ public sealed class CodexConversationWriterTests
         // Wrong date placement, invalid native records, source-ID reuse, or field/turn loss must fail this test.
         await using var fixture = await CodexWriterFixture.CreateAsync();
         var conversation = fixture.Conversation(sourceSessionId: FirstId.ToString());
+        var copyTime = new DateTimeOffset(2026, 8, 23, 17, 30, 0, TimeSpan.Zero);
         var writer = fixture.Writer(
             new CodexExecutableOption(null, CodexExecutableAvailability.AutomaticDiscoveryAbsent),
-            () => SecondId);
+            () => SecondId,
+            utcNow: () => copyTime);
 
         var result = await writer.WriteAsync(conversation, CancellationToken.None);
 
@@ -28,7 +30,10 @@ public sealed class CodexConversationWriterTests
         Assert.Equal($"rollout-2026-08-09T07-11-12-{SecondId}.jsonl", Path.GetFileName(result.NativePath));
         Assert.True(File.Exists(result.NativePath));
         await AssertNativeRecordsAsync(result.NativePath, result.SessionId, conversation, conversation.Turns.Count);
-        AssertPortableConversation(conversation, await new CodexConversationReader().ReadAsync(result.NativePath, CancellationToken.None), result.SessionId);
+        AssertPortableConversation(
+            conversation with { LastModifiedAt = copyTime },
+            await new CodexConversationReader().ReadAsync(result.NativePath, CancellationToken.None),
+            result.SessionId);
         AssertNoStaging(fixture.Paths.Sessions);
     }
 
@@ -447,7 +452,7 @@ public sealed class CodexConversationWriterTests
         Assert.Equal(conversation.CreatedAt.ToString("O"), payload.GetProperty("timestamp").GetString());
         Assert.Equal(conversation.WorkingDirectory, payload.GetProperty("cwd").GetString());
         Assert.Equal("codex-history-sync", payload.GetProperty("originator").GetString());
-        Assert.Equal("0.4.2", payload.GetProperty("cli_version").GetString());
+        Assert.Equal("0.5.0", payload.GetProperty("cli_version").GetString());
         Assert.Equal(JsonValueKind.Null, payload.GetProperty("model_provider").ValueKind);
         Assert.Equal(JsonValueKind.Null, payload.GetProperty("base_instructions").ValueKind);
         var responseItems = new List<JsonDocument>();
@@ -659,7 +664,8 @@ public sealed class CodexConversationWriterTests
             IConversationReader? reader = null,
             IConversationPublisher? publisher = null,
             Func<string, string, CancellationToken, Task<CompatibilityResult>>? probe = null,
-            IConversationStagingDirectoryFactory? stagingFactory = null) =>
+            IConversationStagingDirectoryFactory? stagingFactory = null,
+            Func<DateTimeOffset>? utcNow = null) =>
             new(
                 Paths,
                 executable,
@@ -667,7 +673,8 @@ public sealed class CodexConversationWriterTests
                 reader ?? new CodexConversationReader(),
                 publisher ?? SystemConversationPublisher.Instance,
                 probe ?? ((_, _, _) => Task.FromResult(new CompatibilityResult(true, "test", "compatible"))),
-                stagingFactory);
+                stagingFactory,
+                utcNow);
 
         public PortableConversation Conversation(string sourceSessionId = "source-session") => new(
             ConversationAgent.Grok,

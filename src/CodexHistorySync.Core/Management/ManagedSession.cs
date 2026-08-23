@@ -46,7 +46,7 @@ public sealed class ManagedSessionOperationException : Exception
 
 public interface IManagedSessionActiveState
 {
-    Task<bool> IsAgentActiveAsync(
+    Task<IReadOnlySet<string>> GetActiveSessionIdsAsync(
         ManagedAgent agent,
         CancellationToken cancellationToken);
 
