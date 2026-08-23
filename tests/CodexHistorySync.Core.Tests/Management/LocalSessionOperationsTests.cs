@@ -140,14 +140,17 @@ public sealed class LocalSessionOperationsTests
         var newlyActivePath = await fixture.WriteCodexAsync("newly-active", "Newly active", "q", "a");
         fixture.ActiveState.ActiveIds.Add("newly-active");
 
-        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
-            fixture.Session(ManagedAgent.Codex, "declared-active", declaredActivePath) with { IsActive = true },
-            CancellationToken.None));
-        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
-            fixture.Session(ManagedAgent.Codex, "declared-unreadable", unreadablePath) with { CanRead = false },
-            CancellationToken.None));
-        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
-            fixture.Session(ManagedAgent.Codex, "newly-active", newlyActivePath), CancellationToken.None));
+        Assert.Equal(ManagedSessionFailureReason.Active, (await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "declared-active", declaredActivePath) with { IsActive = true },
+                CancellationToken.None))).Reason);
+        Assert.Equal(ManagedSessionFailureReason.Unreadable, (await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "declared-unreadable", unreadablePath) with { CanRead = false },
+                CancellationToken.None))).Reason);
+        Assert.Equal(ManagedSessionFailureReason.Active, (await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "newly-active", newlyActivePath), CancellationToken.None))).Reason);
 
         Assert.Empty(fixture.CodexWriter.Conversations);
         Assert.Empty(fixture.GrokWriter.Conversations);
@@ -162,8 +165,9 @@ public sealed class LocalSessionOperationsTests
         var outsidePath = await fixture.WriteCodexAsync(
             "outside-source", "Outside", "q", "a", outsideDirectory.FullName);
 
-        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations().CopyAsync(
-            fixture.Session(ManagedAgent.Codex, "outside-source", outsidePath), CancellationToken.None));
+        Assert.Equal(ManagedSessionFailureReason.Unreadable, (await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            fixture.CreateOperations().CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "outside-source", outsidePath), CancellationToken.None))).Reason);
 
         Assert.True(File.Exists(outsidePath));
         Assert.Empty(fixture.GrokWriter.Conversations);
@@ -202,11 +206,29 @@ public sealed class LocalSessionOperationsTests
         var path = await fixture.WriteCodexAsync("changing-source", "Changing", "q", "a");
         var reader = new MutatingReader(new CodexConversationReader(), path);
 
-        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => fixture.CreateOperations(codexReader: reader).CopyAsync(
-            fixture.Session(ManagedAgent.Codex, "changing-source", path), CancellationToken.None));
-
+        Assert.Equal(ManagedSessionFailureReason.Changed, (await Assert.ThrowsAsync<ManagedSessionOperationException>(() =>
+            fixture.CreateOperations(codexReader: reader).CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "changing-source", path), CancellationToken.None))).Reason);
         Assert.True(reader.Mutated);
         Assert.Empty(fixture.GrokWriter.Conversations);
+    }
+
+    [Fact]
+    public async Task CopyAsyncReportsDestinationUnavailableWhenTheOtherWriterIsMissing()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("no-grok", "No Grok", "q", "a");
+        var operations = new LocalSessionOperations(
+            fixture.CodexPaths,
+            fixture.GrokPaths,
+            fixture.ActiveState,
+            fixture.DirectoryDeleter,
+            fixture.CodexWriter,
+            grokWriter: null);
+
+        Assert.Equal(ManagedSessionFailureReason.DestinationUnavailable,
+            (await Assert.ThrowsAsync<ManagedSessionOperationException>(() => operations.CopyAsync(
+                fixture.Session(ManagedAgent.Codex, "no-grok", path), CancellationToken.None))).Reason);
     }
 
     [Fact]

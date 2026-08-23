@@ -76,7 +76,7 @@ A Grok destination is a native package the Grok CLI can resume: a UUID v7 sessio
 
 Copy and delete refuse an active, unreadable, malformed, changed, or out-of-root session. The manager rechecks activity and the exact source immediately before the final action. `Delete` first asks for confirmation and removes only the selected local native session: the selected Codex JSONL file or the selected Grok native session directory. It does not publish a deletion or write a tombstone. **Local deletion may be restored by sync** on a later pull or bidirectional synchronization.
 
-A successful copy shows `Copied.`. Refresh and action failures keep the displayed catalog safe and use stable messages such as `Session refresh failed.`, `Copy failed for session …`, or `Delete failed for session …`; they do not display native paths, conversation content, or raw exception details.
+A successful copy shows `Copied.`. Copy failures use a fixed safe reason when one is known (`Active sessions cannot be copied.`, `This session cannot be copied.`, `The session changed. Copy was cancelled.`, `Grok is not available.`, `Codex is not available.`, or `Codex rejected the copied session.`); otherwise they show `Copy failed for session …`. Refresh and delete failures stay on `Session refresh failed.` and `Delete failed for session …`. None of these messages display native paths, conversation content, or raw exception details.
 
 Before hashing and upload, each session JSONL is reduced deterministically to a compact rediscovery view:
 

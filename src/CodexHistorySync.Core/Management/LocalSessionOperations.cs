@@ -24,6 +24,49 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly IConversationReader grokReader;
     private readonly IManagedSessionFingerprintProvider fingerprintProvider;
 
+    private static readonly HashSet<string> ActiveCopyFailures = new(StringComparer.Ordinal)
+    {
+        "The session is active."
+    };
+
+    private static readonly HashSet<string> ChangedCopyFailures = new(StringComparer.Ordinal)
+    {
+        "The selected session path changed.",
+        "The selected session changed during validation."
+    };
+
+    private static readonly HashSet<string> DestinationCopyFailures = new(StringComparer.Ordinal)
+    {
+        "The destination agent is unavailable.",
+        "The configured Codex executable is unavailable.",
+        "The discovered Codex executable is unavailable."
+    };
+
+    private static readonly HashSet<string> IncompatibleCopyFailures = new(StringComparer.Ordinal)
+    {
+        "The staged Codex conversation failed the compatibility probe."
+    };
+
+    private static readonly HashSet<string> UnreadableCopyFailures = new(StringComparer.Ordinal)
+    {
+        "The session is not readable.",
+        "The selected session identity is invalid.",
+        "The selected Codex target is invalid.",
+        "The selected Codex target is outside its native root.",
+        "The selected Grok target is invalid.",
+        "The selected Grok identity is invalid.",
+        "The selected agent is invalid.",
+        "The selected session identity changed.",
+        "The selected Grok session could not be validated.",
+        "The selected Grok session contains a reparse point.",
+        "The selected session could not be validated.",
+        "Codex conversation is invalid.",
+        "Grok conversation is invalid.",
+        "The staged Codex conversation failed validation.",
+        "The staged Grok conversation failed validation.",
+        "The portable conversation has an unsupported role."
+    };
+
     public LocalSessionOperations(
         CodexPaths? codexPaths,
         GrokPaths? grokPaths,
@@ -84,9 +127,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
-            throw new ManagedSessionOperationException(ManagedSessionOperationFailure.Copy);
+            throw new ManagedSessionOperationException(
+                ManagedSessionOperationFailure.Copy,
+                ClassifyCopyFailure(exception));
         }
     }
 
@@ -288,6 +333,26 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         }
 
         throw new InvalidDataException("The selected agent is invalid.");
+    }
+
+    private static ManagedSessionFailureReason ClassifyCopyFailure(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (ActiveCopyFailures.Contains(current.Message))
+                return ManagedSessionFailureReason.Active;
+            if (ChangedCopyFailures.Contains(current.Message))
+                return ManagedSessionFailureReason.Changed;
+            if (DestinationCopyFailures.Contains(current.Message))
+                return ManagedSessionFailureReason.DestinationUnavailable;
+            if (IncompatibleCopyFailures.Contains(current.Message))
+                return ManagedSessionFailureReason.Incompatible;
+            if (UnreadableCopyFailures.Contains(current.Message) ||
+                current.Message.StartsWith("A working directory is required", StringComparison.Ordinal))
+                return ManagedSessionFailureReason.Unreadable;
+        }
+
+        return ManagedSessionFailureReason.Unspecified;
     }
 
     private static void ValidateConversationIdentity(ManagedSession source, PortableConversation conversation)

@@ -94,6 +94,11 @@ public sealed class SessionManagerApplication(
         {
             throw;
         }
+        catch (ManagedSessionOperationException exception)
+        {
+            view.ShowMessage(CopyFailureMessage(exception.Reason, source), true);
+            return state;
+        }
         catch (Exception)
         {
             view.ShowMessage($"Copy failed for session {SafeId(source.SessionId)}.", true);
@@ -148,6 +153,18 @@ public sealed class SessionManagerApplication(
 
         return source;
     }
+
+    private static string CopyFailureMessage(ManagedSessionFailureReason reason, ManagedSession source) =>
+        reason switch
+        {
+            ManagedSessionFailureReason.Active => "Active sessions cannot be copied.",
+            ManagedSessionFailureReason.Unreadable => "This session cannot be copied.",
+            ManagedSessionFailureReason.Changed => "The session changed. Copy was cancelled.",
+            ManagedSessionFailureReason.DestinationUnavailable =>
+                source.Agent == ManagedAgent.Codex ? "Grok is not available." : "Codex is not available.",
+            ManagedSessionFailureReason.Incompatible => "Codex rejected the copied session.",
+            _ => $"Copy failed for session {SafeId(source.SessionId)}."
+        };
 
     private static string SafeId(string sessionId) =>
         !string.IsNullOrWhiteSpace(sessionId) && sessionId.Length <= 64 &&
