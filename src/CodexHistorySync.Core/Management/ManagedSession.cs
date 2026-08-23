@@ -28,9 +28,26 @@ public interface ILocalSessionOperations
 
 public enum ManagedSessionOperationFailure { Copy, Delete }
 
+public enum ManagedSessionFailureReason
+{
+    Unspecified,
+    Active,
+    Unreadable,
+    Changed,
+    DestinationUnavailable,
+    Incompatible
+}
+
 public sealed class ManagedSessionOperationException : Exception
 {
     public ManagedSessionOperationException(ManagedSessionOperationFailure failure)
+        : this(failure, ManagedSessionFailureReason.Unspecified)
+    {
+    }
+
+    public ManagedSessionOperationException(
+        ManagedSessionOperationFailure failure,
+        ManagedSessionFailureReason reason)
         : base(failure switch
         {
             ManagedSessionOperationFailure.Copy => "The session copy failed.",
@@ -39,9 +56,11 @@ public sealed class ManagedSessionOperationException : Exception
         })
     {
         Failure = failure;
+        Reason = reason;
     }
 
     public ManagedSessionOperationFailure Failure { get; }
+    public ManagedSessionFailureReason Reason { get; }
 }
 
 public interface IManagedSessionActiveState

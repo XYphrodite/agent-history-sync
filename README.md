@@ -40,8 +40,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Pin a version; force PATH yes/no without prompting
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.1 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.1 -NoPath
 ```
 
 **From a local build:**
@@ -152,8 +152,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Конкретная версия; PATH без вопроса
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.0 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.1 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.5.1 -NoPath
 ```
 
 **Из локальной сборки:**

@@ -90,6 +90,43 @@ public sealed class SessionManagerApplicationTests
         Assert.DoesNotContain(injectedException, displayed, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(ManagedSessionFailureReason.Active, "Active sessions cannot be copied.")]
+    [InlineData(ManagedSessionFailureReason.Unreadable, "This session cannot be copied.")]
+    [InlineData(ManagedSessionFailureReason.Changed, "The session changed. Copy was cancelled.")]
+    [InlineData(ManagedSessionFailureReason.DestinationUnavailable, "Grok is not available.")]
+    [InlineData(ManagedSessionFailureReason.Incompatible, "Codex rejected the copied session.")]
+    [InlineData(ManagedSessionFailureReason.Unspecified, "Copy failed for session safe-id.")]
+    public async Task Copy_failures_use_classified_safe_messages(
+        ManagedSessionFailureReason reason, string expected)
+    {
+        var catalog = new MutableCatalog(Snapshot([Session(ManagedAgent.Codex, "safe-id")], []));
+        var view = new ScriptedView(SessionManagerCommand.Copy, SessionManagerCommand.Exit);
+        var application = new SessionManagerApplication(catalog,
+            new FailingOperations(new ManagedSessionOperationException(ManagedSessionOperationFailure.Copy, reason)),
+            view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Contains(view.Messages, message => message.Message == expected && message.IsError);
+        Assert.DoesNotContain(view.Messages, message => message.Message.Contains("injected", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Copy_destination_unavailable_names_codex_when_copying_from_grok()
+    {
+        var catalog = new MutableCatalog(Snapshot([], [Session(ManagedAgent.Grok, "safe-id")]));
+        var view = new ScriptedView(SessionManagerCommand.FocusRight, SessionManagerCommand.Copy, SessionManagerCommand.Exit);
+        var application = new SessionManagerApplication(catalog,
+            new FailingOperations(new ManagedSessionOperationException(
+                ManagedSessionOperationFailure.Copy, ManagedSessionFailureReason.DestinationUnavailable)),
+            view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Contains(view.Messages, message => message.Message == "Codex is not available." && message.IsError);
+    }
+
     [Fact]
     public async Task Operation_failure_keeps_catalog_safe_session_id_characters()
     {
