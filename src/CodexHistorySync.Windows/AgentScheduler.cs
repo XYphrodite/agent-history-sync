@@ -35,8 +35,7 @@ internal static class AgentTaskDefinitionParser
         var principalUser = principal?.Element(ns + "UserId")?.Value ?? string.Empty;
         var triggerUser = logon?.Element(ns + "UserId")?.Value ?? string.Empty;
         var exact = exec is not null && logon is not null &&
-            !string.IsNullOrWhiteSpace(principalUser) && !string.IsNullOrWhiteSpace(triggerUser) &&
-            StringComparer.OrdinalIgnoreCase.Equals(principalUser, triggerUser);
+            AgentScheduler.SameWindowsUser(principalUser, triggerUser);
         return new AgentTaskRegistration(name,
             exec?.Element(ns + "Command")?.Value ?? string.Empty,
             exec?.Element(ns + "Arguments")?.Value ?? string.Empty,
@@ -135,7 +134,35 @@ public sealed class AgentScheduler : IAgentInstallationChecker
         StringComparer.Ordinal.Equals(actual.Name, expected.Name) &&
         StringComparer.OrdinalIgnoreCase.Equals(CanonicalExecutable(actual.ExecutablePath), expected.ExecutablePath) &&
         StringComparer.Ordinal.Equals(actual.Arguments, expected.Arguments) &&
-        StringComparer.OrdinalIgnoreCase.Equals(actual.UserId, expected.UserId);
+        SameWindowsUser(actual.UserId, expected.UserId);
+
+    internal static bool IsMissingScheduledTask(Exception exception) =>
+        exception is FileNotFoundException ||
+        exception is COMException com && (uint)com.HResult is 0x80070002 or 0x8004130F;
+
+    internal static bool SameWindowsUser(string left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return false;
+        if (StringComparer.OrdinalIgnoreCase.Equals(left, right)) return true;
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            return StringComparer.OrdinalIgnoreCase.Equals(ToSid(left), ToSid(right));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IdentityNotMappedException or SystemException)
+        {
+            return false;
+        }
+    }
+
+    private static string ToSid(string value)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Windows identity translation requires Windows.");
+        if (value.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase))
+            return new SecurityIdentifier(value).Value;
+        return ((SecurityIdentifier)new NTAccount(value).Translate(typeof(SecurityIdentifier))).Value;
+    }
 
     private static string CanonicalExecutable(string path)
     {
@@ -172,7 +199,7 @@ public sealed class AgentScheduler : IAgentInstallationChecker
                     dynamic task = folder.GetTask(name);
                     return Task.FromResult<AgentTaskRegistration?>(AgentTaskDefinitionParser.Parse(name, (string)task.Xml));
                 }
-                catch (COMException exception) when ((uint)exception.HResult is 0x80070002 or 0x8004130F)
+                catch (Exception exception) when (IsMissingScheduledTask(exception))
                 {
                     return Task.FromResult<AgentTaskRegistration?>(null);
                 }
@@ -217,7 +244,13 @@ public sealed class AgentScheduler : IAgentInstallationChecker
             try
             {
                 dynamic folder = service.GetFolder("\\");
-                folder.DeleteTask(name, 0);
+                try
+                {
+                    folder.DeleteTask(name, 0);
+                }
+                catch (Exception exception) when (IsMissingScheduledTask(exception))
+                {
+                }
                 return Task.CompletedTask;
             }
             finally { Release(service); }

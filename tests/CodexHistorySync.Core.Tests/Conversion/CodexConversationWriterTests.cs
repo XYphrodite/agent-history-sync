@@ -452,7 +452,7 @@ public sealed class CodexConversationWriterTests
         Assert.Equal(conversation.CreatedAt.ToString("O"), payload.GetProperty("timestamp").GetString());
         Assert.Equal(conversation.WorkingDirectory, payload.GetProperty("cwd").GetString());
         Assert.Equal("codex-history-sync", payload.GetProperty("originator").GetString());
-        Assert.Equal("0.5.1", payload.GetProperty("cli_version").GetString());
+        Assert.Equal("0.5.2", payload.GetProperty("cli_version").GetString());
         Assert.Equal(JsonValueKind.Null, payload.GetProperty("model_provider").ValueKind);
         Assert.Equal(JsonValueKind.Null, payload.GetProperty("base_instructions").ValueKind);
         var responseItems = new List<JsonDocument>();
