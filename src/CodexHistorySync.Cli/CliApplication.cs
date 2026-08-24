@@ -9,7 +9,16 @@ public sealed record CliInitializationResult(string RepositoryId);
 public sealed record CliAuthenticatedRepository(string RepositoryId, string RemoteRevision);
 public sealed record CliJoinPlan(int Local, int Remote, int Pending, int Conflicts);
 public sealed record CliStatusReport(int Local, int Remote, int Pending, int Conflicts, string RemoteRevision,
-    string LastSuccessfulRevision);
+    string LastSuccessfulRevision)
+{
+    /// <summary>Resolved Claude projects root, or null when no Claude home was found.</summary>
+    public string? ClaudeHome { get; init; }
+
+    public int ClaudeSessions { get; init; }
+
+    /// <summary>True when the Claude scan could not confirm what it did not find.</summary>
+    public bool ClaudeUncertain { get; init; }
+}
 public sealed record CliDoctorCheck(string Name, bool Passed);
 public sealed record CliDoctorReport(IReadOnlyList<CliDoctorCheck> Checks);
 public sealed record CliConflictInfo(string Id, string LocalHash, string RemoteHash, string LocalDeviceId,
@@ -212,6 +221,8 @@ public sealed class CliApplication
         var result = await Services.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         console.WriteLine($"local={result.Local} remote={result.Remote} pending={result.Pending} conflicts={result.Conflicts} " +
             $"remote-revision={SafeToken(result.RemoteRevision)} last-successful-revision={SafeToken(result.LastSuccessfulRevision)}");
+        console.WriteLine($"claude-home={(result.ClaudeHome is null ? "none" : SafeToken(result.ClaudeHome))} " +
+            $"claude-sessions={result.ClaudeSessions} claude-uncertain={(result.ClaudeUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

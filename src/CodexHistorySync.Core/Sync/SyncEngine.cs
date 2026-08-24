@@ -31,6 +31,12 @@ public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int Re
     IReadOnlySet<string> ConflictIdentities)
 {
     public int Conflicts => ConflictIdentities.Count;
+
+    /// <summary>Local session count per kind, taken from the same scan the plan was built on.</summary>
+    public IReadOnlyDictionary<ObjectKind, int> LocalByKind { get; init; } = new Dictionary<ObjectKind, int>();
+
+    /// <summary>Kinds whose local absence could not be confirmed, so their counts may be short.</summary>
+    public IReadOnlySet<ObjectKind> UncertainKinds { get; init; } = new HashSet<ObjectKind>();
 }
 public sealed record SyncConflictResolutionResult(int RemainingConflicts, bool Exported);
 
@@ -494,7 +500,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 .Select(ConflictIdentity).ToHashSet(StringComparer.Ordinal);
             var pending = plan.Actions.Count(action => IsApplicablePreviewChange(action.Kind, mode));
             return new SyncPreview(snapshot.Revision, scan.Objects.Count,
-                remote.Versions.Values.Count(value => !value.IsDeleted), pending, conflicts);
+                remote.Versions.Values.Count(value => !value.IsDeleted), pending, conflicts)
+            {
+                LocalByKind = scan.Objects.GroupBy(item => item.Kind)
+                    .ToDictionary(group => group.Key, group => group.Count()),
+                UncertainKinds = scan.UncertainKinds.ToHashSet()
+            };
         }
         finally { _mutex.Release(); }
     }

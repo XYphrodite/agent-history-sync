@@ -183,7 +183,7 @@ public sealed class CodexConversationWriter : IConversationWriter
             json.WriteString("cwd", conversation.WorkingDirectory);
             json.WriteString("title", conversation.Title);
             json.WriteString("originator", "codex-history-sync");
-            json.WriteString("cli_version", "0.5.2");
+            json.WriteString("cli_version", "0.6.0");
             json.WriteNull("model_provider");
             json.WriteNull("base_instructions");
             json.WriteEndObject();
