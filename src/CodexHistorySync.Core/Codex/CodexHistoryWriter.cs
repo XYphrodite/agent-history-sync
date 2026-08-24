@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
@@ -26,6 +27,7 @@ public sealed class CodexHistoryWriter
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly CodexPaths _paths;
     private readonly GrokPaths? _grokPaths;
+    private readonly ClaudePaths? _claudePaths;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
     private readonly IAtomicFileSystem _fileSystem;
@@ -33,19 +35,20 @@ public sealed class CodexHistoryWriter
     internal readonly record struct RollbackCapture(string Path, string? BackupId);
 
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
-        IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null)
+        IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _backups = backups ?? throw new ArgumentNullException(nameof(backups));
         _processDetector = processDetector ?? throw new ArgumentNullException(nameof(processDetector));
         _fileSystem = fileSystem ?? new AtomicFileSystem();
         _grokPaths = grokPaths;
+        _claudePaths = claudePaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -57,13 +60,16 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
 
         if (incoming.Kind == ObjectKind.GrokSession)
             return await ImportGrokPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.ClaudeSession)
+            return await ImportClaudePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
 
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -97,7 +103,7 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
@@ -157,6 +163,40 @@ public sealed class CodexHistoryWriter
         }
     }
 
+    private async Task<ImportApplyResult> ImportClaudePackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_claudePaths is null) throw new InvalidOperationException("Claude paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = ClaudeSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        var package = ClaudeSessionPackage.Parse(packageBytes);
+        if (!string.Equals(ClaudeSessionPackage.ToLogicalId(package.SessionId), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Claude session package id does not match the logical object id.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.ClaudeSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+
+        try
+        {
+            EnsureCodexInactive();
+            ClaudeSessionPackage.Materialize(package, _claudePaths);
+            var after = await ContentHashAsync(destination, ObjectKind.ClaudeSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Claude session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
     private async Task WaitIfRunningAsync(CancellationToken ct)
     {
         if (_processDetector.IsRunning()) await _processDetector.WaitForExitAsync(ct).ConfigureAwait(false);
@@ -166,7 +206,7 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
         if (!await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
@@ -181,14 +221,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
@@ -244,6 +284,20 @@ public sealed class CodexHistoryWriter
 
     private static async Task<ContentHash?> ContentHashAsync(string destination, ObjectKind kind, CancellationToken ct)
     {
+        if (kind == ObjectKind.ClaudeSession)
+        {
+            if (!File.Exists(destination)) return null;
+            try
+            {
+                return ClaudeSessionPackage.HashPackage(ClaudeSessionPackage.BuildFromFile(destination));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
+                                                  or JsonException or DecoderFallbackException or ArgumentException)
+            {
+                return null;
+            }
+        }
+
         if (kind == ObjectKind.GrokSession)
         {
             if (!File.Exists(destination)) return null;

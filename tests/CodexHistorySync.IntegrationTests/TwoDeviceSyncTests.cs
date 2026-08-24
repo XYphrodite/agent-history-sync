@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Model;
@@ -26,6 +28,10 @@ public sealed class TwoDeviceSyncTests : IDisposable
         const string promptMarker = "prompt marker never stored remotely";
         await WriteSessionAsync(first.Paths.Sessions, "session-a", promptMarker);
         await WriteSessionAsync(second.Paths.Sessions, "session-b", "second device text");
+        const string claudeProject = "c--Repos-Demo";
+        const string claudeId = "40000000-0000-0000-0000-000000000004";
+        const string claudeMarker = "claude turn never stored remotely";
+        var claudeSource = await WriteClaudeSessionAsync(first.ClaudePaths, claudeProject, claudeId, claudeMarker);
 
         await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
         await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
@@ -35,6 +41,10 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var secondHashes = (await new SessionScanner(TimeSpan.Zero).ScanAsync(second.Paths, CancellationToken.None)).Select(x => x.Hash).OrderBy(x => x.Hex).ToArray();
         Assert.Equal(2, firstHashes.Length);
         Assert.Equal(firstHashes, secondHashes);
+        var claudeCopy = Path.Combine(second.ClaudePaths.Projects, claudeProject, claudeId + ".jsonl");
+        Assert.True(File.Exists(claudeCopy), "the Claude transcript was not materialized on the second device");
+        Assert.Equal(File.ReadAllBytes(claudeSource), File.ReadAllBytes(claudeCopy));
+        Assert.DoesNotContain(claudeMarker, ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
         Assert.Empty(Directory.EnumerateFiles(remote, "*.jsonl", SearchOption.AllDirectories));
         Assert.DoesNotContain(promptMarker, ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
         Assert.All(Directory.EnumerateFiles(Path.Combine(first.ProviderRoot, "repository", "git"), "*", SearchOption.AllDirectories)
@@ -50,15 +60,21 @@ public sealed class TwoDeviceSyncTests : IDisposable
         Directory.CreateDirectory(paths.Sessions);
         var local = Path.Combine(_root, name, "local");
         var providerRoot = Path.Combine(_root, name, "provider");
-        var backups = new BackupStore("repository", local, paths);
+        var claudeHome = Path.Combine(_root, name, "claude");
+        var claudePaths = new ClaudePaths(claudeHome, Path.Combine(claudeHome, "projects"));
+        Directory.CreateDirectory(claudePaths.Projects);
+        var backups = new BackupStore("repository", local, paths, claudePaths: claudePaths);
         var engine = new SyncEngine(
             "repository", name, paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
-            new CodexHistoryWriter(paths, backups, new StoppedCodexDetector()),
+            new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: claudePaths),
             new ConflictStore("repository", local, paths),
             new GitStorageProvider("repository", remote, GitRemoteKind.Local, providerRoot),
-            Path.Combine(local, "staging"));
-        return new Device(paths, providerRoot, engine);
+            Path.Combine(local, "staging"),
+            claudePaths: claudePaths,
+            // A real process probe would defer every freshly written transcript (design D3).
+            claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false));
+        return new Device(paths, claudePaths, providerRoot, engine);
     }
 
     private static async Task WriteSessionAsync(string directory, string id, string text)
@@ -66,6 +82,17 @@ public sealed class TwoDeviceSyncTests : IDisposable
         Directory.CreateDirectory(directory);
         var content = $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n{{\"type\":\"message\",\"payload\":{{\"text\":\"{text}\"}}}}\n";
         await File.WriteAllTextAsync(Path.Combine(directory, id + ".jsonl"), content, new UTF8Encoding(false));
+    }
+
+    private static async Task<string> WriteClaudeSessionAsync(ClaudePaths paths, string project, string sessionId, string text)
+    {
+        var directory = Path.Combine(paths.Projects, project);
+        Directory.CreateDirectory(directory);
+        var transcript = Path.Combine(directory, sessionId + ".jsonl");
+        var record = $"{{\"type\":\"user\",\"cwd\":\"{JsonEncodedText.Encode(directory)}\",\"sessionId\":\"{sessionId}\"," +
+            $"\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n";
+        await File.WriteAllTextAsync(transcript, record, new UTF8Encoding(false));
+        return transcript;
     }
 
     private static string ReadAllRemoteBytesAsText(string remote) =>
@@ -89,7 +116,7 @@ public sealed class TwoDeviceSyncTests : IDisposable
         Directory.Delete(_root, recursive: true);
     }
 
-    private sealed record Device(CodexPaths Paths, string ProviderRoot, SyncEngine Engine);
+    private sealed record Device(CodexPaths Paths, ClaudePaths ClaudePaths, string ProviderRoot, SyncEngine Engine);
     private sealed class StoppedCodexDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;

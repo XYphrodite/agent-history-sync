@@ -40,12 +40,13 @@
 ## Task 3: Sync engine, writer, backups
 
 - [x] Append `ClaudeSession` to `ObjectKind` in `Model/SyncModels.cs` with the doc comment naming the projects-only policy.
-- [ ] `PathSafety.EnsureOutsideCodex` and `EnsureSessionDestination` accept `ClaudePaths?`: destination must be exactly one level under `Projects` and named `<uuid>.jsonl`.
-- [ ] `SyncEngine`: scan Claude in parallel with Codex/Grok; merge objects, `UncertainKinds`, `DuplicateIds`; `ResolveClaudeDestination`; stage with `.claudepkg` ([SyncEngine.cs:1117](../../../src/CodexHistorySync.Core/Sync/SyncEngine.cs#L1117)).
-- [ ] Extend the live-session deferral heuristic that matches the literal `"Grok session"` ([SyncEngine.cs:243](../../../src/CodexHistorySync.Core/Sync/SyncEngine.cs#L243)) to cover Claude.
-- [ ] `CodexHistoryWriter.ImportClaudePackageAsync` mirroring `ImportGrokPackageAsync`, including the post-materialization hash re-check and the logical-id/package-id equality check.
-- [ ] `BackupStore` adds the Claude projects root to its protected roots ([BackupStore.cs:156](../../../src/CodexHistorySync.Core/Sync/BackupStore.cs#L156)).
-- [ ] Tests: `SyncFailureTests` deferral case, plus a Claude session in the integration round-trip.
+- [x] `PathSafety.EnsureOutsideCodex` and `EnsureSessionDestination` accept `ClaudePaths?`: destination must be exactly one level under `Projects` and named `<uuid>.jsonl`.
+- [x] `SyncEngine`: scan Claude in parallel with Codex/Grok; merge objects, `UncertainKinds`, `DuplicateIds`; `ResolveClaudeDestination`; stage with `.claudepkg` ([SyncEngine.cs:1117](../../../src/CodexHistorySync.Core/Sync/SyncEngine.cs#L1117)).
+- [x] Extend the live-session deferral heuristic that matches the literal `"Grok session"` ([SyncEngine.cs:243](../../../src/CodexHistorySync.Core/Sync/SyncEngine.cs#L243)) to cover Claude.
+- [x] `CodexHistoryWriter.ImportClaudePackageAsync` mirroring `ImportGrokPackageAsync`, including the post-materialization hash re-check and the logical-id/package-id equality check.
+- [x] `HistoryMutationBatch.ValidateJournal` accepts `ClaudeSession` in its journal-kind allow-list, otherwise conflict resolution rejects every Claude mutation.
+- [x] `BackupStore` adds the Claude projects root to its protected roots ([BackupStore.cs:156](../../../src/CodexHistorySync.Core/Sync/BackupStore.cs#L156)).
+- [x] Tests: `SyncFailureTests` deferral case, plus a Claude session in the integration round-trip.
 
 ## Task 4: Conversation reader and writer
 
