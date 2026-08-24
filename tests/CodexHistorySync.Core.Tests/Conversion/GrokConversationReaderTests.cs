@@ -39,6 +39,29 @@ public sealed class GrokConversationReaderTests
     }
 
     [Fact]
+    public async Task ReadAsyncDropsTechnicalWrapperUserTurns()
+    {
+        // Carrying these made every Grok session containing one impossible to copy: the
+        // destination reader drops them on read-back, so the writer's own round-trip check
+        // compared 32 written turns against 28 read ones and refused to publish.
+        await using var fixture = await GrokFixture.CreateAsync();
+        var directory = await fixture.WritePackageAsync(SessionId,
+            """
+            {"type":"user","content":[{"type":"text","text":"<user_info> OS Version: windows"}]}
+            {"type":"user","content":[{"type":"text","text":"<system-reminder> background context"}]}
+            {"type":"user","content":[{"type":"text","text":"real question"}]}
+            {"type":"assistant","content":"real answer"}
+            """,
+            "{\"info\":{\"id\":\"" + SessionId + "\",\"cwd\":\"C:\\\\Repos\\\\Demo\",\"title\":\"Wrapped\"}}");
+
+        var result = await new GrokConversationReader().ReadAsync(directory, CancellationToken.None);
+
+        Assert.Collection(result.Turns,
+            turn => Assert.Equal(new PortableTurn(ConversationRole.User, "real question"), turn),
+            turn => Assert.Equal(new PortableTurn(ConversationRole.Assistant, "real answer"), turn));
+    }
+
+    [Fact]
     public async Task ReadAsyncUsesFirstUserPreviewWhenTitleIsAbsent()
     {
         await using var fixture = await GrokFixture.CreateAsync();
