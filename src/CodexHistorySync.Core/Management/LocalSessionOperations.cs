@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
@@ -16,12 +17,15 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
 {
     private readonly CodexPaths? codexPaths;
     private readonly GrokPaths? grokPaths;
+    private readonly ClaudePaths? claudePaths;
     private readonly IManagedSessionActiveState activeState;
     private readonly IManagedSessionDirectoryDeleter directoryDeleter;
     private readonly IConversationWriter? codexWriter;
     private readonly IConversationWriter? grokWriter;
+    private readonly IConversationWriter? claudeWriter;
     private readonly IConversationReader codexReader;
     private readonly IConversationReader grokReader;
+    private readonly IConversationReader claudeReader;
     private readonly IManagedSessionFingerprintProvider fingerprintProvider;
 
     private static readonly HashSet<string> ActiveCopyFailures = new(StringComparer.Ordinal)
@@ -54,6 +58,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         "The selected Codex target is invalid.",
         "The selected Codex target is outside its native root.",
         "The selected Grok target is invalid.",
+        "The selected Claude target is invalid.",
+        "The selected Claude identity is invalid.",
+        "Claude conversation is invalid.",
+        "The staged Claude conversation failed validation.",
         "The selected Grok identity is invalid.",
         "The selected agent is invalid.",
         "The selected session identity changed.",
@@ -73,7 +81,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IManagedSessionActiveState activeState,
         IManagedSessionDirectoryDeleter directoryDeleter,
         IConversationWriter? codexWriter,
-        IConversationWriter? grokWriter)
+        IConversationWriter? grokWriter,
+        ClaudePaths? claudePaths = null,
+        IConversationWriter? claudeWriter = null)
         : this(
             codexPaths,
             grokPaths,
@@ -82,7 +92,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             codexWriter,
             grokWriter,
             new CodexConversationReader(),
-            new GrokConversationReader())
+            new GrokConversationReader(),
+            null,
+            claudePaths,
+            claudeWriter,
+            new ClaudeConversationReader())
     {
     }
 
@@ -95,10 +109,16 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationWriter? grokWriter,
         IConversationReader codexReader,
         IConversationReader grokReader,
-        IManagedSessionFingerprintProvider? fingerprintProvider = null)
+        IManagedSessionFingerprintProvider? fingerprintProvider = null,
+        ClaudePaths? claudePaths = null,
+        IConversationWriter? claudeWriter = null,
+        IConversationReader? claudeReader = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
+        this.claudePaths = claudePaths;
+        this.claudeWriter = claudeWriter;
+        this.claudeReader = claudeReader ?? new ClaudeConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
         this.codexWriter = codexWriter;
@@ -108,17 +128,47 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.fingerprintProvider = fingerprintProvider ?? SystemFingerprintProvider.Instance;
     }
 
+    public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return ManagedAgents.Destinations(source.Agent).Where(agent => WriterFor(agent) is not null).ToArray();
+    }
+
     public async Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken)
     {
         try
         {
+            ArgumentNullException.ThrowIfNull(source);
+            // Only unambiguous with exactly one other agent configured; the caller picks otherwise.
+            var targets = AvailableCopyTargets(source);
+            if (targets.Count != 1) throw new InvalidOperationException("The destination agent is unavailable.");
+            return await CopyAsync(source, targets[0], cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ManagedSessionOperationException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new ManagedSessionOperationException(
+                ManagedSessionOperationFailure.Copy,
+                ClassifyCopyFailure(exception));
+        }
+    }
+
+    public async Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken)
+    {
+        try
+        {
+            ArgumentNullException.ThrowIfNull(source);
+            if (target == source.Agent) throw new InvalidOperationException("The destination agent is unavailable.");
             var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
-            var writer = source.Agent switch
-            {
-                ManagedAgent.Codex => grokWriter,
-                ManagedAgent.Grok => codexWriter,
-                _ => null
-            } ?? throw new InvalidOperationException("The destination agent is unavailable.");
+            var writer = WriterFor(target)
+                ?? throw new InvalidOperationException("The destination agent is unavailable.");
             return await CopyAfterFinalValidationAsync(
                     source, validated, writer, cancellationToken)
                 .ConfigureAwait(false);
@@ -153,6 +203,26 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         }
     }
 
+    private IConversationWriter? WriterFor(ManagedAgent agent) => agent switch
+    {
+        ManagedAgent.Codex => codexWriter,
+        ManagedAgent.Grok => grokWriter,
+        ManagedAgent.Claude => claudeWriter,
+        _ => null
+    };
+
+    private IConversationReader ReaderFor(ManagedAgent agent) => agent switch
+    {
+        ManagedAgent.Codex => codexReader,
+        ManagedAgent.Grok => grokReader,
+        ManagedAgent.Claude => claudeReader,
+        _ => throw new InvalidDataException("The selected agent is invalid.")
+    };
+
+    /// <summary>Codex and Claude keep one file per session; Grok keeps a directory package.</summary>
+    internal static bool IsFileBackedAgent(ManagedAgent agent) =>
+        agent is ManagedAgent.Codex or ManagedAgent.Claude;
+
     private async Task<ValidatedSource> ReadAndValidateAsync(
         ManagedSession source,
         CancellationToken cancellationToken)
@@ -165,7 +235,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         var target = ValidateTarget(source);
         var before = await fingerprintProvider.CaptureAsync(target.NativePath, source.Agent, cancellationToken)
             .ConfigureAwait(false);
-        var reader = source.Agent == ManagedAgent.Codex ? codexReader : grokReader;
+        var reader = ReaderFor(source.Agent);
         var conversation = await reader.ReadAsync(target.NativePath, cancellationToken).ConfigureAwait(false);
         ValidateConversationIdentity(source, conversation);
         conversation = WithCatalogTitle(source, conversation);
@@ -208,7 +278,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         RequireUnchangedImmediately(source, validated, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (source.Agent == ManagedAgent.Codex)
+        if (IsFileBackedAgent(source.Agent))
         {
             File.Delete(validated.NativePath);
             return;
@@ -332,6 +402,30 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
                 nativePath);
         }
 
+        if (source.Agent == ManagedAgent.Claude)
+        {
+            if (claudePaths is null ||
+                !string.Equals(
+                    Path.GetFileNameWithoutExtension(Path.GetFullPath(source.NativePath)),
+                    source.SessionId,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(Path.GetExtension(source.NativePath), ".jsonl", StringComparison.OrdinalIgnoreCase) ||
+                !ManagedSessionPathPolicy.TryResolveConcreteTarget(
+                    source.NativePath, claudePaths.Projects, expectDirectory: false, out var nativePath))
+                throw new InvalidDataException("The selected Claude target is invalid.");
+            try
+            {
+                _ = ClaudeSessionPackage.ToLogicalId(source.SessionId);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException("The selected Claude identity is invalid.", exception);
+            }
+            return new Target(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(claudePaths.Projects)),
+                nativePath);
+        }
+
         throw new InvalidDataException("The selected agent is invalid.");
     }
 
@@ -357,7 +451,13 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
 
     private static void ValidateConversationIdentity(ManagedSession source, PortableConversation conversation)
     {
-        var expectedAgent = source.Agent == ManagedAgent.Codex ? ConversationAgent.Codex : ConversationAgent.Grok;
+        var expectedAgent = source.Agent switch
+        {
+            ManagedAgent.Codex => ConversationAgent.Codex,
+            ManagedAgent.Grok => ConversationAgent.Grok,
+            ManagedAgent.Claude => ConversationAgent.Claude,
+            _ => throw new InvalidDataException("The selected agent is invalid.")
+        };
         if (conversation.SourceAgent != expectedAgent ||
             !string.Equals(conversation.SourceSessionId, source.SessionId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The selected session identity changed.");
@@ -378,7 +478,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent agent,
         CancellationToken cancellationToken)
     {
-        if (agent == ManagedAgent.Codex)
+        if (IsFileBackedAgent(agent))
             return await HashFileAsync(nativePath, cancellationToken).ConfigureAwait(false);
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -409,7 +509,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (agent == ManagedAgent.Codex)
+        if (IsFileBackedAgent(agent))
             return HashFileImmediate(nativePath, cancellationToken);
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
@@ -1221,6 +1222,60 @@ public sealed class LocalSessionCatalogTests
         Assert.DoesNotContain(snapshot.Grok, session => session.SessionId == outsideId);
     }
 
+
+    [Fact]
+    public async Task ScanAsync_ListsClaudeSessionsWithTheirOfficialTitle()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Official Claude title", "the first user turn", "2026-08-24T10:00:00Z");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        var session = Assert.Single(snapshot.Claude);
+        Assert.Equal(ManagedAgent.Claude, session.Agent);
+        Assert.Equal("80000000-0000-0000-0000-000000000008", session.SessionId);
+        Assert.Equal("Official Claude title", session.Title);
+        Assert.True(session.CanRead);
+        Assert.Equal(snapshot.Claude, snapshot.For(ManagedAgent.Claude));
+    }
+
+    [Fact]
+    public async Task ScanAsync_FallsBackToTheFirstUserTurnWhenNoTitleRecordExists()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", null, "no title record here", "2026-08-24T10:00:00Z");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal("no title record here", Assert.Single(snapshot.Claude).Title);
+    }
+
+    [Fact]
+    public async Task ScanAsync_DemotesAClaudeSessionThatExistsUnderTwoProjects()
+    {
+        // The same id in two project directories: neither copy can be trusted as the session.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "First", "one", "2026-08-24T10:00:00Z", "c--Repos-Demo");
+        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Second", "two", "2026-08-24T11:00:00Z", "c--Repos-Other");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal(2, snapshot.Claude.Count);
+        Assert.All(snapshot.Claude, session => Assert.False(session.CanRead));
+    }
+
+    [Fact]
+    public async Task ScanAsync_MarksAClaudeSessionActiveWhenTheActiveStateSaysSo()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Live", "still typing", "2026-08-24T10:00:00Z");
+        fixture.ActiveState.ActiveIds.Add("80000000-0000-0000-0000-000000000008");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.True(Assert.Single(snapshot.Claude).IsActive);
+    }
+
     private sealed class CatalogFixture : IAsyncDisposable
     {
         private static readonly UTF8Encoding Utf8 = new(false);
@@ -1234,30 +1289,64 @@ public sealed class LocalSessionCatalogTests
             Directory.CreateDirectory(Root);
             CodexHome = Path.Combine(Root, "codex-home");
             GrokHome = Path.Combine(Root, "grok-home");
+            ClaudeHome = Path.Combine(Root, "claude-home");
             WorkingDirectory = Path.Combine(Root, "working-directory");
             Directory.CreateDirectory(CodexHome);
             Directory.CreateDirectory(GrokHome);
+            Directory.CreateDirectory(ClaudeHome);
             Directory.CreateDirectory(WorkingDirectory);
             CodexPaths = CodexPaths.ResolveLayout(CodexHome);
             GrokPaths = new GrokPaths(GrokHome, Path.Combine(GrokHome, "sessions"));
+            ClaudePaths = new ClaudePaths(ClaudeHome, Path.Combine(ClaudeHome, "projects"));
             if (createNativeRoots)
             {
                 Directory.CreateDirectory(CodexPaths.Sessions);
                 Directory.CreateDirectory(CodexPaths.ArchivedSessions);
                 Directory.CreateDirectory(GrokPaths.Sessions);
+                Directory.CreateDirectory(ClaudePaths.Projects);
             }
         }
 
         public string Root { get; }
         public string CodexHome { get; }
         public string GrokHome { get; }
+        public string ClaudeHome { get; }
         public string WorkingDirectory { get; }
         public CodexPaths CodexPaths { get; }
         public GrokPaths GrokPaths { get; }
+        public ClaudePaths ClaudePaths { get; }
         public FakeActiveState ActiveState { get; } = new();
         public List<string> ReparsePaths { get; } = [];
 
-        public LocalSessionCatalog CreateCatalog() => new(CodexPaths, GrokPaths, ActiveState);
+        public LocalSessionCatalog CreateCatalog() => new(CodexPaths, GrokPaths, ActiveState, ClaudePaths);
+
+        public async Task<string> WriteClaudeAsync(
+            string id,
+            string? aiTitle,
+            string userText,
+            string modifiedAt,
+            string project = "c--Repos-Demo")
+        {
+            var directory = Path.Combine(ClaudePaths.Projects, project);
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, id + ".jsonl");
+            var records = new List<string>
+            {
+                JsonSerializer.Serialize(new
+                {
+                    type = "user",
+                    isSidechain = false,
+                    sessionId = id,
+                    cwd = WorkingDirectory,
+                    timestamp = modifiedAt,
+                    message = new { role = "user", content = new[] { new { type = "text", text = userText } } }
+                })
+            };
+            if (aiTitle is not null)
+                records.Add(JsonSerializer.Serialize(new { type = "ai-title", aiTitle, sessionId = id }));
+            await File.WriteAllTextAsync(path, string.Join('\n', records) + "\n", Utf8);
+            return path;
+        }
 
         public async Task<string> WriteCodexAsync(string id, string? title, string userText, string modifiedAt)
         {

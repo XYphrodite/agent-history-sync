@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
@@ -537,6 +538,122 @@ public sealed class LocalSessionOperationsTests
             Assert.DoesNotContain(sensitive, exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+
+    [Fact]
+    public async Task CopyAsync_SendsAClaudeSessionToEitherExplicitTarget()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Claude title", "question", "answer");
+        var operations = fixture.CreateOperations(withClaude: true);
+        var session = fixture.Session(ManagedAgent.Claude, "80000000-0000-0000-0000-000000000008", path);
+
+        await operations.CopyAsync(session, ManagedAgent.Codex, CancellationToken.None);
+        await operations.CopyAsync(session, ManagedAgent.Grok, CancellationToken.None);
+
+        var toCodex = Assert.Single(fixture.CodexWriter.Conversations);
+        var toGrok = Assert.Single(fixture.GrokWriter.Conversations);
+        foreach (var copy in new[] { toCodex, toGrok })
+        {
+            Assert.Equal(ConversationAgent.Claude, copy.SourceAgent);
+            Assert.Equal("Claude title", copy.Title);
+            Assert.Equal(
+                [new PortableTurn(ConversationRole.User, "question"), new PortableTurn(ConversationRole.Assistant, "answer")],
+                copy.Turns);
+        }
+    }
+
+    [Fact]
+    public async Task CopyAsync_AcceptsAClaudeDestinationFromAnotherAgent()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteCodexAsync("codex-to-claude", "Codex title", "question", "answer");
+        var operations = fixture.CreateOperations(withClaude: true);
+
+        await operations.CopyAsync(
+            fixture.Session(ManagedAgent.Codex, "codex-to-claude", path), ManagedAgent.Claude, CancellationToken.None);
+
+        Assert.Equal(ConversationAgent.Codex, Assert.Single(fixture.ClaudeWriter.Conversations).SourceAgent);
+        Assert.Empty(fixture.GrokWriter.Conversations);
+    }
+
+    [Fact]
+    public async Task AvailableCopyTargets_ListsTheOtherConfiguredAgentsOnly()
+    {
+        await using var fixture = new OperationsFixture();
+        var codexPath = await fixture.WriteCodexAsync("codex-targets", "Codex title", "question", "answer");
+        var codexSession = fixture.Session(ManagedAgent.Codex, "codex-targets", codexPath);
+        var claudePath = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Claude title", "question", "answer");
+        var claudeSession = fixture.Session(ManagedAgent.Claude, "80000000-0000-0000-0000-000000000008", claudePath);
+
+        Assert.Equal(
+            [ManagedAgent.Grok, ManagedAgent.Claude],
+            fixture.CreateOperations(withClaude: true).AvailableCopyTargets(codexSession));
+        // An unconfigured Claude home leaves the two-panel machine exactly as it was.
+        Assert.Equal([ManagedAgent.Grok], fixture.CreateOperations().AvailableCopyTargets(codexSession));
+        Assert.Equal(
+            [ManagedAgent.Codex, ManagedAgent.Grok],
+            fixture.CreateOperations(withClaude: true).AvailableCopyTargets(claudeSession));
+    }
+
+    [Fact]
+    public async Task CopyAsync_WithoutATargetIsAmbiguousWhenTwoDestinationsExist()
+    {
+        // Three agents make the implicit destination undecidable; the caller must choose.
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Claude title", "question", "answer");
+        var operations = fixture.CreateOperations(withClaude: true);
+
+        var failure = await Assert.ThrowsAsync<ManagedSessionOperationException>(
+            () => operations.CopyAsync(fixture.Session(ManagedAgent.Claude, "80000000-0000-0000-0000-000000000008", path), CancellationToken.None));
+
+        Assert.Equal(ManagedSessionFailureReason.DestinationUnavailable, failure.Reason);
+        Assert.Empty(fixture.CodexWriter.Conversations);
+        Assert.Empty(fixture.GrokWriter.Conversations);
+    }
+
+    [Fact]
+    public async Task CopyAsync_RefusesAnActiveClaudeSession()
+    {
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Claude title", "question", "answer");
+        fixture.ActiveState.ActiveIds.Add("80000000-0000-0000-0000-000000000008");
+        var session = fixture.Session(ManagedAgent.Claude, "80000000-0000-0000-0000-000000000008", path) with { IsActive = true };
+
+        var failure = await Assert.ThrowsAsync<ManagedSessionOperationException>(
+            () => fixture.CreateOperations(withClaude: true).CopyAsync(session, ManagedAgent.Codex, CancellationToken.None));
+
+        Assert.Equal(ManagedSessionFailureReason.Active, failure.Reason);
+        Assert.Empty(fixture.CodexWriter.Conversations);
+    }
+
+    [Fact]
+    public async Task CopyAsync_RefusesAClaudeTargetOutsideTheProjectsRoot()
+    {
+        await using var fixture = new OperationsFixture();
+        var outside = Path.Combine(fixture.Root, "81000000-0000-0000-0000-000000000009.jsonl");
+        await File.WriteAllTextAsync(outside, "{}\n");
+
+        var failure = await Assert.ThrowsAsync<ManagedSessionOperationException>(
+            () => fixture.CreateOperations(withClaude: true).CopyAsync(
+                fixture.Session(ManagedAgent.Claude, "81000000-0000-0000-0000-000000000009", outside), ManagedAgent.Codex, CancellationToken.None));
+
+        Assert.Equal(ManagedSessionFailureReason.Unreadable, failure.Reason);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_RemovesTheClaudeTranscriptFileItself()
+    {
+        // Claude is file-backed like Codex, so deletion must not go through the directory deleter.
+        await using var fixture = new OperationsFixture();
+        var path = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Claude title", "question", "answer");
+
+        await fixture.CreateOperations(withClaude: true).DeleteAsync(
+            fixture.Session(ManagedAgent.Claude, "80000000-0000-0000-0000-000000000008", path), CancellationToken.None);
+
+        Assert.False(File.Exists(path));
+        Assert.Empty(fixture.DirectoryDeleter.Deletions);
+    }
+
     private sealed class OperationsFixture : IAsyncDisposable
     {
         private static readonly UTF8Encoding Utf8 = new(false);
@@ -551,24 +668,30 @@ public sealed class LocalSessionOperationsTests
             Directory.CreateDirectory(Root);
             var codexHome = Path.Combine(Root, "codex-home");
             var grokHome = Path.Combine(Root, "grok-home");
+            var claudeHome = Path.Combine(Root, "claude-home");
             WorkingDirectory = Path.Combine(Root, "working-directory");
             Directory.CreateDirectory(codexHome);
             Directory.CreateDirectory(grokHome);
+            Directory.CreateDirectory(claudeHome);
             Directory.CreateDirectory(WorkingDirectory);
             CodexPaths = CodexPaths.ResolveLayout(codexHome);
             GrokPaths = new GrokPaths(grokHome, Path.Combine(grokHome, "sessions"));
+            ClaudePaths = new ClaudePaths(claudeHome, Path.Combine(claudeHome, "projects"));
             Directory.CreateDirectory(CodexPaths.Sessions);
             Directory.CreateDirectory(CodexPaths.ArchivedSessions);
             Directory.CreateDirectory(GrokPaths.Sessions);
+            Directory.CreateDirectory(ClaudePaths.Projects);
         }
 
         public string Root { get; }
         public string WorkingDirectory { get; }
         public CodexPaths CodexPaths { get; }
         public GrokPaths GrokPaths { get; }
+        public ClaudePaths ClaudePaths { get; }
         public FakeActiveState ActiveState { get; } = new();
         public RecordingWriter CodexWriter { get; } = new("codex-result");
         public RecordingWriter GrokWriter { get; } = new("grok-result");
+        public RecordingWriter ClaudeWriter { get; } = new("claude-result");
         public RecordingDirectoryDeleter DirectoryDeleter { get; } = new();
         public List<string> ReparsePaths { get; } = [];
 
@@ -576,7 +699,8 @@ public sealed class LocalSessionOperationsTests
             IConversationReader? codexReader = null,
             IManagedSessionFingerprintProvider? fingerprintProvider = null,
             IConversationWriter? grokWriter = null,
-            IManagedSessionDirectoryDeleter? directoryDeleter = null) => new(
+            IManagedSessionDirectoryDeleter? directoryDeleter = null,
+            bool withClaude = false) => new(
             CodexPaths,
             GrokPaths,
             ActiveState,
@@ -585,9 +709,48 @@ public sealed class LocalSessionOperationsTests
             grokWriter ?? GrokWriter,
             codexReader ?? new CodexConversationReader(),
             new GrokConversationReader(),
-            fingerprintProvider);
+            fingerprintProvider,
+            withClaude ? ClaudePaths : null,
+            withClaude ? ClaudeWriter : null,
+            new ClaudeConversationReader());
 
-        public LocalSessionCatalog CreateCatalog() => new(CodexPaths, GrokPaths, ActiveState);
+        public LocalSessionCatalog CreateCatalog() => new(CodexPaths, GrokPaths, ActiveState, ClaudePaths);
+
+        public async Task<string> WriteClaudeAsync(
+            string id,
+            string title,
+            string user,
+            string assistant,
+            string project = "c--Repos-Demo")
+        {
+            var directory = Path.Combine(ClaudePaths.Projects, project);
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, id + ".jsonl");
+            var records = new[]
+            {
+                JsonSerializer.Serialize(new
+                {
+                    type = "user",
+                    isSidechain = false,
+                    sessionId = id,
+                    cwd = WorkingDirectory,
+                    timestamp = "2026-08-24T09:00:00Z",
+                    message = new { role = "user", content = new[] { new { type = "text", text = user } } }
+                }),
+                JsonSerializer.Serialize(new
+                {
+                    type = "assistant",
+                    isSidechain = false,
+                    sessionId = id,
+                    cwd = WorkingDirectory,
+                    timestamp = "2026-08-24T10:00:00Z",
+                    message = new { role = "assistant", content = new[] { new { type = "text", text = assistant } } }
+                }),
+                JsonSerializer.Serialize(new { type = "ai-title", aiTitle = title, sessionId = id })
+            };
+            await File.WriteAllTextAsync(path, string.Join('\n', records) + "\n", Utf8);
+            return path;
+        }
 
         public ManagedSession Session(ManagedAgent agent, string id, string path) =>
             new(agent, id, Path.GetFullPath(path), id, DateTimeOffset.UtcNow, IsActive: false, CanRead: true);

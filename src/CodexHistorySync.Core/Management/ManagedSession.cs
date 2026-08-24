@@ -1,6 +1,6 @@
 namespace CodexHistorySync.Core.Management;
 
-public enum ManagedAgent { Codex, Grok }
+public enum ManagedAgent { Codex, Grok, Claude }
 
 public sealed record ManagedSession(
     ManagedAgent Agent,
@@ -13,7 +13,35 @@ public sealed record ManagedSession(
 
 public sealed record SessionCatalogSnapshot(
     IReadOnlyList<ManagedSession> Codex,
-    IReadOnlyList<ManagedSession> Grok);
+    IReadOnlyList<ManagedSession> Grok,
+    IReadOnlyList<ManagedSession> Claude)
+{
+    /// <summary>Kept so the two-agent call sites that predate Claude still compile.</summary>
+    public SessionCatalogSnapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok)
+        : this(codex, grok, []) { }
+
+    public IReadOnlyList<ManagedSession> For(ManagedAgent agent) => agent switch
+    {
+        ManagedAgent.Codex => Codex,
+        ManagedAgent.Grok => Grok,
+        ManagedAgent.Claude => Claude,
+        _ => throw new ArgumentOutOfRangeException(nameof(agent))
+    };
+
+    /// <summary>Agents with at least one session, in panel order.</summary>
+    public IReadOnlyList<ManagedAgent> PopulatedAgents => ManagedAgents.All
+        .Where(agent => For(agent).Count != 0).ToArray();
+}
+
+public static class ManagedAgents
+{
+    public static IReadOnlyList<ManagedAgent> All { get; } =
+        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude];
+
+    /// <summary>A session copied out of <paramref name="source"/> can land on any other agent.</summary>
+    public static IReadOnlyList<ManagedAgent> Destinations(ManagedAgent source) =>
+        All.Where(agent => agent != source).ToArray();
+}
 
 public interface ILocalSessionCatalog
 {
@@ -22,7 +50,13 @@ public interface ILocalSessionCatalog
 
 public interface ILocalSessionOperations
 {
+    /// <summary>Copies to the only other configured agent; ambiguous with more than one.</summary>
     Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken);
+
+    Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken);
+
+    /// <summary>Agents this session can be copied to right now, in panel order.</summary>
+    IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source);
     Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken);
 }
 

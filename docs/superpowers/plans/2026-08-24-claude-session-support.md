@@ -60,11 +60,11 @@
 
 ## Task 5: Session catalog and operations
 
-- [ ] Add `Claude` to `ManagedAgent`. Give `SessionCatalogSnapshot` an agent-indexed accessor `For(ManagedAgent)` while keeping `Codex`/`Grok` properties so existing call sites compile.
-- [ ] `Management/ClaudeSessionCatalogSource.cs` mirroring `GrokSessionCatalogSource`: bounded prefix read (`64 KiB`, 64 records), title per design D7 — newest `ai-title` inside the window, else `summary`, else first non-technical user text — `MaximumTitleLength = 80`, duplicates demoted to `CanRead = false`.
-- [ ] `LocalSessionOperations`: add `CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken)`; keep the two-argument overload resolving the target only when exactly one other agent is configured. Register the new Claude failure strings in the reason sets.
-- [ ] `WindowsManagedSessionActiveState.ReadClaudeActiveIds()` implementing D3.
-- [ ] Tests: `LocalSessionCatalogTests` and `LocalSessionOperationsTests` gain Claude cases — copy to each target, refusal on an active session, unreadable duplicate.
+- [x] Add `Claude` to `ManagedAgent`. Give `SessionCatalogSnapshot` an agent-indexed accessor `For(ManagedAgent)` while keeping `Codex`/`Grok` properties so existing call sites compile.
+- [x] `Management/ClaudeSessionCatalogSource.cs` mirroring `GrokSessionCatalogSource`: bounded prefix read (`64 KiB`, 64 records), title per design D7 — newest `ai-title` inside the window, else `summary`, else first non-technical user text — `MaximumTitleLength = 80`, duplicates demoted to `CanRead = false`.
+- [x] `LocalSessionOperations`: add `CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken)`; keep the two-argument overload resolving the target only when exactly one other agent is configured. Register the new Claude failure strings in the reason sets.
+- [x] `WindowsManagedSessionActiveState.ReadClaudeActiveIds()` implementing D3.
+- [x] Tests: `LocalSessionCatalogTests` and `LocalSessionOperationsTests` gain Claude cases — copy to each target, refusal on an active session, unreadable duplicate.
 
 ## Task 6: Session manager TUI
 

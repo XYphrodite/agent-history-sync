@@ -5,6 +5,7 @@ using System.Security;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Cli.Management;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
@@ -94,21 +95,25 @@ public static class CliComposition
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
         var codexPaths = TryResolveCodexPaths();
         var grokPaths = GrokPaths.TryResolve();
+        var claudePaths = ClaudePaths.TryResolve();
         var resolution = new CodexExecutableLocator().ResolveWithSource();
         var executable = ToCodexExecutableOption(resolution);
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState);
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths);
         var codexWriter = codexPaths is null
             ? null
             : new CodexConversationWriter(codexPaths, executable, new CodexCompatibilityProbe());
         var grokWriter = grokPaths is null ? null : new GrokConversationWriter(grokPaths);
+        var claudeWriter = claudePaths is null ? null : new ClaudeConversationWriter(claudePaths);
         var operations = new LocalSessionOperations(
             codexPaths,
             grokPaths,
             activeState,
             new WindowsManagedSessionDirectoryDeleter(),
             codexWriter,
-            grokWriter);
+            grokWriter,
+            claudePaths,
+            claudeWriter);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionManagerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
         return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog, operations, view));
@@ -137,23 +142,32 @@ internal sealed class DefaultSessionManagerRunner(SessionManagerApplication appl
 internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveState
 {
     private const string GrokProcessName = "grok";
+    private const string ClaudeProcessName = "claude";
     private static readonly IReadOnlySet<string> EmptyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     private readonly CodexPaths? codexPaths;
     private readonly GrokPaths? grokPaths;
+    private readonly ClaudePaths? claudePaths;
     private readonly Func<int, string, bool> isNamedProcessRunning;
     private readonly Func<string, bool> isExclusiveLockHeld;
     private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
     private readonly Func<string, string?> readAllText;
+    private readonly Func<string, bool> isAnyNamedProcessRunning;
+    private readonly Func<string, DateTime?> lastWriteTimeUtc;
+    private readonly Func<DateTime> utcNow;
 
-    public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths)
+    public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths, ClaudePaths? claudePaths = null)
         : this(
             codexPaths,
             grokPaths,
             IsNamedProcessRunning,
             IsExclusiveLockHeld,
             EnumerateFiles,
-            ReadAllText)
+            ReadAllText,
+            claudePaths,
+            IsAnyNamedProcessRunning,
+            path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null,
+            () => DateTime.UtcNow)
     {
     }
 
@@ -163,10 +177,18 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         Func<int, string, bool> isNamedProcessRunning,
         Func<string, bool> isExclusiveLockHeld,
         Func<string, string, IReadOnlyList<string>> enumerateFiles,
-        Func<string, string?> readAllText)
+        Func<string, string?> readAllText,
+        ClaudePaths? claudePaths = null,
+        Func<string, bool>? isAnyNamedProcessRunning = null,
+        Func<string, DateTime?>? lastWriteTimeUtc = null,
+        Func<DateTime>? utcNow = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
+        this.claudePaths = claudePaths;
+        this.isAnyNamedProcessRunning = isAnyNamedProcessRunning ?? IsAnyNamedProcessRunning;
+        this.lastWriteTimeUtc = lastWriteTimeUtc ?? (path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null);
+        this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.isNamedProcessRunning = isNamedProcessRunning
             ?? throw new ArgumentNullException(nameof(isNamedProcessRunning));
         this.isExclusiveLockHeld = isExclusiveLockHeld
@@ -198,8 +220,31 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     {
         ManagedAgent.Codex => ReadCodexActiveIds(),
         ManagedAgent.Grok => ReadGrokActiveIds(),
+        ManagedAgent.Claude => ReadClaudeActiveIds(),
         _ => EmptyIds
     };
+
+    /// <summary>
+    /// Claude publishes no active-session file, so liveness is a running claude process plus a
+    /// recent write, mirroring the scanner's rule (design D3). Without a running process nothing
+    /// is active; with one, only transcripts touched inside the window are.
+    /// </summary>
+    private IReadOnlySet<string> ReadClaudeActiveIds()
+    {
+        if (claudePaths is null || !isAnyNamedProcessRunning(ClaudeProcessName)) return EmptyIds;
+
+        var activeSince = utcNow() - ClaudeSessionScanner.DefaultActivityWindow;
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var project in EnumerateDirectories(claudePaths.Projects))
+            foreach (var path in enumerateFiles(project, "*.jsonl"))
+            {
+                var sessionId = Path.GetFileNameWithoutExtension(path);
+                if (string.IsNullOrWhiteSpace(sessionId)) continue;
+                if (lastWriteTimeUtc(path) is { } written && written >= activeSince) ids.Add(sessionId);
+            }
+
+        return ids;
+    }
 
     private IReadOnlySet<string> ReadGrokActiveIds()
     {
@@ -233,6 +278,32 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         }
 
         return ids;
+    }
+
+    private static bool IsAnyNamedProcessRunning(string processName)
+    {
+        try
+        {
+            var processes = Process.GetProcessesByName(processName);
+            try { return processes.Length != 0; }
+            finally { foreach (var process in processes) process.Dispose(); }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or
+                                          UnauthorizedAccessException or SecurityException)
+        {
+            // Fail closed: an unreadable process list must not make a live session look copyable.
+            return true;
+        }
+    }
+
+    private static IReadOnlyList<string> EnumerateDirectories(string directory)
+    {
+        if (!Directory.Exists(directory)) return [];
+        try { return Directory.GetDirectories(directory); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return [];
+        }
     }
 
     private static bool IsNamedProcessRunning(int processId, string processName)
