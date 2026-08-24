@@ -243,6 +243,12 @@ public sealed class SessionManagerApplicationTests
 
     private sealed class MutatingOperations(MutableCatalog catalog) : ILocalSessionOperations
     {
+        public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source) =>
+            ManagedAgents.Destinations(source.Agent);
+
+        public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken) =>
+            CopyAsync(source, cancellationToken);
+
         public Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -265,6 +271,12 @@ public sealed class SessionManagerApplicationTests
 
     private sealed class FailingOperations(Exception failure) : ILocalSessionOperations
     {
+        public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source) =>
+            ManagedAgents.Destinations(source.Agent);
+
+        public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken) =>
+            Task.FromException<string>(failure);
+
         public Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken) =>
             Task.FromException<string>(failure);
 
@@ -275,6 +287,16 @@ public sealed class SessionManagerApplicationTests
     private sealed class RecordingOperations : ILocalSessionOperations
     {
         public List<ManagedSession> Copied { get; } = [];
+        public List<ManagedAgent> CopiedTo { get; } = [];
+        public IReadOnlyList<ManagedAgent> Targets { get; set; } = [ManagedAgent.Grok];
+
+        public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source) => Targets;
+
+        public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken)
+        {
+            CopiedTo.Add(target);
+            return CopyAsync(source, cancellationToken);
+        }
 
         public Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken)
         {

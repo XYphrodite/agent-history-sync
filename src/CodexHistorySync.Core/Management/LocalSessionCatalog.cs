@@ -1,3 +1,4 @@
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Grok;
 
@@ -9,12 +10,14 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
 
     private readonly ILocalSessionCatalogSource? codexSource;
     private readonly ILocalSessionCatalogSource? grokSource;
+    private readonly ILocalSessionCatalogSource? claudeSource;
     private readonly IManagedSessionActiveState activeState;
 
     public LocalSessionCatalog(
         CodexPaths? codexPaths,
         GrokPaths? grokPaths,
-        IManagedSessionActiveState activeState)
+        IManagedSessionActiveState activeState,
+        ClaudePaths? claudePaths = null)
         : this(
             codexPaths is null
                 ? null
@@ -22,17 +25,22 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             grokPaths is null
                 ? null
                 : new GrokSessionCatalogSource(grokPaths, new SystemSessionCatalogIo()),
-            activeState)
+            activeState,
+            claudePaths is null
+                ? null
+                : new ClaudeSessionCatalogSource(claudePaths, new SystemSessionCatalogIo()))
     {
     }
 
     internal LocalSessionCatalog(
         ILocalSessionCatalogSource? codexSource,
         ILocalSessionCatalogSource? grokSource,
-        IManagedSessionActiveState activeState)
+        IManagedSessionActiveState activeState,
+        ILocalSessionCatalogSource? claudeSource = null)
     {
         this.codexSource = codexSource;
         this.grokSource = grokSource;
+        this.claudeSource = claudeSource;
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
     }
 
@@ -43,11 +51,14 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             codexSource, ManagedAgent.Codex, limiter, cancellationToken);
         var grokTask = ScanAgentAsync(
             grokSource, ManagedAgent.Grok, limiter, cancellationToken);
+        var claudeTask = ScanAgentAsync(
+            claudeSource, ManagedAgent.Claude, limiter, cancellationToken);
 
-        await Task.WhenAll(codexTask, grokTask).ConfigureAwait(false);
+        await Task.WhenAll(codexTask, grokTask, claudeTask).ConfigureAwait(false);
         return new SessionCatalogSnapshot(
             Order(codexTask.Result),
-            Order(grokTask.Result));
+            Order(grokTask.Result),
+            Order(claudeTask.Result));
     }
 
     private async Task<IReadOnlyList<ManagedSession>> ScanAgentAsync(

@@ -747,6 +747,12 @@ public sealed class SpectreSessionManagerViewTests
 
     private sealed class RejectOperations : ILocalSessionOperations
     {
+        public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source) =>
+            ManagedAgents.Destinations(source.Agent);
+
+        public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Controller should reject active sessions before operations.");
+
         public Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Controller should reject active sessions before operations.");
 
