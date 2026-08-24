@@ -14,6 +14,7 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
         "<environment_context>", "<recommended_plugins>", "<user_info>", "<system-reminder>",
         "<permissions instructions>", "<skills_instructions>", "<apps_instructions>", "<plugins_instructions>",
         "<ide_opened_file>", "<ide_selection>", "<local-command-stdout>", "<command-name>", "<command-message>",
+        "[Request interrupted by user",
         "# Files mentioned by the user:", "# Context from my IDE setup:"
     ];
 
