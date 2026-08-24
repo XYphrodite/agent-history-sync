@@ -99,6 +99,26 @@ Terminal logs, locks, sqlite, and recap caches under the session folder are **no
 
 GitHub still rejects individual blobs larger than 100 MiB. After reduction, payloads larger than ~95 MiB are skipped on upload (`skipped-oversized=N`) and remain local-only.
 
+## Claude Code sessions
+
+When `%USERPROFILE%\.claude\projects` exists, `agent-sync` also inventories Claude Code sessions. Each session is one encrypted package under logical id `cl-<uuid>` containing the transcript JSONL together with the session's own `cwd` and the literal project directory name.
+
+Set `CLAUDE_CONFIG_DIR` to point at a different Claude home, the same way `GROK_HOME` and `CODEX_HOME` work. Nothing outside `projects/` is read or synchronized — not `backups/`, `ide/`, `shell-snapshots/`, `session-env/`, settings, or credentials.
+
+On import, packages are written back to `%USERPROFILE%\.claude\projects\<project>\<uuid>.jsonl` using the **stored** project directory name. That name is never reconstructed from the `cwd`: Claude collapses both `:` and `\` to `-`, so `c:\Repos\Reborn` and `c-\Repos\Reborn` would produce the same directory and a reconstruction could write into the wrong project.
+
+Claude publishes no active-session file. A session is treated as live — and deferred to a later run rather than failing the run — when a `claude` process is running **and** its transcript was written within the last 30 seconds. Expect your own open session to stay unsynchronized until it goes quiet or the process exits.
+
+### Upgrade every machine before the first Claude push
+
+`ObjectKind` is stored in the encrypted index as an integer, and an older `agent-sync` rejects the **entire** index when it meets a value it does not know:
+
+```
+Repository index contains an invalid object kind.
+```
+
+That breaks `pull` on the old machine completely, not just for Claude objects. **Upgrade every machine that shares the repository before the first push that carries a Claude session.** Checking is cheap: `agent-sync status` prints `claude-sessions=` on an upgraded build and does not on an older one.
+
 ## Status and diagnostics
 
 ```powershell
@@ -106,6 +126,8 @@ agent-sync status
 agent-sync doctor
 agent-sync doctor --compatibility-session <inactive archived JSONL> --codex-exe <codex executable>
 ```
+
+`status` also prints a second line for Claude: the resolved projects root (or `none`), how many Claude sessions the scan saw, and whether that count is uncertain because something could not be read. `doctor` reports `claude-paths`, which fails only when no Claude home was found — that is the first thing to check when the manager shows no Claude panel.
 
 `status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus both the current authenticated remote revision and the last successfully synchronized revision. Its conflict count is the exact identity-deduplicated union of persisted evidence and conflicts in the current plan; an unreadable evidence store makes status fail closed. Equal counts do not hide divergent objects.
 

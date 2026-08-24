@@ -696,6 +696,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly CodexExecutableSource codexExecutableSource;
     private readonly string? codexHome;
     private readonly string? grokHome;
+    private readonly string? claudeHome;
     private readonly Action<SyncProgress>? syncProgress;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
@@ -724,7 +725,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         CodexExecutableSource codexExecutableSource = CodexExecutableSource.Discovered,
         string? codexHome = null,
         string? grokHome = null,
-        Action<SyncProgress>? syncProgress = null)
+        Action<SyncProgress>? syncProgress = null,
+        string? claudeHome = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -735,6 +737,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.codexExecutableSource = codexExecutableSource;
         this.codexHome = codexHome;
         this.grokHome = grokHome;
+        this.claudeHome = claudeHome;
         this.syncProgress = syncProgress;
     }
 
@@ -794,7 +797,12 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             conflictIdentities.Add(ConflictStore.GetIdentity(conflict.Provenance));
         return new CliStatusReport(preview.LocalObjects, preview.RemoteObjects, preview.PendingChanges,
             conflictIdentities.Count, preview.RemoteRevision,
-            configuration.LastSuccessfulRevision);
+            configuration.LastSuccessfulRevision)
+        {
+            ClaudeHome = ClaudePaths.TryResolve(claudeHome)?.Projects,
+            ClaudeSessions = preview.LocalByKind.TryGetValue(ObjectKind.ClaudeSession, out var claudeCount) ? claudeCount : 0,
+            ClaudeUncertain = preview.UncertainKinds.Contains(ObjectKind.ClaudeSession)
+        };
     }
 
     public async Task<CliDoctorReport> RunDoctorAsync(CliLocalConfiguration? configuration, ReadOnlyMemory<byte> key,
@@ -804,6 +812,9 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         CodexPaths? paths = null;
         try { paths = CodexPaths.Resolve(null); checks.Add(new("codex-paths", true)); }
         catch { checks.Add(new("codex-paths", false)); }
+        // Not a failure when Claude is not installed: the check reports whether a home was found
+        // at all, which is what tells the user why no Claude panel or sessions appear.
+        checks.Add(new("claude-paths", ClaudePaths.TryResolve(claudeHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));
         checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
         checks.Add(new("github-private", configuration is not null && (await gateway.VerifyPrivateAsync(configuration.RemoteUrl, cancellationToken).ConfigureAwait(false)).Passed));
@@ -855,12 +866,15 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             ? CodexPaths.ResolveLayout(codexHome)
             : CodexPaths.Resolve(codexHome);
         var grokPaths = CodexHistorySync.Core.Grok.GrokPaths.TryResolve(grokHome);
+        var claudePaths = ClaudePaths.TryResolve(claudeHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
-        var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths);
+        var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths,
+            claudePaths: claudePaths);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
-        var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths);
+        var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths,
+            claudePaths: claudePaths);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
             Path.Combine(localAppData, "CodexHistorySync", "repositories"),
@@ -869,7 +883,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
             configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
-            grokPaths: grokPaths, progress: syncProgress);
+            grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths);
         return new Components(paths, scanner, conflicts, engine);
     }
 

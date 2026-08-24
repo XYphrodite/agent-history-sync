@@ -6,14 +6,14 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class ReleaseSurfaceTests
 {
     [Fact]
-    public async Task Release_cli_reports_version_0_5_2_and_advertises_manager_mode()
+    public async Task Release_cli_reports_version_0_6_0_and_advertises_manager_mode()
     {
         var cliDirectory = Path.Combine(RepositoryRoot(), "src", "CodexHistorySync.Cli", "bin", "Release", "net10.0", "win-x64");
         var executable = Path.Combine(cliDirectory, "agent-sync.exe");
         var assembly = Path.Combine(cliDirectory, "agent-sync.dll");
 
         Assert.True(File.Exists(executable), $"Built release executable was not found: {executable}");
-        Assert.Equal("0.5.2", AssemblyName.GetAssemblyName(assembly).Version!.ToString(3));
+        Assert.Equal("0.6.0", AssemblyName.GetAssemblyName(assembly).Version!.ToString(3));
 
         var result = await RunAsync(executable, "--help");
 

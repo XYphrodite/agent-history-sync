@@ -22,6 +22,8 @@ There is no in-place key-rotation command in the MVP. Rotate by stopping and uni
 
 Only complete, stable active and archived JSONL session files are synchronized. The scanner rejects credentials, `auth.json`, SQLite files, logs, caches, sandbox state, `.sandbox-secrets`, machine identifiers, partial files, temporary files, and unsafe paths. Backups, conflicts, keys, device state, provider clones, logs, and staging directories live outside `CODEX_HOME` and are excluded from recursive ingestion.
 
+For Claude Code, only `projects/**/*.jsonl` leaves the machine. `backups/`, `ide/`, `session-env/`, `shell-snapshots/`, settings files, and any credential material under `%USERPROFILE%\.claude` are never read by the scanner and never reach a Git blob. A transcript is synchronized whole, so tool output and file contents that Claude recorded in the conversation are inside the encrypted package — the same exposure the conversation itself already carries.
+
 Attachment discovery is intentionally disabled in the MVP. The security audit places a unique canary in the synthetic attachment directory and proves it does not reach any Git blob. Attachments may be added only after Codex exposes a documented typed reference that can be validated without guessing paths or scanning arbitrary files.
 
 Remote Git history is intentionally non-append-only: each publish force-updates `main` to one orphan commit under compare-and-swap (`force-with-lease`). GitHub may retain unreachable objects until its garbage collection runs; operators who need immediate reclaim can re-create the private repository.
