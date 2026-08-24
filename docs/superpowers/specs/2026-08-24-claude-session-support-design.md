@@ -72,8 +72,18 @@ namespaces disjoint inside a single repository index.
 
 Grok exposes `~/.grok/active_sessions.json`; Claude exposes nothing equivalent.
 A Claude session counts as live when a `claude` process is running **and** the
-JSONL was written inside the stability window. Such sessions are deferred exactly
+JSONL was written inside an activity window. Such sessions are deferred exactly
 like a locked Grok session — published on a later run rather than failing the run.
+
+The activity window is **30 s**, a separate constant from the 50 ms stability
+delay. Reusing the stability delay would make the test almost never fire, and
+widening the stability delay instead would slow every scan. 30 s also lets an
+idle-but-open session stop deferring and finally sync, which a
+process-running-only rule never would.
+
+The process list is enumerated once per scan, not once per file. If it cannot be
+read, the probe fails closed and reports "running", deferring recent transcripts
+rather than publishing a file a live session may still be appending to.
 
 The existing two-observation stability read still guards the general case: the
 current session's file grows between observations and is skipped.

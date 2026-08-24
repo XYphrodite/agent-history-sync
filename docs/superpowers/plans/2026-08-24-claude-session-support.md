@@ -33,13 +33,13 @@
 
 ## Task 2: Sync scanner
 
-- [ ] `src/CodexHistorySync.Core/Claude/ClaudeSessionScanner.cs` modelled on `GrokSessionScanner`: enumerate `projects/**/*.jsonl` with `AttributesToSkip = ReparsePoint`, two-observation stability, `MaxDegreeOfParallelism = Clamp(ProcessorCount, 2, 8)`, duplicate logical ids removed and marked uncertain.
-- [ ] Active exclusion per design D3: running `claude` process + write inside the stability window ⇒ defer.
-- [ ] Tests `ClaudeSessionScannerTests`: stable file, file mutating between observations, duplicate ids across project directories, missing projects root, unreadable file.
+- [x] `src/CodexHistorySync.Core/Claude/ClaudeSessionScanner.cs` modelled on `GrokSessionScanner`: enumerate `projects/**/*.jsonl` with `AttributesToSkip = ReparsePoint`, two-observation stability, `MaxDegreeOfParallelism = Clamp(ProcessorCount, 2, 8)`, duplicate logical ids removed and marked uncertain.
+- [x] Active exclusion per design D3: running `claude` process + write inside the stability window ⇒ defer.
+- [x] Tests `ClaudeSessionScannerTests`: stable file, file mutating between observations, duplicate ids across project directories, missing projects root, unreadable file.
 
 ## Task 3: Sync engine, writer, backups
 
-- [ ] Append `ClaudeSession` to `ObjectKind` in `Model/SyncModels.cs` with the doc comment naming the projects-only policy.
+- [x] Append `ClaudeSession` to `ObjectKind` in `Model/SyncModels.cs` with the doc comment naming the projects-only policy.
 - [ ] `PathSafety.EnsureOutsideCodex` and `EnsureSessionDestination` accept `ClaudePaths?`: destination must be exactly one level under `Projects` and named `<uuid>.jsonl`.
 - [ ] `SyncEngine`: scan Claude in parallel with Codex/Grok; merge objects, `UncertainKinds`, `DuplicateIds`; `ResolveClaudeDestination`; stage with `.claudepkg` ([SyncEngine.cs:1117](../../../src/CodexHistorySync.Core/Sync/SyncEngine.cs#L1117)).
 - [ ] Extend the live-session deferral heuristic that matches the literal `"Grok session"` ([SyncEngine.cs:243](../../../src/CodexHistorySync.Core/Sync/SyncEngine.cs#L243)) to cover Claude.
