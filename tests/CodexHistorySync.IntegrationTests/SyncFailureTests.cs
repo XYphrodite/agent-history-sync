@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
@@ -1411,10 +1412,104 @@ public sealed class SyncFailureTests : IDisposable
         Assert.True(File.Exists(HistoryMutationBatch.CleanupEvidencePath(operation)));
     }
 
+    [Fact]
+    public async Task CodexGrokAndClaudeScansRunConcurrently()
+    {
+        var name = "parallel-three";
+        var grokHome = Path.Combine(_root, name, "grok");
+        var grokPaths = new GrokPaths(grokHome, Path.Combine(grokHome, "sessions"));
+        var grokId = "71000000-0000-0000-0000-000000000098";
+        var grokDirectory = grokPaths.SessionDirectory(_root, grokId);
+        Directory.CreateDirectory(grokDirectory);
+        await File.WriteAllTextAsync(Path.Combine(grokDirectory, "chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":\"parallel\"}\n{\"type\":\"assistant\",\"content\":\"yes\"}\n");
+        await File.WriteAllTextAsync(Path.Combine(grokDirectory, "summary.json"),
+            $"{{\"info\":{{\"id\":\"{grokId}\",\"cwd\":\"{JsonEncodedText.Encode(_root)}\"}}}}");
+
+        var claudePaths = CreateClaudeHome(name);
+        await WriteClaudeSessionAsync(claudePaths, ClaudeProject, "72000000-0000-0000-0000-000000000098", _root);
+
+        var arrivals = 0;
+        var allStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task Rendezvous(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref arrivals) == 3) allStarted.TrySetResult();
+            return allStarted.Task.WaitAsync(cancellationToken);
+        }
+        var device = CreateDevice(name, RandomNumberGenerator.GetBytes(32), new MemoryProvider(),
+            grokPaths: grokPaths, scanner: new SessionScanner(Rendezvous),
+            grokScanner: new GrokSessionScanner(Rendezvous),
+            claudePaths: claudePaths,
+            claudeScanner: new ClaudeSessionScanner(Rendezvous, isClaudeRunning: () => false));
+        await WriteSessionAsync(device.Paths.Sessions, "parallel-codex");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var result = await device.Engine.SynchronizeAsync(SyncMode.Push, timeout.Token);
+
+        // The rendezvous only completes if all three scans are in flight at the same moment;
+        // a per-agent stability wait would deadlock it.
+        Assert.Equal(3, arrivals);
+        Assert.Equal(3, result.Uploaded);
+    }
+
+    [Fact]
+    public async Task ClaudeSessionBrokenBetweenScanAndStaging_IsDeferredNotFailed()
+    {
+        var name = "claude-deferred";
+        var claudePaths = CreateClaudeHome(name);
+        const string sessionId = "73000000-0000-0000-0000-000000000097";
+        var transcript = await WriteClaudeSessionAsync(claudePaths, ClaudeProject, sessionId, _root);
+        var rewritten = 0;
+        void OnProgress(SyncProgress progress)
+        {
+            // Runs after the scans complete and immediately before the staging loop, so the
+            // transcript is valid when scanned and broken when staged.
+            if (progress.Phase != SyncProgressPhase.StagingChanges) return;
+            if (Interlocked.Exchange(ref rewritten, 1) != 0) return;
+            File.WriteAllText(transcript, ClaudeRecord("00000000-0000-0000-0000-000000000000", _root));
+        }
+        var device = CreateDevice(name, RandomNumberGenerator.GetBytes(32), new MemoryProvider(),
+            progress: OnProgress, claudePaths: claudePaths,
+            claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false));
+        await WriteSessionAsync(device.Paths.Sessions, "codex-alongside-claude");
+
+        var result = await device.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+
+        // The Codex session still publishes; the Claude one is deferred to a later run, not fatal.
+        Assert.Equal(1, rewritten);
+        Assert.Equal(1, result.Uploaded);
+        var state = await device.State.LoadAsync("repository", CancellationToken.None);
+        Assert.DoesNotContain(state.Objects, item => item.Kind == ObjectKind.ClaudeSession);
+    }
+
+    private const string ClaudeProject = "c--Repos-Demo";
+
+    private ClaudePaths CreateClaudeHome(string name)
+    {
+        var home = Path.Combine(_root, name, "claude");
+        var projects = Path.Combine(home, "projects");
+        Directory.CreateDirectory(projects);
+        return new ClaudePaths(home, projects);
+    }
+
+    private static string ClaudeRecord(string sessionId, string cwd) =>
+        $"{{\"type\":\"user\",\"cwd\":\"{JsonEncodedText.Encode(cwd)}\",\"sessionId\":\"{sessionId}\"," +
+        $"\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"question\"}}]}}}}\n";
+
+    private static async Task<string> WriteClaudeSessionAsync(ClaudePaths paths, string project, string sessionId, string cwd)
+    {
+        var directory = Path.Combine(paths.Projects, project);
+        Directory.CreateDirectory(directory);
+        var transcript = Path.Combine(directory, sessionId + ".jsonl");
+        await File.WriteAllTextAsync(transcript, ClaudeRecord(sessionId, cwd), new UTF8Encoding(false));
+        return transcript;
+    }
+
     private Device CreateDevice(string name, byte[] key, IStorageProvider provider, ICodexProcessDetector? detector = null,
         IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null, ISyncEngineHooks? hooks = null,
         IOperationDirectoryCleaner? cleaner = null, Action<SyncProgress>? progress = null,
-        GrokPaths? grokPaths = null, SessionScanner? scanner = null, GrokSessionScanner? grokScanner = null)
+        GrokPaths? grokPaths = null, SessionScanner? scanner = null, GrokSessionScanner? grokScanner = null,
+        ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -1422,16 +1517,17 @@ public sealed class SyncFailureTests : IDisposable
         Directory.CreateDirectory(paths.Sessions);
         var local = Path.Combine(_root, name, "local");
         var state = stateReplacer is null ? new LocalStateStore(local) : new LocalStateStore(local, stateReplacer);
-        var backups = new BackupStore("repository", local, paths, fileSystem);
+        var backups = new BackupStore("repository", local, paths, fileSystem, claudePaths: claudePaths);
         var writer = new CodexHistoryWriter(paths, backups, detector ?? new StoppedDetector(), fileSystem,
-            grokPaths: grokPaths);
+            grokPaths: grokPaths, claudePaths: claudePaths);
         var conflicts = new ConflictStore("repository", local, paths);
         var engine = hooks is null && cleaner is null
             ? new SyncEngine("repository", name, paths, key, scanner ?? new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
-                writer, conflicts, provider, Path.Combine(local, "staging"), grokPaths, grokScanner, progress)
+                writer, conflicts, provider, Path.Combine(local, "staging"), grokPaths, grokScanner, progress,
+                claudePaths, claudeScanner)
             : new SyncEngine("repository", name, paths, key, scanner ?? new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
                 writer, conflicts, provider, Path.Combine(local, "staging"), hooks ?? NoopTestSyncEngineHooks.Instance,
-                cleaner ?? new OperationDirectoryCleaner(), grokPaths, grokScanner, progress);
+                cleaner ?? new OperationDirectoryCleaner(), grokPaths, grokScanner, progress, claudePaths, claudeScanner);
         return new(paths, state, conflicts, writer, Path.Combine(local, "staging"), engine);
     }
 

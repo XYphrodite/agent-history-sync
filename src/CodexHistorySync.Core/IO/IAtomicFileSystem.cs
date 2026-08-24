@@ -256,7 +256,8 @@ internal static class PathSafety
         return canonical;
     }
 
-    public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null)
+    public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null,
+        Claude.ClaudePaths? claudePaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
@@ -267,12 +268,36 @@ internal static class PathSafety
                 if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
                     throw new ArgumentException("The storage path must not overlap synchronized Grok paths.", parameterName);
         }
+        if (claudePaths is not null)
+        {
+            foreach (var synchronizedPath in new[] { claudePaths.Home, claudePaths.Projects })
+                if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
+                    throw new ArgumentException("The storage path must not overlap synchronized Claude paths.", parameterName);
+        }
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
-        Grok.GrokPaths? grokPaths = null)
+        Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
+        if (kind == ObjectKind.ClaudeSession)
+        {
+            if (claudePaths is null)
+                throw new ArgumentException("Claude paths are required for Claude session destinations.", parameterName);
+            // projects/<project>/<uuid>.jsonl exactly: the project directory is one level under the
+            // projects root and the transcript sits directly inside it. Anything deeper is not Claude's layout.
+            var projectDirectory = Path.GetDirectoryName(canonical);
+            if (projectDirectory is null ||
+                !StringComparer.OrdinalIgnoreCase.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(projectDirectory) ?? string.Empty),
+                    Path.TrimEndingDirectorySeparator(claudePaths.Projects)))
+                throw new ArgumentException("The destination is outside the synchronized Claude projects directory.", parameterName);
+            if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetExtension(canonical), ".jsonl") ||
+                !Guid.TryParseExact(Path.GetFileNameWithoutExtension(canonical), "D", out _))
+                throw new ArgumentException("Claude session destinations must be named <uuid>.jsonl.", parameterName);
+            return canonical;
+        }
+
         if (kind == ObjectKind.GrokSession)
         {
             if (grokPaths is null)
@@ -289,7 +314,7 @@ internal static class PathSafety
         {
             ObjectKind.ActiveSession => paths.Sessions,
             ObjectKind.ArchivedSession => paths.ArchivedSessions,
-            _ => throw new ArgumentException("Only active, archived, and Grok sessions can be written as history.", parameterName)
+            _ => throw new ArgumentException("Only active, archived, Grok, and Claude sessions can be written as history.", parameterName)
         };
         if (!CodexPaths.IsPathWithin(canonical, root) || StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(root)))
             throw new ArgumentException("The destination is outside its synchronized Codex directory.", parameterName);
