@@ -115,14 +115,11 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         var showSearch = searchEditing || state.SearchQuery.Length > 0;
         var visibleRows = Math.Max(1, console.Profile.Height - LayoutRows - (showSearch ? 1 : 0));
         var displayState = state.SetViewportRows(visibleRows);
-        var availableWidth = Math.Max(MinimumPanelWidth * 2 + 1, console.Profile.Width);
-        var panelWidth = Math.Max(MinimumPanelWidth, (availableWidth - 1) / 2);
+        var agents = displayState.VisibleAgents;
+        var availableWidth = Math.Max(MinimumPanelWidth * agents.Count + 1, console.Profile.Width);
+        var panelWidth = Math.Max(MinimumPanelWidth, (availableWidth - 1) / agents.Count);
 
-        var panels = new Columns(
-        [
-            BuildPanel(displayState, ManagedAgent.Codex, panelWidth),
-            BuildPanel(displayState, ManagedAgent.Grok, panelWidth)
-        ])
+        var panels = new Columns(agents.Select(agent => BuildPanel(displayState, agent, panelWidth)).ToArray())
         {
             Expand = true
         };
@@ -236,6 +233,47 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         }
     }
 
+    public ManagedAgent? ChooseCopyTarget(
+        ManagedSession source,
+        IReadOnlyList<ManagedAgent> targets,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(targets);
+        if (targets.Count == 0) return null;
+        var state = latestState ?? throw new InvalidOperationException("A session state must be rendered before a copy target prompt.");
+
+        var choices = targets.Select((agent, index) => (Agent: agent, Key: (char)('1' + index))).ToArray();
+        pendingMessage = new PendingMessage(
+            "Copy to: " + string.Join("   ", choices.Select(choice => choice.Key + ") " + AgentName(choice.Agent))) +
+            "   Esc) cancel",
+            false);
+        Render(state);
+        try
+        {
+            while (true)
+            {
+                var key = input.ReadKey(cancellationToken);
+                if (key.Key == ConsoleKey.Escape) return null;
+                foreach (var choice in choices)
+                    if (key.KeyChar == choice.Key) return choice.Agent;
+            }
+        }
+        finally
+        {
+            pendingMessage = null;
+            Render(state);
+        }
+    }
+
+    internal static string AgentName(ManagedAgent agent) => agent switch
+    {
+        ManagedAgent.Codex => "Codex",
+        ManagedAgent.Grok => "Grok",
+        ManagedAgent.Claude => "Claude",
+        _ => agent.ToString()
+    };
+
     public void ShowMessage(string message, bool isError)
     {
         var nextMessage = new PendingMessage(message ?? string.Empty, isError);
@@ -254,7 +292,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private static Panel BuildPanel(SessionManagerState state, ManagedAgent agent, int width)
     {
         var focused = state.FocusedAgent == agent;
-        var sessions = agent == ManagedAgent.Codex ? state.Snapshot.Codex : state.Snapshot.Grok;
+        var sessions = state.Snapshot.For(agent);
         var offset = state.ViewportOffset(agent);
         var selectedIndex = state.SelectedIndex(agent);
         var table = new Table
@@ -303,7 +341,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
             }
         }
 
-        var name = agent == ManagedAgent.Codex ? "CODEX" : "GROK";
+        var name = AgentName(agent).ToUpperInvariant();
         var header = new PanelHeader(focused ? $"[cyan1 bold]* {name}[/]" : $"[grey58]  {name}[/]");
         return new Panel(table)
         {

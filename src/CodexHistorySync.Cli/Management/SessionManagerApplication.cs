@@ -84,10 +84,23 @@ public sealed class SessionManagerApplication(
         var source = GetActionableSession(state, "copied");
         if (source is null) return state;
 
+        var targets = operations.AvailableCopyTargets(source);
+        if (targets.Count == 0)
+        {
+            view.ShowMessage(NoDestinationMessage(source), true);
+            return state;
+        }
+
+        // One destination needs no question; more than one is the user's choice, not a default.
+        var target = targets.Count == 1
+            ? targets[0]
+            : view.ChooseCopyTarget(source, targets, cancellationToken);
+        if (target is null) return state;
+
         try
         {
-            await operations.CopyAsync(source, cancellationToken);
-            view.ShowMessage("Copied.", false);
+            await operations.CopyAsync(source, target.Value, cancellationToken);
+            view.ShowMessage($"Copied to {AgentName(target.Value)}.", false);
             return await RefreshAsync(state, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -160,11 +173,21 @@ public sealed class SessionManagerApplication(
             ManagedSessionFailureReason.Active => "Active sessions cannot be copied.",
             ManagedSessionFailureReason.Unreadable => "This session cannot be copied.",
             ManagedSessionFailureReason.Changed => "The session changed. Copy was cancelled.",
-            ManagedSessionFailureReason.DestinationUnavailable =>
-                source.Agent == ManagedAgent.Codex ? "Grok is not available." : "Codex is not available.",
+            ManagedSessionFailureReason.DestinationUnavailable => NoDestinationMessage(source),
             ManagedSessionFailureReason.Incompatible => "Codex rejected the copied session.",
             _ => $"Copy failed for session {SafeId(source.SessionId)}."
         };
+
+    private static string NoDestinationMessage(ManagedSession source) =>
+        $"No other agent is available to copy this {AgentName(source.Agent)} session into.";
+
+    private static string AgentName(ManagedAgent agent) => agent switch
+    {
+        ManagedAgent.Codex => "Codex",
+        ManagedAgent.Grok => "Grok",
+        ManagedAgent.Claude => "Claude",
+        _ => agent.ToString()
+    };
 
     private static string SafeId(string sessionId) =>
         !string.IsNullOrWhiteSpace(sessionId) && sessionId.Length <= 64 &&

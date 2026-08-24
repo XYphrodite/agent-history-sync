@@ -35,7 +35,7 @@ public sealed class SessionManagerApplicationTests
         var finalState = view.RenderedStates.Last();
         Assert.Equal(["keep"], finalState.Snapshot.Codex.Select(session => session.SessionId));
         Assert.Contains("copied-session", finalState.Snapshot.Grok.Select(session => session.SessionId));
-        Assert.Contains(view.Messages, message => message.Message == "Copied." && !message.IsError);
+        Assert.Contains(view.Messages, message => message.Message == "Copied to Grok." && !message.IsError);
         Assert.Contains(view.Messages, message => message.Message == "Local deletion may be restored by sync." && !message.IsError);
     }
 
@@ -94,7 +94,8 @@ public sealed class SessionManagerApplicationTests
     [InlineData(ManagedSessionFailureReason.Active, "Active sessions cannot be copied.")]
     [InlineData(ManagedSessionFailureReason.Unreadable, "This session cannot be copied.")]
     [InlineData(ManagedSessionFailureReason.Changed, "The session changed. Copy was cancelled.")]
-    [InlineData(ManagedSessionFailureReason.DestinationUnavailable, "Grok is not available.")]
+    [InlineData(ManagedSessionFailureReason.DestinationUnavailable,
+        "No other agent is available to copy this Codex session into.")]
     [InlineData(ManagedSessionFailureReason.Incompatible, "Codex rejected the copied session.")]
     [InlineData(ManagedSessionFailureReason.Unspecified, "Copy failed for session safe-id.")]
     public async Task Copy_failures_use_classified_safe_messages(
@@ -113,8 +114,10 @@ public sealed class SessionManagerApplicationTests
     }
 
     [Fact]
-    public async Task Copy_destination_unavailable_names_codex_when_copying_from_grok()
+    public async Task Copy_destination_unavailable_names_the_source_agent()
     {
+        // Naming a single destination stopped being possible once a third agent existed; the
+        // message names the session's own agent instead of guessing which one is missing.
         var catalog = new MutableCatalog(Snapshot([], [Session(ManagedAgent.Grok, "safe-id")]));
         var view = new ScriptedView(SessionManagerCommand.FocusRight, SessionManagerCommand.Copy, SessionManagerCommand.Exit);
         var application = new SessionManagerApplication(catalog,
@@ -124,7 +127,54 @@ public sealed class SessionManagerApplicationTests
 
         await application.RunAsync(CancellationToken.None);
 
-        Assert.Contains(view.Messages, message => message.Message == "Codex is not available." && message.IsError);
+        Assert.Contains(view.Messages,
+            message => message.Message == "No other agent is available to copy this Grok session into." && message.IsError);
+    }
+
+    [Fact]
+    public async Task Copy_with_two_destinations_asks_which_one_and_uses_the_answer()
+    {
+        var catalog = new MutableCatalog(Snapshot([Session(ManagedAgent.Codex, "safe-id")], []));
+        var view = new ScriptedView(SessionManagerCommand.Copy, SessionManagerCommand.Exit);
+        view.CopyTargets.Enqueue(ManagedAgent.Claude);
+        var operations = new RecordingOperations { Targets = [ManagedAgent.Grok, ManagedAgent.Claude] };
+        var application = new SessionManagerApplication(catalog, operations, view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Equal([ManagedAgent.Grok, ManagedAgent.Claude], Assert.Single(view.OfferedTargets));
+        Assert.Equal([ManagedAgent.Claude], operations.CopiedTo);
+        Assert.Contains(view.Messages, message => message.Message == "Copied to Claude." && !message.IsError);
+    }
+
+    [Fact]
+    public async Task Copy_with_one_destination_does_not_ask()
+    {
+        var catalog = new MutableCatalog(Snapshot([Session(ManagedAgent.Codex, "safe-id")], []));
+        var view = new ScriptedView(SessionManagerCommand.Copy, SessionManagerCommand.Exit);
+        var operations = new RecordingOperations { Targets = [ManagedAgent.Grok] };
+        var application = new SessionManagerApplication(catalog, operations, view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Empty(view.OfferedTargets);
+        Assert.Equal([ManagedAgent.Grok], operations.CopiedTo);
+    }
+
+    [Fact]
+    public async Task Copy_cancelled_at_the_target_prompt_copies_nothing()
+    {
+        var catalog = new MutableCatalog(Snapshot([Session(ManagedAgent.Codex, "safe-id")], []));
+        var view = new ScriptedView(SessionManagerCommand.Copy, SessionManagerCommand.Exit);
+        view.CopyTargets.Enqueue(null);
+        var operations = new RecordingOperations { Targets = [ManagedAgent.Grok, ManagedAgent.Claude] };
+        var application = new SessionManagerApplication(catalog, operations, view);
+
+        await application.RunAsync(CancellationToken.None);
+
+        Assert.Empty(operations.CopiedTo);
+        Assert.Empty(operations.Copied);
+        Assert.DoesNotContain(view.Messages, message => message.Message.StartsWith("Copied", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -225,6 +275,19 @@ public sealed class SessionManagerApplicationTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return DeleteConfirmations.Dequeue();
+        }
+
+        public Queue<ManagedAgent?> CopyTargets { get; } = new();
+        public List<IReadOnlyList<ManagedAgent>> OfferedTargets { get; } = [];
+
+        public ManagedAgent? ChooseCopyTarget(
+            ManagedSession source,
+            IReadOnlyList<ManagedAgent> targets,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            OfferedTargets.Add(targets);
+            return CopyTargets.Count == 0 ? targets[0] : CopyTargets.Dequeue();
         }
 
         public void ShowMessage(string message, bool isError) => Messages.Add((message, isError));

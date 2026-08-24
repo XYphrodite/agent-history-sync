@@ -563,9 +563,76 @@ public sealed class SpectreSessionManagerViewTests
         Assert.DoesNotContain("stale message", output.ToString());
     }
 
+    [Fact]
+    public void Render_draws_one_panel_per_configured_agent()
+    {
+        var console = CreateConsole(out var output, 140, 30);
+        var state = new SessionManagerState(ThreeAgentSnapshot(
+            [Session(ManagedAgent.Codex, "one", "Codex title")],
+            [Session(ManagedAgent.Grok, "two", "Grok title")],
+            [Session(ManagedAgent.Claude, "three", "Claude title")]));
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        Assert.Contains("CODEX", rendered, StringComparison.Ordinal);
+        Assert.Contains("GROK", rendered, StringComparison.Ordinal);
+        Assert.Contains("CLAUDE", rendered, StringComparison.Ordinal);
+        Assert.Contains("Claude title", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Render_keeps_the_two_panel_layout_without_a_claude_home()
+    {
+        var console = CreateConsole(out var output, 140, 30);
+        var state = new SessionManagerState(Snapshot(
+            [Session(ManagedAgent.Codex, "one", "Codex title")],
+            [Session(ManagedAgent.Grok, "two", "Grok title")]));
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        Assert.Contains("CODEX", rendered, StringComparison.Ordinal);
+        Assert.Contains("GROK", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("CLAUDE", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ChooseCopyTarget_offers_numbered_agents_and_returns_the_pressed_one()
+    {
+        var console = CreateConsole(out var output, 140, 30);
+        var view = new SpectreSessionManagerView(console, new FakeInput(Key('2', ConsoleKey.D2)));
+        var source = Session(ManagedAgent.Codex, "one", "Codex title");
+        view.Render(new SessionManagerState(ThreeAgentSnapshot([source], [], [])));
+
+        var target = view.ChooseCopyTarget(source, [ManagedAgent.Grok, ManagedAgent.Claude], CancellationToken.None);
+
+        Assert.Equal(ManagedAgent.Claude, target);
+        var rendered = output.ToString();
+        Assert.Contains("1) Grok", rendered, StringComparison.Ordinal);
+        Assert.Contains("2) Claude", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ChooseCopyTarget_returns_null_on_escape()
+    {
+        var view = new SpectreSessionManagerView(
+            CreateConsole(out _, 140, 30), new FakeInput(Key(ConsoleKey.Escape)));
+        var source = Session(ManagedAgent.Codex, "one", "Codex title");
+        view.Render(new SessionManagerState(ThreeAgentSnapshot([source], [], [])));
+
+        Assert.Null(view.ChooseCopyTarget(source, [ManagedAgent.Grok, ManagedAgent.Claude], CancellationToken.None));
+    }
+
     private static SessionCatalogSnapshot Snapshot(
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok) => new(codex, grok);
+
+    private static SessionCatalogSnapshot ThreeAgentSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude) =>
+        new(codex, grok, claude) { ConfiguredAgents = ManagedAgents.All };
 
     private static ManagedSession Session(
         ManagedAgent agent,
