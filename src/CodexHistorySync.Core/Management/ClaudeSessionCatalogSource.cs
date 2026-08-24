@@ -15,8 +15,13 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
         "<permissions instructions>", "<skills_instructions>", "<apps_instructions>", "<plugins_instructions>",
         "<ide_opened_file>", "<ide_selection>", "<local-command-stdout>", "<command-name>", "<command-message>",
         "[Request interrupted by user",
-        "# Files mentioned by the user:", "# Context from my IDE setup:"
+        "# Files mentioned by the user:", "# Context from my IDE setup:",
+        // Editor integrations prepend a hidden primer turn the user never sees, so it must not
+        // become the session's name when there is no title record to fall back from.
+        "[vscode-supergrok primer", "## HIDDEN PRIMER"
     ];
+    private const string UserQueryOpenTag = "<user_query>";
+    private const string UserQueryCloseTag = "</user_query>";
 
     public ManagedAgent Agent => ManagedAgent.Claude;
 
@@ -104,7 +109,8 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
             var identityConfirmed = false;
             var readable = true;
 
-            foreach (var line in CompleteLines(prefix.Text, discardLast: !prefix.IsComplete).Take(MaximumMetadataRecords))
+            foreach (var line in CompleteLines(prefix.Text, discardFirst: false, discardLast: !prefix.IsComplete)
+                         .Take(MaximumMetadataRecords))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 try
@@ -148,8 +154,12 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
                 }
             }
 
+            var tailTitle = prefix.IsComplete
+                ? null
+                : await ReadTailTitleAsync(transcript, sessionId, limiter, cancellationToken).ConfigureAwait(false);
+
             return new Metadata(
-                aiTitle ?? summaryTitle ?? firstUserPreview,
+                tailTitle ?? aiTitle ?? summaryTitle ?? firstUserPreview,
                 modified,
                 readable && identityConfirmed);
         }
@@ -163,11 +173,59 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
         }
     }
 
-    private static IEnumerable<string> CompleteLines(string text, bool discardLast)
+    /// <summary>
+    /// A rename appends a fresh ai-title record, so the last one in the file is the current
+    /// name. On a transcript longer than the prefix window that record sits past it, and a
+    /// prefix-only read would name the session after its opening turn. Only long transcripts
+    /// pay for this second bounded read, and a failed one leaves the prefix title standing.
+    /// </summary>
+    private async Task<string?> ReadTailTitleAsync(
+        string transcript,
+        string sessionId,
+        SessionCatalogReadLimiter limiter,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var tail = await limiter.RunAsync(token => io.ReadTailAsync(transcript, MaximumMetadataBytes, token), cancellationToken)
+                .ConfigureAwait(false);
+            string? title = null;
+            foreach (var line in CompleteLines(tail.Text, discardFirst: !tail.IsComplete, discardLast: false)
+                         .TakeLast(MaximumMetadataRecords))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    var root = document.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object) continue;
+                    if (GetString(root, "sessionId") is { } recordId &&
+                        !string.Equals(recordId, sessionId, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.Equals(GetString(root, "type"), "ai-title", StringComparison.Ordinal))
+                        title = NormalizeTitle(GetString(root, "aiTitle")) ?? title;
+                }
+                catch (JsonException)
+                {
+                }
+            }
+            return title;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DecoderFallbackException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static IEnumerable<string> CompleteLines(string text, bool discardFirst, bool discardLast)
     {
         var lines = text.Split('\n');
+        var start = discardFirst ? 1 : 0;
         var end = lines.Length - (discardLast ? 1 : 0);
-        for (var index = 0; index < end; index++) yield return lines[index].TrimEnd('\r');
+        for (var index = start; index < end; index++) yield return lines[index].TrimEnd('\r');
     }
 
     private static bool IsSafeSessionId(string value)
@@ -192,7 +250,7 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
         if (!message.TryGetProperty("content", out var content)) yield break;
         if (content.ValueKind == JsonValueKind.String)
         {
-            if (NormalizeTitle(content.GetString()) is { } value) yield return value;
+            if (NormalizeTitle(content.GetString()) is { } value) yield return Unwrap(value);
             yield break;
         }
         if (content.ValueKind == JsonValueKind.Array)
@@ -200,7 +258,21 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
                 if (block.ValueKind == JsonValueKind.Object &&
                     string.Equals(GetString(block, "type"), "text", StringComparison.Ordinal) &&
                     NormalizeTitle(GetString(block, "text")) is { } text)
-                    yield return text;
+                    yield return Unwrap(text);
+    }
+
+    /// <summary>
+    /// Editor integrations wrap every turn in a user_query tag that carries no information of
+    /// its own: strip it so the tag neither hides a technical opening turn nor reaches a title.
+    /// </summary>
+    private static string Unwrap(string preview)
+    {
+        var value = preview;
+        if (value.StartsWith(UserQueryOpenTag, StringComparison.OrdinalIgnoreCase))
+            value = value[UserQueryOpenTag.Length..].TrimStart();
+        if (value.EndsWith(UserQueryCloseTag, StringComparison.OrdinalIgnoreCase))
+            value = value[..^UserQueryCloseTag.Length].TrimEnd();
+        return value.Length == 0 ? preview : value;
     }
 
     private static bool IsTechnicalPreview(string preview) =>

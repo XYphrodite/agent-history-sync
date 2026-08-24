@@ -1251,6 +1251,44 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsync_TakesTheClaudeTitleFromTheTailWhenARenameLandsPastThePrefix()
+    {
+        // A rename appends a fresh ai-title record: on a long transcript it sits past the
+        // bounded prefix, and a prefix-only read would show the title the session outgrew.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync(
+            "80000000-0000-0000-0000-000000000008",
+            "Opening guess",
+            "the first user turn",
+            "2026-08-24T10:00:00Z",
+            fillerBytes: 128 * 1024,
+            renamedTo: "What the session became");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        var session = Assert.Single(snapshot.Claude);
+        Assert.Equal("What the session became", session.Title);
+        Assert.True(session.CanRead);
+    }
+
+    [Fact]
+    public async Task ScanAsync_SkipsAHiddenPrimerTurnWhenNoClaudeTitleRecordExists()
+    {
+        // The editor prepends a primer the user never sees, wrapped like any other turn.
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync(
+            "80000000-0000-0000-0000-000000000008",
+            null,
+            "<user_query>\n[vscode-supergrok primer v5]\n\n## HIDDEN PRIMER\n\nReply with exactly: ok\n</user_query>",
+            "2026-08-24T10:00:00Z",
+            followUpUserText: "<user_query>\nwhat the user actually asked\n</user_query>");
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal("what the user actually asked", Assert.Single(snapshot.Claude).Title);
+    }
+
+    [Fact]
     public async Task ScanAsync_OrdersClaudeSessionsByFileWriteTimeNotByPrefixTimestamps()
     {
         // A long session's newest record inside the bounded prefix is from near its start,
@@ -1344,28 +1382,42 @@ public sealed class LocalSessionCatalogTests
             string? aiTitle,
             string userText,
             string modifiedAt,
-            string project = "c--Repos-Demo")
+            string project = "c--Repos-Demo",
+            string? followUpUserText = null,
+            int fillerBytes = 0,
+            string? renamedTo = null)
         {
             var directory = Path.Combine(ClaudePaths.Projects, project);
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, id + ".jsonl");
-            var records = new List<string>
-            {
-                JsonSerializer.Serialize(new
-                {
-                    type = "user",
-                    isSidechain = false,
-                    sessionId = id,
-                    cwd = WorkingDirectory,
-                    timestamp = modifiedAt,
-                    message = new { role = "user", content = new[] { new { type = "text", text = userText } } }
-                })
-            };
+            var records = new List<string> { ClaudeUserRecord(id, userText, modifiedAt) };
             if (aiTitle is not null)
                 records.Add(JsonSerializer.Serialize(new { type = "ai-title", aiTitle, sessionId = id }));
+            if (followUpUserText is not null)
+                records.Add(ClaudeUserRecord(id, followUpUserText, modifiedAt));
+            for (var written = 0; written < fillerBytes; written += 4096)
+                records.Add(JsonSerializer.Serialize(new
+                {
+                    type = "assistant",
+                    sessionId = id,
+                    message = new { role = "assistant", content = new[] { new { type = "text", text = new string('x', 4096) } } }
+                }));
+            if (renamedTo is not null)
+                records.Add(JsonSerializer.Serialize(new { type = "ai-title", aiTitle = renamedTo, sessionId = id }));
             await File.WriteAllTextAsync(path, string.Join('\n', records) + "\n", Utf8);
             return path;
         }
+
+        private string ClaudeUserRecord(string id, string text, string modifiedAt) =>
+            JsonSerializer.Serialize(new
+            {
+                type = "user",
+                isSidechain = false,
+                sessionId = id,
+                cwd = WorkingDirectory,
+                timestamp = modifiedAt,
+                message = new { role = "user", content = new[] { new { type = "text", text } } }
+            });
 
         public async Task<string> WriteCodexAsync(string id, string? title, string userText, string modifiedAt)
         {
