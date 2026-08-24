@@ -44,7 +44,7 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
                 sessionId,
                 nativePath,
                 DisplayTitle(metadata.Title, sessionId),
-                metadata.LastModifiedAt ?? LastWriteTime(nativePath),
+                ResolveLastModified(nativePath, metadata.LastModifiedAt),
                 metadata.CanRead);
         }).ConfigureAwait(false);
 
@@ -216,6 +216,18 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
     {
         var title = NormalizeTitle(value) ?? fallback;
         return title.Length > MaximumTitleLength ? title[..MaximumTitleLength] : title;
+    }
+
+    /// <summary>
+    /// A transcript is one append-only file, so its write time is the session's real last
+    /// activity. Record timestamps are only a fallback: the metadata read is bounded to a
+    /// 64 KiB prefix, so on a multi-megabyte session the newest timestamp it can see is from
+    /// near the start — a live session would sort below sessions untouched for days.
+    /// </summary>
+    private DateTimeOffset ResolveLastModified(string path, DateTimeOffset? fromRecords)
+    {
+        var written = LastWriteTime(path);
+        return written > DateTimeOffset.MinValue ? written : fromRecords ?? written;
     }
 
     private DateTimeOffset LastWriteTime(string path)

@@ -1251,6 +1251,25 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsync_OrdersClaudeSessionsByFileWriteTimeNotByPrefixTimestamps()
+    {
+        // A long session's newest record inside the bounded prefix is from near its start,
+        // so trusting record timestamps sinks an active session below stale ones.
+        await using var fixture = new CatalogFixture();
+        var stale = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Long running", "one", "2026-08-24T09:00:00Z");
+        var quiet = await fixture.WriteClaudeAsync("81000000-0000-0000-0000-000000000009", "Untouched for days", "two", "2026-08-24T20:00:00Z");
+        File.SetLastWriteTimeUtc(stale, new DateTime(2026, 8, 24, 23, 0, 0, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(quiet, new DateTime(2026, 8, 20, 10, 0, 0, DateTimeKind.Utc));
+
+        var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
+
+        Assert.Equal(["Long running", "Untouched for days"], snapshot.Claude.Select(session => session.Title));
+        Assert.Equal(
+            new DateTimeOffset(2026, 8, 24, 23, 0, 0, TimeSpan.Zero),
+            snapshot.Claude[0].LastModifiedAt);
+    }
+
+    [Fact]
     public async Task ScanAsync_DemotesAClaudeSessionThatExistsUnderTwoProjects()
     {
         // The same id in two project directories: neither copy can be trusted as the session.
