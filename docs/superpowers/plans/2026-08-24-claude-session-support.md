@@ -22,14 +22,14 @@
 
 ## Task 1: Claude paths and package format
 
-- [ ] `src/CodexHistorySync.Core/Claude/ClaudePaths.cs` — `sealed record ClaudePaths(string Home, string Projects)` with `TryResolve(string? configuredHome = null)`: `CLAUDE_CONFIG_DIR`, then `%USERPROFILE%\.claude`; require `projects/` to exist; return `null` otherwise. Mirror `GrokPaths.TryResolve`, including the exception filter.
-- [ ] `SessionFilePath(string projectSegment, string sessionId)` validating the segment via `PathSafety.ValidateFileComponent`.
-- [ ] `src/CodexHistorySync.Core/Claude/ClaudeSessionPackage.cs` — `SchemaVersion = 1`, `LogicalIdPrefix = "cl-"`, UUID-only session ids.
+- [x] `src/CodexHistorySync.Core/Claude/ClaudePaths.cs` — `sealed record ClaudePaths(string Home, string Projects)` with `TryResolve(string? configuredHome = null)`: `CLAUDE_CONFIG_DIR`, then `%USERPROFILE%\.claude`; require `projects/` to exist; return `null` otherwise. Mirror `GrokPaths.TryResolve`, including the exception filter.
+- [x] `SessionFilePath(string projectSegment, string sessionId)` validating the segment via `PathSafety.ValidateFileComponent`.
+- [x] `src/CodexHistorySync.Core/Claude/ClaudeSessionPackage.cs` — `SchemaVersion = 1`, `LogicalIdPrefix = "cl-"`, UUID-only session ids.
   - `BuildFromFile(string sessionFilePath)` → DTO `{ v, id, cwd, project, transcript }`; `transcript` newline-normalized to `\n`.
   - `Parse`, `HashPackage`, `ToLogicalId`, `SessionIdFromLogicalId`, `IsClaudeLogicalId`.
   - `Materialize(PackageInfo, ClaudePaths)` — temp file + `File.Move(overwrite: true)`.
-- [ ] Require the `sessionId` embedded in the records to match the file name; reject on mismatch. Read `cwd` from the first record that carries it.
-- [ ] Tests `tests/CodexHistorySync.Core.Tests/Claude/ClaudeSessionPackageTests.cs`: round-trip, id/file-name mismatch, missing `cwd`, CRLF normalization, unsafe `project` segment, non-UUID name.
+- [x] Require the `sessionId` embedded in the records to match the file name; reject on mismatch. Read `cwd` from the first record that carries it.
+- [x] Tests `tests/CodexHistorySync.Core.Tests/Claude/ClaudeSessionPackageTests.cs`: round-trip, id/file-name mismatch, missing `cwd`, CRLF normalization, unsafe `project` segment, non-UUID name.
 
 ## Task 2: Sync scanner
 
