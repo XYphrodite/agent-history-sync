@@ -58,8 +58,21 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         return new SessionCatalogSnapshot(
             Order(codexTask.Result),
             Order(grokTask.Result),
-            Order(claudeTask.Result));
+            Order(claudeTask.Result))
+        {
+            ConfiguredAgents = ManagedAgents.All.Where(IsConfigured).ToArray()
+        };
     }
+
+    private bool IsConfigured(ManagedAgent agent) => SourceFor(agent) is not null;
+
+    private ILocalSessionCatalogSource? SourceFor(ManagedAgent agent) => agent switch
+    {
+        ManagedAgent.Codex => codexSource,
+        ManagedAgent.Grok => grokSource,
+        ManagedAgent.Claude => claudeSource,
+        _ => null
+    };
 
     private async Task<IReadOnlyList<ManagedSession>> ScanAgentAsync(
         ILocalSessionCatalogSource? source,

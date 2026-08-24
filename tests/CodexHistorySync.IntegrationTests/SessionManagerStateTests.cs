@@ -198,8 +198,97 @@ public sealed class SessionManagerStateTests
         Assert.Equal(["six"], state.Snapshot.Grok.Select(session => session.SessionId));
     }
 
+    [Fact]
+    public void VisibleAgents_OmitsAnAgentWithoutAResolvableHome()
+    {
+        var twoAgents = new SessionManagerState(Snapshot([Session(ManagedAgent.Codex, "a")], []));
+        var threeAgents = new SessionManagerState(ThreeAgentSnapshot(
+            [Session(ManagedAgent.Codex, "a")], [], [Session(ManagedAgent.Claude, "c")]));
+
+        Assert.Equal([ManagedAgent.Codex, ManagedAgent.Grok], twoAgents.VisibleAgents);
+        Assert.Equal([ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude], threeAgents.VisibleAgents);
+    }
+
+    [Fact]
+    public void ConfiguredButEmptyAgentKeepsItsPanel()
+    {
+        // Zero sessions is not the same as "not installed": the panel must stay.
+        var state = new SessionManagerState(ThreeAgentSnapshot([Session(ManagedAgent.Codex, "a")], [], []));
+
+        Assert.Equal([ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude], state.VisibleAgents);
+    }
+
+    [Fact]
+    public void FocusRightStepsThroughVisiblePanelsAndStopsAtTheLast()
+    {
+        var state = new SessionManagerState(ThreeAgentSnapshot(
+            [Session(ManagedAgent.Codex, "a")], [Session(ManagedAgent.Grok, "b")], [Session(ManagedAgent.Claude, "c")]));
+
+        var grok = state.ApplyNavigation(SessionManagerCommand.FocusRight);
+        var claude = grok.ApplyNavigation(SessionManagerCommand.FocusRight);
+        var stillClaude = claude.ApplyNavigation(SessionManagerCommand.FocusRight);
+
+        Assert.Equal(ManagedAgent.Grok, grok.FocusedAgent);
+        Assert.Equal(ManagedAgent.Claude, claude.FocusedAgent);
+        Assert.Equal(ManagedAgent.Claude, stillClaude.FocusedAgent);
+        Assert.Equal("c", stillClaude.SelectedSession?.SessionId);
+    }
+
+    [Fact]
+    public void FocusLeftSkipsBackThroughVisiblePanelsOnly()
+    {
+        // Without a Claude home, right from Grok must not land on an invisible panel.
+        var state = new SessionManagerState(Snapshot([Session(ManagedAgent.Codex, "a")], [Session(ManagedAgent.Grok, "b")]))
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight);
+
+        Assert.Equal(ManagedAgent.Grok, state.FocusedAgent);
+        Assert.Equal(ManagedAgent.Codex, state.ApplyNavigation(SessionManagerCommand.FocusLeft).FocusedAgent);
+    }
+
+    [Fact]
+    public void SelectionIsTrackedPerAgentAndSurvivesFocusChanges()
+    {
+        var state = new SessionManagerState(ThreeAgentSnapshot(
+            [Session(ManagedAgent.Codex, "a1"), Session(ManagedAgent.Codex, "a2")],
+            [Session(ManagedAgent.Grok, "b1")],
+            [Session(ManagedAgent.Claude, "c1"), Session(ManagedAgent.Claude, "c2")]));
+
+        var moved = state
+            .ApplyNavigation(SessionManagerCommand.MoveDown)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.MoveDown);
+
+        Assert.Equal(1, moved.SelectedIndex(ManagedAgent.Codex));
+        Assert.Equal(0, moved.SelectedIndex(ManagedAgent.Grok));
+        Assert.Equal(1, moved.SelectedIndex(ManagedAgent.Claude));
+        Assert.Equal("c2", moved.SelectedSession?.SessionId);
+    }
+
+    [Fact]
+    public void SearchFiltersEveryPanelIncludingClaude()
+    {
+        var state = new SessionManagerState(ThreeAgentSnapshot(
+            [Session(ManagedAgent.Codex, "a", "keep me"), Session(ManagedAgent.Codex, "a2", "drop")],
+            [Session(ManagedAgent.Grok, "b", "drop")],
+            [Session(ManagedAgent.Claude, "c", "keep me too")]));
+
+        var filtered = state.WithSearchQuery("keep");
+
+        Assert.Equal(["a"], filtered.Snapshot.Codex.Select(session => session.SessionId));
+        Assert.Empty(filtered.Snapshot.Grok);
+        Assert.Equal(["c"], filtered.Snapshot.Claude.Select(session => session.SessionId));
+    }
+
     private static SessionCatalogSnapshot Snapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok) =>
         new(codex, grok);
+
+    private static SessionCatalogSnapshot ThreeAgentSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude) =>
+        new(codex, grok, claude) { ConfiguredAgents = ManagedAgents.All };
 
     private static ManagedSession Session(ManagedAgent agent, string id, string? title = null) =>
         new(agent, id, $"C:\\injected\\{id}", title ?? id, DateTimeOffset.UnixEpoch, false, true);

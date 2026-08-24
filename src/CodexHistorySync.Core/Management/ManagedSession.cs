@@ -20,6 +20,16 @@ public sealed record SessionCatalogSnapshot(
     public SessionCatalogSnapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok)
         : this(codex, grok, []) { }
 
+    /// <summary>
+    /// Agents with a resolvable home, in panel order. An agent that is not installed gets no panel
+    /// at all, so a machine without Claude keeps the two-panel layout. The catalog sets this: it is
+    /// the only thing that can tell "configured but empty" apart from "not configured", which the
+    /// fallback below cannot, and which is why hand-built snapshots should set it explicitly.
+    /// </summary>
+    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = Claude.Count == 0
+        ? [ManagedAgent.Codex, ManagedAgent.Grok]
+        : ManagedAgents.All;
+
     public IReadOnlyList<ManagedSession> For(ManagedAgent agent) => agent switch
     {
         ManagedAgent.Codex => Codex,

@@ -68,10 +68,11 @@
 
 ## Task 6: Session manager TUI
 
-- [ ] `SessionManagerState`: replace the `codexSelectedIndex`/`grokSelectedIndex` and `codexViewportOffset`/`grokViewportOffset` field pairs with per-agent maps; `FocusLeft`/`FocusRight` cycle the configured agents; filtering applies per agent.
-- [ ] `SpectreSessionManagerView`: one column per configured agent; prompt for the copy target when more than one destination exists.
-- [ ] Agents with no resolvable home are omitted from the layout entirely (a machine without Claude keeps today's two-panel view).
-- [ ] Tests: `SessionManagerStateTests`, `SessionManagerApplicationTests`, `SpectreSessionManagerViewTests` for three panels and the two-agent fallback.
+- [x] `SessionManagerState`: replace the `codexSelectedIndex`/`grokSelectedIndex` and `codexViewportOffset`/`grokViewportOffset` field pairs with per-agent maps; `FocusLeft`/`FocusRight` cycle the configured agents; filtering applies per agent.
+- [x] `SpectreSessionManagerView`: one column per configured agent; prompt for the copy target when more than one destination exists.
+- [x] `SessionCatalogSnapshot.ConfiguredAgents` carries which agents have a resolvable home; an empty session list is not the same as an absent agent.
+- [x] Agents with no resolvable home are omitted from the layout entirely (a machine without Claude keeps today's two-panel view).
+- [x] Tests: `SessionManagerStateTests`, `SessionManagerApplicationTests`, `SpectreSessionManagerViewTests` for three panels and the two-agent fallback.
 
 ## Task 7: CLI, configuration, docs
 
