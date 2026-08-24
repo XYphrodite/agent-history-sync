@@ -84,6 +84,9 @@ public sealed class ClaudeConversationReaderTests
         var path = fixture.Write(
             Turn("user", "<ide_opened_file>c:\\Repos\\Reborn\\ROADMAP.md</ide_opened_file>"),
             Turn("user", "<system-reminder>background context</system-reminder>"),
+            // Written by Claude Code on interrupt, not typed by anyone.
+            Turn("user", "[Request interrupted by user]"),
+            Turn("user", "[Request interrupted by user for tool use]"),
             Turn("user", "real question"),
             Record(new
             {
