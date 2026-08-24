@@ -50,11 +50,13 @@
 
 ## Task 4: Conversation reader and writer
 
-- [ ] Add `Claude` to `ConversationAgent`.
-- [ ] `Conversion/ClaudeConversationReader.cs` — read `type: user|assistant`; take `message.content[]` blocks of type `text` only; skip `thinking`, `tool_use`, `tool_result`, and `attachment` records; skip the `ai-title`, `last-prompt`, `queue-operation`, `atis-latch`, and `file-history-snapshot` bookkeeping records; title per design D7 — last `ai-title`, else `summary`, else the first non-technical user turn; timestamps from the records with file-time fallback.
-- [ ] Extend `ConversationTechnicalText.Wrappers` with `<ide_opened_file>`, `<ide_selection>`, `<local-command-stdout>`, `<command-name>`, `<command-message>`.
-- [ ] `Conversion/ClaudeConversationWriter.cs` — emit one record per portable turn with `parentUuid` chaining, fresh `uuid`, `sessionId`, `cwd`, ISO-8601 `timestamp`, `type`, `message`, `version`; publish through the owned-staging + `IConversationPublicationSeal` machinery used by `GrokConversationWriter`.
-- [ ] Tests: `ClaudeConversationReaderTests`, `ClaudeConversationWriterTests`, and a Claude leg in `CrossAgentCompatibilityTests`.
+- [x] Add `Claude` to `ConversationAgent`.
+- [x] `Conversion/ClaudeConversationReader.cs` — read `type: user|assistant`; take `message.content[]` blocks of type `text` only; skip `thinking`, `tool_use`, `tool_result`, and `attachment` records; skip the `ai-title`, `last-prompt`, `queue-operation`, `atis-latch`, and `file-history-snapshot` bookkeeping records; title per design D7 — last `ai-title`, else `summary`, else the first non-technical user turn; timestamps from the records with file-time fallback.
+- [x] Extend `ConversationTechnicalText.Wrappers` with `<ide_opened_file>`, `<ide_selection>`, `<local-command-stdout>`, `<command-name>`, `<command-message>`.
+- [x] `Conversion/ClaudeConversationWriter.cs` — emit one record per portable turn with `parentUuid` chaining, fresh `uuid`, `sessionId`, `cwd`, ISO-8601 `timestamp`, `type`, `message`, `version`; publish through the owned-staging + `IConversationPublicationSeal` machinery used by `GrokConversationWriter`.
+- [x] The reader skips `isSidechain: true` records: they belong to a subagent, not to this conversation.
+- [x] The writer emits a trailing `ai-title` record carrying the title and the copy timestamp, otherwise a read back loses the title and a single-turn conversation cannot recover `LastModifiedAt`.
+- [x] Tests: `ClaudeConversationReaderTests`, `ClaudeConversationWriterTests`, and a Claude leg in `CrossAgentCompatibilityTests`.
 
 ## Task 5: Session catalog and operations
 

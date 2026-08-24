@@ -61,6 +61,12 @@ encoding *is* reversible.
 A session whose records contain no `cwd` is not syncable; the scanner reports it
 as uncertain rather than guessing.
 
+The **forward** direction is well defined and is used: a conversation copied out of
+another agent has a cwd but no Claude directory yet, so `ClaudePaths.EncodeProjectSegment`
+builds one by collapsing `:`, `\` and `/` to `-`. Only the reverse is forbidden. An
+exotic path that Claude would mangle differently costs grouping in Claude's own
+project list, not correctness: the session's real cwd lives in its records.
+
 ### D2 — Logical id namespace `cl-`
 
 Codex logical ids are the bare session id (`SessionScanner.IsSafeLogicalId`,

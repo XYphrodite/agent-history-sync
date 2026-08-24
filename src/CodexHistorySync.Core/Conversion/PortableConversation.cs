@@ -1,6 +1,6 @@
 namespace CodexHistorySync.Core.Conversion;
 
-public enum ConversationAgent { Codex, Grok }
+public enum ConversationAgent { Codex, Grok, Claude }
 
 public enum ConversationRole { User, Assistant }
 
