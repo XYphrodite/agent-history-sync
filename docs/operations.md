@@ -44,7 +44,19 @@ agent-sync pull   # download/apply only; never publish local history
 agent-sync push   # publish only; never replace local history
 ```
 
-All three commands call the same `SyncEngine` used by automation. Each command disposes its temporary engine after the operation, serializing with any active work and zeroing the engine-owned repository-key copy. Output contains only revisions and object counts. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
+All three commands call the same `SyncEngine` used by automation. Each command disposes its temporary engine after the operation, serializing with any active work and zeroing the engine-owned repository-key copy. Output contains only revisions, object counts, and byte sizes.
+
+After the counter line, each run prints what the scan actually holds — a `local=` total with its size, then one line per agent that owns sessions on this machine:
+
+```
+revision=8a50fd1b uploaded=12 downloaded=0 deleted=0 conflicts=0 skipped-oversized=0
+local=1046 size=1.9 GiB
+  codex=1002 size=1.6 GiB (active=1001 archived=1 attachments=0)
+  grok=39 size=366 MiB
+  claude=5 size=5.0 MiB
+```
+
+The numbers come from the same scan the plan was built on, so they describe exactly what the run compared. An agent with no local sessions is omitted entirely: a machine without Grok must not read as one whose Grok sessions all vanished. Sizes are plaintext bytes on disk, not the encrypted payload the remote stores. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
 
 If Codex or Grok locks a session after the stable scan but before encryption, Windows sharing/lock violations defer only that session. Other eligible objects are still published, and the locked session remains pending for a later run. Other I/O failures remain fatal.
 

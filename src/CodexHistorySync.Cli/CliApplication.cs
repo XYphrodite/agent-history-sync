@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using CodexHistorySync.Core.Codex;
+using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
 
 namespace CodexHistorySync.Cli;
@@ -213,7 +215,69 @@ public sealed class CliApplication
     {
         var result = await Services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
         console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized}");
+        WriteLocalBreakdown(result.LocalByKind);
         return result.Conflicts == 0 ? 0 : 4;
+    }
+
+    /// <summary>
+    /// The counters above say what moved; this says what the run actually holds. Sessions are
+    /// grouped by the agent that owns them, because that is the unit a reader thinks in — the
+    /// object kinds are an implementation detail everywhere except inside Codex, where the
+    /// archived and attachment splits are worth naming.
+    /// </summary>
+    private void WriteLocalBreakdown(IReadOnlyDictionary<ObjectKind, SessionKindTotals> byKind)
+    {
+        if (byKind.Count == 0) return;
+        var groups = new (string Name, ObjectKind[] Kinds)[]
+        {
+            ("codex", [ObjectKind.ActiveSession, ObjectKind.ArchivedSession, ObjectKind.Attachment]),
+            ("grok", [ObjectKind.GrokSession]),
+            ("claude", [ObjectKind.ClaudeSession]),
+        };
+        var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
+        var accounted = groups.SelectMany(group => group.Kinds).ToHashSet();
+        var other = Sum(byKind, byKind.Keys.Where(kind => !accounted.Contains(kind)).ToArray());
+        var total = Sum(byKind, byKind.Keys.ToArray());
+
+        console.WriteLine($"local={total.Count} size={FormatSize(total.Bytes)}");
+        foreach (var (name, kinds, totals) in grouped)
+        {
+            if (totals.Count == 0) continue;
+            var detail = name == "codex"
+                ? $" (active={Sum(byKind, [kinds[0]]).Count} archived={Sum(byKind, [kinds[1]]).Count} attachments={Sum(byKind, [kinds[2]]).Count})"
+                : string.Empty;
+            console.WriteLine($"  {name}={totals.Count} size={FormatSize(totals.Bytes)}{detail}");
+        }
+        if (other.Count > 0) console.WriteLine($"  other={other.Count} size={FormatSize(other.Bytes)}");
+    }
+
+    private static SessionKindTotals Sum(IReadOnlyDictionary<ObjectKind, SessionKindTotals> byKind, ObjectKind[] kinds)
+    {
+        var count = 0;
+        var bytes = 0L;
+        foreach (var kind in kinds)
+            if (byKind.TryGetValue(kind, out var totals))
+            {
+                count += totals.Count;
+                bytes += totals.Bytes;
+            }
+        return new SessionKindTotals(count, bytes);
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var index = 0;
+        double value = bytes;
+        while (value >= 1024 && index < units.Length - 1)
+        {
+            value /= 1024;
+            index++;
+        }
+        var formatted = index == 0
+            ? bytes.ToString(CultureInfo.InvariantCulture)
+            : value.ToString(value >= 100 ? "F0" : "F1", CultureInfo.InvariantCulture);
+        return formatted + " " + units[index];
     }
 
     private async Task<int> RunStatusAsync(CancellationToken cancellationToken)
