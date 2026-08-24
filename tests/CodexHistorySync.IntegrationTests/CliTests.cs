@@ -4,6 +4,7 @@ using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
 using CodexHistorySync.Windows;
 
@@ -415,6 +416,65 @@ public sealed class CliTests
         Assert.Equal(2, exitCode);
         Assert.Contains("Usage:", fixture.Console.ErrorText);
         Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Sync_reports_local_sessions_grouped_by_the_agent_that_owns_them()
+    {
+        var fixture = new Fixture();
+        fixture.Services.SyncResult = new SyncResult("revision-7", 2, 3, 1, 0, false)
+        {
+            LocalByKind = new Dictionary<ObjectKind, SessionKindTotals>
+            {
+                [ObjectKind.ActiveSession] = new(1001, 1_600L * 1024 * 1024),
+                [ObjectKind.ArchivedSession] = new(1, 2L * 1024 * 1024),
+                [ObjectKind.GrokSession] = new(39, 366L * 1024 * 1024),
+                [ObjectKind.ClaudeSession] = new(5, 5L * 1024 * 1024),
+            }
+        };
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        var output = fixture.Console.OutputText;
+        Assert.Contains("local=1046 size=1.9 GiB", output);
+        Assert.Contains("codex=1002 size=1.6 GiB (active=1001 archived=1 attachments=0)", output);
+        Assert.Contains("grok=39 size=366 MiB", output);
+        Assert.Contains("claude=5 size=5.0 MiB", output);
+    }
+
+    [Fact]
+    public async Task Sync_omits_the_breakdown_for_an_agent_with_no_local_sessions()
+    {
+        // A machine without Grok must not read as one whose Grok sessions all vanished.
+        var fixture = new Fixture();
+        fixture.Services.SyncResult = new SyncResult("revision-7", 0, 0, 0, 0, false)
+        {
+            LocalByKind = new Dictionary<ObjectKind, SessionKindTotals>
+            {
+                [ObjectKind.ClaudeSession] = new(5, 5L * 1024 * 1024),
+            }
+        };
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("local=5 size=5.0 MiB", fixture.Console.OutputText);
+        Assert.DoesNotContain("grok=", fixture.Console.OutputText);
+        Assert.DoesNotContain("codex=", fixture.Console.OutputText);
+    }
+
+    [Fact]
+    public async Task Sync_without_a_scan_breakdown_prints_only_the_counters()
+    {
+        var fixture = new Fixture();
+        fixture.Services.SyncResult = new SyncResult("revision-7", 2, 3, 1, 0, false);
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("uploaded=2", fixture.Console.OutputText);
+        Assert.DoesNotContain("local=", fixture.Console.OutputText);
     }
 
     [Theory]

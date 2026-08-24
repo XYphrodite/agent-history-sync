@@ -19,6 +19,9 @@ public enum SyncMode { Pull, Push, Bidirectional }
 public enum SyncProgressPhase { WaitingForLock, ScanningLocal, ReadingRemote, AuthenticatingIndex, Planning, StagingChanges, Publishing, ApplyingLocalChanges, SavingState }
 public sealed record SyncProgress(SyncProgressPhase Phase, string Message);
 
+/// <summary>How many local objects of one kind were scanned, and how many bytes they occupy.</summary>
+public readonly record struct SessionKindTotals(int Count, long Bytes);
+
 public sealed record SyncResult(
     string RemoteRevision,
     int Uploaded,
@@ -26,7 +29,15 @@ public sealed record SyncResult(
     int Deleted,
     int Conflicts,
     bool RemoteChangedDuringAttempt,
-    int SkippedOversized = 0);
+    int SkippedOversized = 0)
+{
+    /// <summary>
+    /// Local count and byte size per kind, taken from the same scan the plan was built on, so
+    /// the reported totals describe exactly what this run compared.
+    /// </summary>
+    public IReadOnlyDictionary<ObjectKind, SessionKindTotals> LocalByKind { get; init; } =
+        new Dictionary<ObjectKind, SessionKindTotals>();
+}
 public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges,
     IReadOnlySet<string> ConflictIdentities)
 {
@@ -161,6 +172,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         }
         return new SessionScanResult(objects, uncertain, duplicates);
     }
+
+    private static IReadOnlyDictionary<ObjectKind, SessionKindTotals> SummarizeByKind(SessionScanResult scan) =>
+        scan.Objects.GroupBy(item => item.Kind)
+            .ToDictionary(group => group.Key, group => new SessionKindTotals(group.Count(), group.Sum(item => item.Length)));
 
     private async Task<IReadOnlyList<LocalObject>> ScanLocalObjectsAsync(CancellationToken ct)
     {
@@ -440,14 +455,20 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             if (!deferred.Contains(action.ObjectId) && successful.TryGetValue(action.ObjectId, out var version)) next[action.ObjectId] = version;
                         if (!remote.HasAuthenticatedIndex && changes.Count == 0 && baseline.Count == 0)
                             return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
-                                await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized);
+                                await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized)
+                            {
+                                LocalByKind = SummarizeByKind(scan)
+                            };
                         Report(SyncProgressPhase.SavingState, "saving synchronization state");
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
                             next.Values.OrderBy(value => value.Id.Value, StringComparer.Ordinal).ToArray()), ct).ConfigureAwait(false);
                         stateSaved = true;
                         operationCommitted = true;
                         return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
-                            await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized);
+                            await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized)
+                        {
+                            LocalByKind = SummarizeByKind(scan)
+                        };
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
                     {
