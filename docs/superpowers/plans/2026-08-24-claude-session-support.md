@@ -50,7 +50,7 @@
 ## Task 4: Conversation reader and writer
 
 - [ ] Add `Claude` to `ConversationAgent`.
-- [ ] `Conversion/ClaudeConversationReader.cs` — read `type: user|assistant`; take `message.content[]` blocks of type `text` only; skip `thinking`, `tool_use`, `tool_result`, and `attachment` records; title from the `summary` record when present, else the first non-technical user turn; timestamps from the records with file-time fallback.
+- [ ] `Conversion/ClaudeConversationReader.cs` — read `type: user|assistant`; take `message.content[]` blocks of type `text` only; skip `thinking`, `tool_use`, `tool_result`, and `attachment` records; skip the `ai-title`, `last-prompt`, `queue-operation`, `atis-latch`, and `file-history-snapshot` bookkeeping records; title per design D7 — last `ai-title`, else `summary`, else the first non-technical user turn; timestamps from the records with file-time fallback.
 - [ ] Extend `ConversationTechnicalText.Wrappers` with `<ide_opened_file>`, `<ide_selection>`, `<local-command-stdout>`, `<command-name>`, `<command-message>`.
 - [ ] `Conversion/ClaudeConversationWriter.cs` — emit one record per portable turn with `parentUuid` chaining, fresh `uuid`, `sessionId`, `cwd`, ISO-8601 `timestamp`, `type`, `message`, `version`; publish through the owned-staging + `IConversationPublicationSeal` machinery used by `GrokConversationWriter`.
 - [ ] Tests: `ClaudeConversationReaderTests`, `ClaudeConversationWriterTests`, and a Claude leg in `CrossAgentCompatibilityTests`.
@@ -58,7 +58,7 @@
 ## Task 5: Session catalog and operations
 
 - [ ] Add `Claude` to `ManagedAgent`. Give `SessionCatalogSnapshot` an agent-indexed accessor `For(ManagedAgent)` while keeping `Codex`/`Grok` properties so existing call sites compile.
-- [ ] `Management/ClaudeSessionCatalogSource.cs` mirroring `GrokSessionCatalogSource`: bounded prefix read (`64 KiB`, 64 records), title from `summary` or first non-technical user text, `MaximumTitleLength = 80`, duplicates demoted to `CanRead = false`.
+- [ ] `Management/ClaudeSessionCatalogSource.cs` mirroring `GrokSessionCatalogSource`: bounded prefix read (`64 KiB`, 64 records), title per design D7 — newest `ai-title` inside the window, else `summary`, else first non-technical user text — `MaximumTitleLength = 80`, duplicates demoted to `CanRead = false`.
 - [ ] `LocalSessionOperations`: add `CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken)`; keep the two-argument overload resolving the target only when exactly one other agent is configured. Register the new Claude failure strings in the reason sets.
 - [ ] `WindowsManagedSessionActiveState.ReadClaudeActiveIds()` implementing D3.
 - [ ] Tests: `LocalSessionCatalogTests` and `LocalSessionOperationsTests` gain Claude cases — copy to each target, refusal on an active session, unreadable duplicate.

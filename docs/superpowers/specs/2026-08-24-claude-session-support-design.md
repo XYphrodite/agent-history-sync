@@ -24,9 +24,24 @@ Every record is a JSON object. Conversation records carry `sessionId`, `cwd`,
 `timestamp`, `uuid`, `parentUuid`, `version`, `gitBranch`, and
 `message: { role, content[] }`.
 
-Record `type` values observed: `user`, `assistant`, `attachment`,
-`queue-operation`, `summary`, `file-history-snapshot`.
+Record `type` values observed, with counts and byte shares from a 0.86 MB session:
+
+| `type` | Records | Bytes | Carries `cwd` | Role |
+|---|---|---|---|---|
+| `user` | 96 | 445 KB | yes | conversation |
+| `assistant` | 168 | 365 KB | yes | conversation |
+| `attachment` | 80 | 44 KB | yes | editor and tool context |
+| `last-prompt` | 21 | 4 KB | no | most recent user prompt |
+| `ai-title` | 23 | 2 KB | no | official session title |
+| `queue-operation` | 14 | 2 KB | no | prompt queue bookkeeping |
+| `atis-latch` | 22 | 2 KB | no | internal latch |
+| `file-history-snapshot` | 7 | 2 KB | no | tracked-file backups |
+
 Content block `type` values observed: `text`, `thinking`, `tool_use`, `tool_result`.
+
+No `summary` record was observed in any live session; Claude records its title as
+`ai-title` instead (D7). Only `user`, `assistant`, and `attachment` records carry
+`cwd`, which is what D1 reads.
 
 ## Decisions
 
@@ -98,6 +113,22 @@ survives for the case where exactly one other agent is available.
 Only `projects/**/*.jsonl`. This mirrors the Grok policy of syncing the
 conversation package without terminal logs, locks, or SQLite, and keeps
 machine-specific and credential-bearing state off the wire.
+
+### D7 — The official title is the last `ai-title` record
+
+Claude writes `{"type":"ai-title","aiTitle":"…","sessionId":"…"}` and rewrites it
+as the conversation develops — 23 such records in the session measured above. The
+official title is therefore the **last** one in file order, not the first.
+
+`summary` is kept as a second-position fallback because the earlier survey named
+it, but no live session contained one; the first non-technical user turn remains
+the last resort, as for Codex and Grok.
+
+Title extraction runs inside the bounded prefix read of the catalog source
+(`64 KiB`, 64 records). `ai-title` records are small and appear throughout the
+file, so a session longer than the prefix can legitimately have its newest title
+outside the window; the newest title *within* the window is used rather than
+widening the read.
 
 ## Layer impact
 
