@@ -140,11 +140,25 @@ official title is therefore the **last** one in file order, not the first.
 it, but no live session contained one; the first non-technical user turn remains
 the last resort, as for Codex and Grok.
 
-Title extraction runs inside the bounded prefix read of the catalog source
+Title extraction starts in the bounded prefix read of the catalog source
 (`64 KiB`, 64 records). `ai-title` records are small and appear throughout the
-file, so a session longer than the prefix can legitimately have its newest title
-outside the window; the newest title *within* the window is used rather than
-widening the read.
+file, so on a long session the newest one lands past the prefix. Measured on a
+668 KiB session, the first `ai-title` sat at byte 96 446 and the catalog fell
+through to the opening turn — which, under an editor integration, is a hidden
+primer the user never wrote.
+
+A transcript the prefix did not cover therefore gets a second bounded read of
+the trailing `64 KiB`, and the newest `ai-title` in that tail outranks anything
+the prefix found: a rename is appended, so the tail carries the current name.
+The extra read is skipped whenever the prefix already reached EOF, and a tail
+read that fails leaves the prefix title standing rather than demoting the
+session to unreadable.
+
+Editor integrations wrap **every** turn in `<user_query>`, so the tag cannot
+itself mark a turn technical. It is stripped before the technical-preview check
+and before a preview can become a title; the hidden primer turn is matched on
+its own opening text instead. The last-resort title is then a turn the user
+actually wrote.
 
 ## Layer impact
 
