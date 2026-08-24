@@ -105,7 +105,12 @@ public sealed class GrokConversationReader : IConversationReader
             if (role is null) continue;
 
             var text = ReadContent(root, role.Value);
-            if (!string.IsNullOrWhiteSpace(text)) turns.Add(new PortableTurn(role.Value, text));
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            // The Codex and Claude readers drop these, so carrying them here made every Grok
+            // session that contains one impossible to copy: the destination wrote all turns,
+            // read back fewer, and failed its own round-trip check.
+            if (role.Value == ConversationRole.User && ConversationTechnicalText.IsWrapper(text)) continue;
+            turns.Add(new PortableTurn(role.Value, text));
         }
         return turns;
     }
