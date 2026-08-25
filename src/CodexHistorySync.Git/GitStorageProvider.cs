@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
@@ -54,6 +55,11 @@ public sealed class GitStorageProvider : IStorageProvider
 {
     private static readonly Regex RepositoryIdPattern = new("^[A-Za-z0-9_-]{1,128}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex ObjectIdPattern = new("^[a-f0-9]{64}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    /// <summary>
+    /// Publishes to run between two mirror maintenance passes. Low enough that the unreachable
+    /// snapshots cannot pile up unnoticed, high enough that a busy day is not mostly repacking.
+    /// </summary>
+    private const int PublishesPerMaintenance = 3;
     private readonly string _repositoryId;
     private readonly string _remoteUrl;
     private readonly GitRemoteKind _remoteKind;
@@ -217,11 +223,17 @@ public sealed class GitStorageProvider : IStorageProvider
             var push = await _pushTransport.PushAsync(_git, _clonePath, request.ExpectedRevision, ct)
                 .ConfigureAwait(false);
             if (push.ExitCode == 0)
+            {
+                await MaintainMirrorAsync(ct).ConfigureAwait(false);
                 return new PublishResult(true, candidateRevision);
+            }
 
             var current = await FetchRevisionAsync(ct).ConfigureAwait(false);
             if (StringComparer.Ordinal.Equals(current, candidateRevision))
+            {
+                await MaintainMirrorAsync(ct).ConfigureAwait(false);
                 return new PublishResult(true, candidateRevision);
+            }
             await MaterializeRevisionAsync(current, ct).ConfigureAwait(false);
             if (!StringComparer.Ordinal.Equals(current, request.ExpectedRevision))
                 return new PublishResult(false, current);
@@ -233,6 +245,73 @@ public sealed class GitStorageProvider : IStorageProvider
             _gate.Release();
         }
     }
+
+    /// <summary>
+    /// Every publish replaces <c>main</c> with a new orphan commit, so the previous snapshot's
+    /// blobs are unreachable the moment the push lands — but the mirror's reflog keeps them
+    /// alive, and nothing else ever drops them. Measured on one machine: 2.9 GB of pack files
+    /// behind a 194 MB snapshot, 4386 objects unreachable once reflogs are discounted.
+    ///
+    /// This expires those reflog entries and prunes what they held, every
+    /// <see cref="PublishesPerMaintenance"/> publishes. It touches only this machine's mirror:
+    /// the remote keeps exactly the snapshot it already has, and no other device sees anything.
+    /// Maintenance is opportunistic — a failure here must never fail a publish that succeeded.
+    /// </summary>
+    private async Task MaintainMirrorAsync(CancellationToken ct)
+    {
+        try
+        {
+            var due = NextMaintenanceCount() >= PublishesPerMaintenance;
+            if (!due) return;
+            var expire = await RunGitAsync(
+                ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"], ct).ConfigureAwait(false);
+            if (expire.ExitCode != 0) return;
+            var collect = await RunGitAsync(["gc", "--prune=now", "--quiet"], ct).ConfigureAwait(false);
+            if (collect.ExitCode == 0) ResetMaintenanceCount();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+            or JsonException or InvalidDataException)
+        {
+        }
+    }
+
+    private string MaintenanceStatePath() => Path.Combine(_storageRoot, _repositoryId, "maintenance.json");
+
+    /// <summary>Records one more publish and returns the running total. Unreadable state restarts at one.</summary>
+    private int NextMaintenanceCount()
+    {
+        var path = MaintenanceStatePath();
+        var count = 0;
+        try
+        {
+            if (File.Exists(path) &&
+                JsonSerializer.Deserialize<MaintenanceState>(File.ReadAllText(path)) is { } state &&
+                state.PublishesSinceMaintenance > 0)
+                count = state.PublishesSinceMaintenance;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+        }
+        count++;
+        WriteMaintenanceCount(path, count);
+        return count;
+    }
+
+    private void ResetMaintenanceCount() => WriteMaintenanceCount(MaintenanceStatePath(), 0);
+
+    private static void WriteMaintenanceCount(string path, int count)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(new MaintenanceState(1, count)));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private sealed record MaintenanceState(int SchemaVersion, int PublishesSinceMaintenance);
 
     private async Task EnsureCloneAsync(CancellationToken ct)
     {
