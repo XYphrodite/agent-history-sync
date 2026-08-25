@@ -73,7 +73,7 @@ Each successful publish rewrites `main` to a **single orphan commit** (force-wit
 ### Mirror maintenance
 
 The remote reclaims its orphaned blobs on its own. The local mirror under
-`%LOCALAPPDATA%\CodexHistorySyncepositories\<id>\git` does not: every publish orphans the previous snapshot, but the mirror's reflog keeps those objects reachable and nothing drops them. Measured on one machine, that was 2.9 GB of pack files behind a 194 MB snapshot, with 4386 objects unreachable once reflogs were discounted.
+`%LOCALAPPDATA%\CodexHistorySync\repositories\<id>\git` does not: every publish orphans the previous snapshot, but the mirror's reflog keeps those objects reachable and nothing drops them. Measured on one machine, that was 2.9 GB of pack files behind a 194 MB snapshot, with 4386 objects unreachable once reflogs were discounted.
 
 Every third successful publish therefore expires the mirror's reflog entries and prunes what they held. The counter lives in `maintenance.json` beside `state.json`. Maintenance is opportunistic: a failure is swallowed, the counter is only reset once the collection succeeds, and a publish that already landed is never failed by it.
 
