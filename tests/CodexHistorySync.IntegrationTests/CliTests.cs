@@ -430,14 +430,16 @@ public sealed class CliTests
                 [ObjectKind.ArchivedSession] = new(1, 2L * 1024 * 1024),
                 [ObjectKind.GrokSession] = new(39, 366L * 1024 * 1024),
                 [ObjectKind.ClaudeSession] = new(5, 5L * 1024 * 1024),
-            }
+            },
+            LocalIgnored = 916
         };
 
         var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
 
         Assert.Equal(0, exitCode);
         var output = fixture.Console.OutputText;
-        Assert.Contains("local=1046 size=1.9 GiB", output);
+        // The excluded count keeps the totals honest: 916 sessions are on disk and unsynchronized.
+        Assert.Contains("local=1046 size=1.9 GiB excluded=916", output);
         Assert.Contains("codex=1002 size=1.6 GiB (active=1001 archived=1 attachments=0)", output);
         Assert.Contains("grok=39 size=366 MiB", output);
         Assert.Contains("claude=5 size=5.0 MiB", output);
@@ -460,6 +462,7 @@ public sealed class CliTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains("local=5 size=5.0 MiB", fixture.Console.OutputText);
+        Assert.DoesNotContain("excluded=", fixture.Console.OutputText);
         Assert.DoesNotContain("grok=", fixture.Console.OutputText);
         Assert.DoesNotContain("codex=", fixture.Console.OutputText);
     }

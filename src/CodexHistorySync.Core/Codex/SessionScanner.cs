@@ -12,6 +12,15 @@ public sealed record SessionScanResult(
 {
     public bool HasFatalErrors => DuplicateIds.Count != 0;
     public bool IsAbsenceConfirmed(ObjectKind kind) => !UncertainKinds.Contains(kind);
+
+    /// <summary>
+    /// Sessions that exist on disk and are deliberately kept out of <see cref="Objects"/>. They
+    /// are excluded, not absent: a caller that mistook one for a deletion would publish a
+    /// tombstone and erase the file on every other machine that pulls it.
+    /// </summary>
+    public IReadOnlySet<LogicalObjectId> IgnoredIds { get; init; } = new HashSet<LogicalObjectId>();
+
+    public bool IsIgnored(LogicalObjectId id) => IgnoredIds.Contains(id);
 }
 
 public sealed class SessionScanner
@@ -63,6 +72,7 @@ public sealed class SessionScanner
         var objectsById = new Dictionary<LogicalObjectId, LocalObject>();
         var uncertainKinds = new HashSet<ObjectKind>();
         var duplicateIds = new HashSet<LogicalObjectId>();
+        var ignoredIds = new HashSet<LogicalObjectId>();
         var candidates = new List<ObservedCandidate>();
         CollectCandidates(paths.Sessions, ObjectKind.ActiveSession, candidates, uncertainKinds, cancellationToken);
         CollectCandidates(paths.ArchivedSessions, ObjectKind.ArchivedSession, candidates, uncertainKinds,
@@ -71,7 +81,7 @@ public sealed class SessionScanner
         if (candidates.Count != 0)
             await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        var results = new LocalObject?[candidates.Count];
+        var results = new ScannedSession?[candidates.Count];
         await Parallel.ForEachAsync(Enumerable.Range(0, candidates.Count), new ParallelOptions
         {
             CancellationToken = cancellationToken,
@@ -85,9 +95,24 @@ public sealed class SessionScanner
         {
             cancellationToken.ThrowIfCancellationRequested();
             var candidate = candidates[index];
-            var session = results[index];
-            if (session is null) uncertainKinds.Add(candidate.Kind);
-            else if (objectsById.TryAdd(session.Id, session)) objects.Add(session);
+            var scanned = results[index];
+            if (scanned is null)
+            {
+                uncertainKinds.Add(candidate.Kind);
+                continue;
+            }
+
+            var session = scanned.Value.Object;
+            if (scanned.Value.IsSubagent)
+            {
+                // A subagent thread is machine-local transcript noise the manager already hides.
+                // It is recorded as ignored rather than dropped so its absence never reads as a
+                // deletion of a session another machine still holds.
+                ignoredIds.Add(session.Id);
+                continue;
+            }
+
+            if (objectsById.TryAdd(session.Id, session)) objects.Add(session);
             else
             {
                 // Never silently prefer the first path: drop both sides from Objects and fail closed.
@@ -98,7 +123,7 @@ public sealed class SessionScanner
                     objects.Remove(prior);
             }
         }
-        return new SessionScanResult(objects, uncertainKinds, duplicateIds);
+        return new SessionScanResult(objects, uncertainKinds, duplicateIds) { IgnoredIds = ignoredIds };
     }
 
     private static void CollectCandidates(
@@ -150,7 +175,7 @@ public sealed class SessionScanner
         }
     }
 
-    private static async Task<LocalObject?> ReadStableSessionAsync(
+    private static async Task<ScannedSession?> ReadStableSessionAsync(
         ObservedCandidate candidate,
         CancellationToken cancellationToken)
     {
@@ -166,16 +191,18 @@ public sealed class SessionScanner
             var normalized = SessionJsonlNormalizer.Normalize(bytes);
             if (normalized.Length == 0 || normalized[^1] != (byte)'\n') return null;
 
-            var id = ReadSessionId(normalized);
-            if (id is null) return null;
+            var identity = ReadSessionIdentity(normalized);
+            if (identity is null) return null;
 
-            return new LocalObject(
-                id.Value,
-                candidate.Kind,
-                Path.GetFullPath(candidate.Path),
-                new ContentHash(Convert.ToHexString(SHA256.HashData(normalized)).ToLowerInvariant()),
-                normalized.LongLength,
-                new DateTimeOffset(second.LastWriteTimeUtc, TimeSpan.Zero));
+            return new ScannedSession(
+                new LocalObject(
+                    identity.Value.Id,
+                    candidate.Kind,
+                    Path.GetFullPath(candidate.Path),
+                    new ContentHash(Convert.ToHexString(SHA256.HashData(normalized)).ToLowerInvariant()),
+                    normalized.LongLength,
+                    new DateTimeOffset(second.LastWriteTimeUtc, TimeSpan.Zero)),
+                identity.Value.IsSubagent);
         }
         catch (IOException)
         {
@@ -229,10 +256,11 @@ public sealed class SessionScanner
         return await stream.ReadAsync(new byte[1], cancellationToken) == 0 ? bytes : null;
     }
 
-    private static LogicalObjectId? ReadSessionId(byte[] bytes)
+    private static SessionIdentity? ReadSessionIdentity(byte[] bytes)
     {
         var text = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes);
         LogicalObjectId? id = null;
+        var subagent = false;
 
         using var reader = new StringReader(text);
         string? line;
@@ -253,10 +281,23 @@ public sealed class SessionScanner
             var candidate = new LogicalObjectId(parsed!);
             if (id is not null && id.Value != candidate) return null;
             id = candidate;
+            if (IsSubagent(payload)) subagent = true;
         }
 
-        return id;
+        return id is null ? null : new SessionIdentity(id.Value, subagent);
     }
+
+    /// <summary>
+    /// The same two markers <c>CodexSessionCatalogSource</c> hides a subagent thread by. Kept
+    /// byte-for-byte identical so a session cannot be invisible in the manager yet synchronized.
+    /// </summary>
+    private static bool IsSubagent(JsonElement payload) =>
+        string.Equals(GetString(payload, "thread_source"), "subagent", StringComparison.OrdinalIgnoreCase) ||
+        payload.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object &&
+        source.TryGetProperty("subagent", out var subagent) && subagent.ValueKind == JsonValueKind.Object;
+
+    private static string? GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     private static bool IsSafeLogicalId(string? value) =>
         !string.IsNullOrWhiteSpace(value)
@@ -266,6 +307,8 @@ public sealed class SessionScanner
         && value != "."
         && value != "..";
 
+    private readonly record struct SessionIdentity(LogicalObjectId Id, bool IsSubagent);
+    private readonly record struct ScannedSession(LocalObject Object, bool IsSubagent);
     private readonly record struct FileObservation(long Length, DateTime LastWriteTimeUtc);
     private readonly record struct ObservedCandidate(string Path, ObjectKind Kind, FileObservation First);
 }

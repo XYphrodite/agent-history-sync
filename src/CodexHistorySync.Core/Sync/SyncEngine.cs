@@ -37,6 +37,12 @@ public sealed record SyncResult(
     /// </summary>
     public IReadOnlyDictionary<ObjectKind, SessionKindTotals> LocalByKind { get; init; } =
         new Dictionary<ObjectKind, SessionKindTotals>();
+
+    /// <summary>
+    /// Sessions found on disk and deliberately not synchronized. Reported so the local totals
+    /// above cannot read as everything this machine holds.
+    /// </summary>
+    public int LocalIgnored { get; init; }
 }
 public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges,
     IReadOnlySet<string> ConflictIdentities)
@@ -151,11 +157,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         var byId = objects.ToDictionary(item => item.Id);
         var duplicates = new HashSet<LogicalObjectId>(merged.DuplicateIds);
         var uncertain = new HashSet<ObjectKind>(merged.UncertainKinds);
+        var ignored = new HashSet<LogicalObjectId>(merged.IgnoredIds);
         foreach (var task in extraTasks)
         {
             var scan = await task.ConfigureAwait(false);
             foreach (var item in scan.DuplicateIds) duplicates.Add(item);
             foreach (var kind in scan.UncertainKinds) uncertain.Add(kind);
+            foreach (var item in scan.IgnoredIds) ignored.Add(item);
             foreach (var item in scan.Objects)
             {
                 if (byId.TryAdd(item.Id, item)) objects.Add(item);
@@ -170,7 +178,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 }
             }
         }
-        return new SessionScanResult(objects, uncertain, duplicates);
+        return new SessionScanResult(objects, uncertain, duplicates) { IgnoredIds = ignored };
     }
 
     private static IReadOnlyDictionary<ObjectKind, SessionKindTotals> SummarizeByKind(SessionScanResult scan) =>
@@ -457,7 +465,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
                                 await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized)
                             {
-                                LocalByKind = SummarizeByKind(scan)
+                                LocalByKind = SummarizeByKind(scan),
+                                LocalIgnored = scan.IgnoredIds.Count
                             };
                         Report(SyncProgressPhase.SavingState, "saving synchronization state");
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
@@ -467,7 +476,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         return new SyncResult(revision, attemptUploads, attemptDownloaded, attemptDeleted,
                             await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized)
                         {
-                            LocalByKind = SummarizeByKind(scan)
+                            LocalByKind = SummarizeByKind(scan),
+                            LocalIgnored = scan.IgnoredIds.Count
                         };
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
@@ -999,7 +1009,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         var result = objects.ToDictionary(item => item.Id,
             item => new ObjectVersion(item.Id, item.Kind, item.Hash, "local:" + item.Hash.Hex, false));
         foreach (var missing in baseline.Values.Where(item => !result.ContainsKey(item.Id)))
-            result[missing.Id] = scan.IsAbsenceConfirmed(missing.Kind)
+            // An ignored session is still on disk, so it keeps its baseline version: reporting it
+            // deleted would publish a tombstone and erase it everywhere else.
+            result[missing.Id] = scan.IsAbsenceConfirmed(missing.Kind) && !scan.IsIgnored(missing.Id)
                 ? new ObjectVersion(missing.Id, missing.Kind, EmptyHash(), "local:deleted", true)
                 : missing;
         return result;
@@ -1019,7 +1031,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         var kind = action.Local?.Kind ?? action.Baseline?.Kind ?? action.Remote?.Kind
             ?? throw new InvalidDataException("A tombstone has no object kind.");
-        return scan.IsAbsenceConfirmed(kind) && scan.Objects.All(item => item.Id != action.ObjectId);
+        return scan.IsAbsenceConfirmed(kind) && !scan.IsIgnored(action.ObjectId)
+            && scan.Objects.All(item => item.Id != action.ObjectId);
     }
 
     private async Task<AuthenticatedSnapshot> AuthenticateSnapshotAsync(RemoteSnapshot snapshot, bool stateInitialized,

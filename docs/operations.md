@@ -56,7 +56,13 @@ local=1046 size=1.9 GiB
   claude=5 size=5.0 MiB
 ```
 
-The numbers come from the same scan the plan was built on, so they describe exactly what the run compared. An agent with no local sessions is omitted entirely: a machine without Grok must not read as one whose Grok sessions all vanished. Sizes are plaintext bytes on disk, not the encrypted payload the remote stores. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
+The numbers come from the same scan the plan was built on, so they describe exactly what the run compared. An agent with no local sessions is omitted entirely: a machine without Grok must not read as one whose Grok sessions all vanished. Sizes are plaintext bytes on disk, not the encrypted payload the remote stores.
+
+### Subagent threads are not synchronized
+
+A Codex session whose `session_meta` payload carries `thread_source: "subagent"` or a `source.subagent` object is a subagent thread. The session manager has always hidden these; the scanner now also keeps them out of synchronization, and reports how many were held back as `excluded=N` on the `local=` line. On a machine that runs subagents heavily they can be the large majority of both session count and disk use.
+
+An excluded session is **not** a deleted one. It stays on disk, keeps its baseline version, and never produces a tombstone — publishing one would erase that transcript on every other device that pulls. The practical consequence is that subagent sessions already published by an earlier version stay on the remote: they are no longer refreshed, and nothing removes them. Reclaiming that space means deliberately deleting those objects, which propagates as a deletion to every device; treat it as a separate, explicit operation rather than a side effect of upgrading. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
 
 If Codex or Grok locks a session after the stable scan but before encryption, Windows sharing/lock violations defer only that session. Other eligible objects are still published, and the locked session remains pending for a later run. Other I/O failures remain fatal.
 

@@ -52,6 +52,36 @@ public sealed class TwoDeviceSyncTests : IDisposable
             path => Assert.Equal(".chs", Path.GetExtension(path)));
     }
 
+    [Fact]
+    public async Task ASessionExcludedAsASubagentThreadIsNotDeletedFromTheOtherDevice()
+    {
+        // Dropping a session from the scan must not read as a deletion. A tombstone published
+        // for an excluded session would erase the transcript on every device that pulls it.
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        await WriteSessionAsync(first.Paths.Sessions, "session-a", "shared text");
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        var copy = Path.Combine(second.Paths.Sessions, "session-a.jsonl");
+        Assert.True(File.Exists(copy), "the first sync did not materialize the session on the second device");
+
+        // The same id, now carrying a subagent marker: the scan stops returning it.
+        await WriteSubagentSessionAsync(first.Paths.Sessions, "session-a", "shared text");
+        await WriteSubagentSessionAsync(first.Paths.Sessions, "session-b", "subagent only");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.True(File.Exists(copy), "the second device lost a transcript because an excluded session read as deleted");
+        Assert.False(File.Exists(Path.Combine(second.Paths.Sessions, "session-b.jsonl")),
+            "a subagent thread reached the second device");
+        Assert.DoesNotContain("subagent only", ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
+    }
+
     private Device CreateDevice(string name, string remote, byte[] key)
     {
         var home = Path.Combine(_root, name, "codex");
@@ -81,6 +111,14 @@ public sealed class TwoDeviceSyncTests : IDisposable
     {
         Directory.CreateDirectory(directory);
         var content = $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n{{\"type\":\"message\",\"payload\":{{\"text\":\"{text}\"}}}}\n";
+        await File.WriteAllTextAsync(Path.Combine(directory, id + ".jsonl"), content, new UTF8Encoding(false));
+    }
+
+    private static async Task WriteSubagentSessionAsync(string directory, string id, string text)
+    {
+        Directory.CreateDirectory(directory);
+        var content = $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"thread_source\":\"subagent\"}}}}\n" +
+            $"{{\"type\":\"message\",\"payload\":{{\"text\":\"{text}\"}}}}\n";
         await File.WriteAllTextAsync(Path.Combine(directory, id + ".jsonl"), content, new UTF8Encoding(false));
     }
 
