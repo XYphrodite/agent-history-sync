@@ -68,7 +68,16 @@ If Codex or Grok locks a session after the stable scan but before encryption, Wi
 
 Interactive `sync`, `push`, and `pull` print elapsed phase updates for lock acquisition, bounded-parallel local scanning, remote metadata fetch, index authentication, planning, staging, publication, local application, and state persistence. Codex and Grok scans run concurrently, with at most eight session bodies processed concurrently inside each scanner. For an unchanged repository, the engine authenticates the encrypted index and verifies that its opaque IDs exactly match the materialized object filenames; ciphertext bytes are loaded, hashed, decrypted, and plaintext-hash checked lazily only for objects required by download or conflict actions.
 
-Each successful publish rewrites `main` to a **single orphan commit** (force-with-lease against the CAS baseline). Previous commits become unreachable so GitHub can reclaim old encrypted blobs; the repository is a snapshot store, not an append-only audit log.
+Each successful publish rewrites `main` to a **single orphan commit** (force-with-lease against the CAS baseline). Previous commits become unreachable so GitHub can reclaim old encrypted blobs; the repository is a snapshot store, not an append-only audit log. `main` therefore has exactly one commit and no parent: there is no history to prune, and no oldest commit to delete.
+
+### Mirror maintenance
+
+The remote reclaims its orphaned blobs on its own. The local mirror under
+`%LOCALAPPDATA%\CodexHistorySyncepositories\<id>\git` does not: every publish orphans the previous snapshot, but the mirror's reflog keeps those objects reachable and nothing drops them. Measured on one machine, that was 2.9 GB of pack files behind a 194 MB snapshot, with 4386 objects unreachable once reflogs were discounted.
+
+Every third successful publish therefore expires the mirror's reflog entries and prunes what they held. The counter lives in `maintenance.json` beside `state.json`. Maintenance is opportunistic: a failure is swallowed, the counter is only reset once the collection succeeds, and a publish that already landed is never failed by it.
+
+It touches this machine's mirror only. The remote keeps exactly the snapshot it already had, no object is removed from the index, and no other device observes anything — the pruned objects are ones the current snapshot no longer references.
 
 ## Local cross-agent session manager
 

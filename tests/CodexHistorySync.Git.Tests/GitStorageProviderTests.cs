@@ -352,6 +352,35 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
         Assert.True(exact.IsPrivate);
     }
 
+    [Fact]
+    public async Task TryPublishAsync_PrunesTheMirrorsUnreachableSnapshotsEveryThirdPublish()
+    {
+        // Each publish orphans the previous snapshot's blobs, but the mirror's reflog keeps them
+        // alive, so the local clone grows without bound behind a small remote.
+        var provider = CreateProvider("mirror-maintenance");
+        var clone = Path.Combine(_root, "provider-clones", "repository-mirror-maintenance", "git");
+        var revision = (await provider.ReadSnapshotAsync(CancellationToken.None)).Revision;
+
+        for (var publish = 0; publish < 2; publish++)
+        {
+            var result = await provider.TryPublishAsync(
+                await RequestAsync(revision, (char)('a' + publish), $"body-{publish}"), CancellationToken.None);
+            Assert.True(result.Published);
+            revision = result.CurrentRevision;
+        }
+
+        Assert.NotEmpty((await GitAsync(clone, "reflog", "show", "main")).Trim());
+
+        var third = await provider.TryPublishAsync(await RequestAsync(revision, 'c', "body-2"), CancellationToken.None);
+
+        Assert.True(third.Published);
+        Assert.Empty((await GitAsync(clone, "reflog", "show", "main")).Trim());
+        // The remote still holds exactly the snapshot it had: maintenance is local to this mirror.
+        Assert.Equal(1, int.Parse((await GitAsync(_root, "--git-dir", _remote, "rev-list", "--count", "main")).Trim()));
+        Assert.Equal(third.CurrentRevision,
+            (await GitAsync(_root, "--git-dir", _remote, "rev-parse", "main")).Trim());
+    }
+
     private GitStorageProvider CreateProvider(
         string name,
         IGitPublicationHook? publicationHook = null,
