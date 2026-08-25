@@ -29,6 +29,32 @@ public sealed class SessionScannerTests
         Assert.DoesNotContain(found, x => x.SourcePath.Contains("sandbox", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Theory]
+    [InlineData("\"thread_source\":\"subagent\"")]
+    [InlineData("\"thread_source\":\"SUBAGENT\"")]
+    [InlineData("\"source\":{\"subagent\":{\"name\":\"reviewer\"}}")]
+    public async Task ScanDetailedAsyncExcludesSubagentThreadsAndRecordsThemAsIgnored(string marker)
+    {
+        // A subagent thread is local transcript noise the manager already hides; synchronizing it
+        // would publish work no one can open.
+        await using var fixture = await CodexHomeFixture.CreateAsync();
+        var owned = await fixture.WriteSessionAsync("sessions", "owned.jsonl", "owned-thread");
+        await fixture.WriteFileAsync(
+            Path.Combine("sessions", "subagent.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"subagent-thread\"," + marker + "}}\n");
+
+        var result = await new SessionScanner(TimeSpan.Zero)
+            .ScanDetailedAsync(CodexPaths.Resolve(fixture.Home), CancellationToken.None);
+
+        Assert.Contains(result.Objects, item => item.SourcePath == Path.GetFullPath(owned));
+        Assert.DoesNotContain(result.Objects, item => item.SourcePath.Contains("subagent", StringComparison.Ordinal));
+        Assert.True(result.IsIgnored(new LogicalObjectId("subagent-thread")));
+        Assert.False(result.IsIgnored(new LogicalObjectId("owned-thread")));
+        // Exclusion is not uncertainty: a genuine deletion of another active session must still
+        // be detectable in the same scan.
+        Assert.True(result.IsAbsenceConfirmed(ObjectKind.ActiveSession));
+    }
+
     [Fact]
     public async Task ScanDetailedAsyncUsesOneStabilityWindowAndRejectsAChangedCandidate()
     {

@@ -215,7 +215,7 @@ public sealed class CliApplication
     {
         var result = await Services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
         console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized}");
-        WriteLocalBreakdown(result.LocalByKind);
+        WriteLocalBreakdown(result.LocalByKind, result.LocalIgnored);
         return result.Conflicts == 0 ? 0 : 4;
     }
 
@@ -225,7 +225,7 @@ public sealed class CliApplication
     /// object kinds are an implementation detail everywhere except inside Codex, where the
     /// archived and attachment splits are worth naming.
     /// </summary>
-    private void WriteLocalBreakdown(IReadOnlyDictionary<ObjectKind, SessionKindTotals> byKind)
+    private void WriteLocalBreakdown(IReadOnlyDictionary<ObjectKind, SessionKindTotals> byKind, int ignored)
     {
         if (byKind.Count == 0) return;
         var groups = new (string Name, ObjectKind[] Kinds)[]
@@ -239,7 +239,8 @@ public sealed class CliApplication
         var other = Sum(byKind, byKind.Keys.Where(kind => !accounted.Contains(kind)).ToArray());
         var total = Sum(byKind, byKind.Keys.ToArray());
 
-        console.WriteLine($"local={total.Count} size={FormatSize(total.Bytes)}");
+        var excluded = ignored == 0 ? string.Empty : $" excluded={ignored}";
+        console.WriteLine($"local={total.Count} size={FormatSize(total.Bytes)}{excluded}");
         foreach (var (name, kinds, totals) in grouped)
         {
             if (totals.Count == 0) continue;
