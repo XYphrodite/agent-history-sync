@@ -7,7 +7,7 @@ namespace CodexHistorySync.Core.Conversion;
 public sealed class ClaudeConversationWriter : IConversationWriter
 {
     private const int MaximumIdAttempts = 10;
-    private const string WriterVersion = "0.6.0";
+    private const string WriterVersion = "0.6.1";
     private readonly ClaudePaths paths;
     private readonly Func<Guid> idGenerator;
     private readonly IConversationReader validator;
