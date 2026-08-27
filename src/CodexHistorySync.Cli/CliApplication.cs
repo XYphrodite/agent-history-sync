@@ -103,7 +103,8 @@ public sealed class CliApplication
         ArgumentNullException.ThrowIfNull(args);
         try
         {
-            if (args is ["--manage"])
+            // Both screens are composed the same way and differ only in which runner arrived.
+            if (args is ["--manage"] or ["--sessions"])
             {
                 if (managerRunner is null) return Usage();
                 await managerRunner.RunAsync(cancellationToken).ConfigureAwait(false);
@@ -383,14 +384,16 @@ public sealed class CliApplication
 
     private int Usage()
     {
-        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage] [--sessions]");
         return 2;
     }
 
     private int Help()
     {
-        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage] [--sessions]");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
+        console.WriteLine("--manage    copy and delete sessions across agents");
+        console.WriteLine("--sessions  read session contents, search, export, delete");
         return 0;
     }
 

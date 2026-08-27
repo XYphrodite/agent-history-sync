@@ -79,6 +79,33 @@ Every third successful publish therefore expires the mirror's reflog entries and
 
 It touches this machine's mirror only. The remote keeps exactly the snapshot it already had, no object is removed from the index, and no other device observes anything — the pruned objects are ones the current snapshot no longer references.
 
+## Session viewer
+
+Read what is inside a session without opening its native file:
+
+```powershell
+agent-sync --sessions
+```
+
+One list holds every session from every installed agent, newest first, with an `AGENT` column; the selected conversation is rendered beside it. Like the manager, this screen never contacts the network, opens the sync repository, or writes sync state.
+
+| Key | Action |
+|---|---|
+| Up / Down | Move the selection, or scroll the text once it has focus |
+| Left / Right | Move focus between the list and the text |
+| PgUp / PgDn / Home / End | Scroll the text |
+| `/` | Search inside the open session; `N` steps to the next match and wraps |
+| `E` | Export the open session to `%USERPROFILE%\Documents\agent-sync\<agent>-<id>.md` |
+| `Del` | Delete the session locally, behind the same confirmation the manager uses |
+| `R` | Rescan |
+| `Q` / `Esc` | Exit |
+
+The text is the conversation as `agent-sync` understands it for cross-agent copying: user and assistant turns only. Reasoning blocks, tool calls, and tool results are **not** shown — they are absent from the portable model, not hidden. Neither are technical wrappers such as `<system-reminder>`, for the same reason.
+
+Sessions marked `!` cannot be opened. That is the same readability verdict that blocks copying them, so the pane explains itself rather than showing an empty conversation.
+
+Copying between agents stays in `--manage`: it needs the destination prompt that screen already has.
+
 ## Local cross-agent session manager
 
 Start the manager with:

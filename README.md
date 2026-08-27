@@ -43,8 +43,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Pin a version; force PATH yes/no without prompting
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.0 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.0 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.1 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.1 -NoPath
 ```
 
 **From a local build:**
@@ -104,6 +104,14 @@ agent-sync --manage
 
 This opens a session manager with one panel per installed agent (Codex, Grok, Claude) for local copy and local deletion. It does not contact GitHub, Git, or the configured sync repository, and it does not change sync state. See [operations](docs/operations.md#local-cross-agent-session-manager) for the safety rules and controls.
 
+### Session viewer
+
+```powershell
+agent-sync --sessions
+```
+
+One list of every session from every installed agent, with the selected conversation beside it. Scroll it, search inside it, export it to Markdown, and delete it. Also local-only. See [operations](docs/operations.md#session-viewer).
+
 ### Docs
 
 - [operations](docs/operations.md)
@@ -156,8 +164,8 @@ irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts
 
 ```powershell
 # Конкретная версия; PATH без вопроса
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.0 -AddToPath
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.0 -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.1 -AddToPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/XYphrodite/agent-history-sync/main/scripts/install.ps1))) -Version v0.6.1 -NoPath
 ```
 
 **Из локальной сборки:**
@@ -216,6 +224,14 @@ agent-sync --manage
 ```
 
 Менеджер сессий с панелью на каждого установленного агента (Codex, Grok, Claude) для локального копирования и удаления. Не обращается к GitHub/Git и не меняет состояние синхронизации. Правила и клавиши — в [operations](docs/operations.md#local-cross-agent-session-manager).
+
+### Просмотр сессий
+
+```powershell
+agent-sync --sessions
+```
+
+Один список сессий всех установленных агентов и текст выбранной рядом. Прокрутка, поиск внутри сессии, экспорт в Markdown и удаление. Тоже только локально. Подробности — в [operations](docs/operations.md#session-viewer).
 
 ### Документация
 
