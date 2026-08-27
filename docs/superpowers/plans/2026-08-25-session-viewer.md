@@ -56,12 +56,12 @@
 
 ## Task 6: CLI wiring and docs
 
-- [ ] `--sessions` accepted the same way as `--manage`, with its own runner; usage and `--help` mention it.
-- [ ] `README.md` (English and Russian) and `docs/operations.md` describe the screen, its keys, and that it is read-only apart from deletion.
-- [ ] Version bump.
+- [x] `--sessions` accepted the same way as `--manage`, with its own runner; usage and `--help` mention it.
+- [x] `README.md` (English and Russian) and `docs/operations.md` describe the screen, its keys, and that it is read-only apart from deletion.
+- [x] Version bump.
 
 ## Verification
 
-- [ ] `dotnet build` clean, no new warnings.
-- [ ] `dotnet test` green across all four test projects.
+- [x] `dotnet build` clean, no new warnings.
+- [x] `dotnet test` green across all four test projects.
 - [ ] Manual: `agent-sync --sessions` lists every agent's sessions, opens a Claude, a Codex, and a Grok session, searches inside one, exports one, and deletes a disposable one.

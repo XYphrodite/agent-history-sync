@@ -27,23 +27,29 @@ public static class CliComposition
         string[] args,
         ICliConsole console,
         Func<ICliConsole, CliApplication> createSynchronizedApplication,
-        Func<ISessionManagerRunner> createSessionManagerRunner)
+        Func<ISessionManagerRunner> createSessionManagerRunner,
+        Func<ISessionManagerRunner>? createSessionViewerRunner = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(console);
         ArgumentNullException.ThrowIfNull(createSynchronizedApplication);
         ArgumentNullException.ThrowIfNull(createSessionManagerRunner);
 
-        return args is ["--manage"]
-            ? new CliApplication(console, createSessionManagerRunner())
-            : createSynchronizedApplication(console);
+        return args switch
+        {
+            ["--manage"] => new CliApplication(console, createSessionManagerRunner()),
+            ["--sessions"] when createSessionViewerRunner is not null =>
+                new CliApplication(console, createSessionViewerRunner()),
+            _ => createSynchronizedApplication(console)
+        };
     }
 
     public static CliApplication CreateDefault(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
         var console = new SystemCliConsole();
-        return CreateForArguments(args, console, CreateSynchronizedApplication, CreateSessionManagerRunner);
+        return CreateForArguments(args, console, CreateSynchronizedApplication, CreateSessionManagerRunner,
+            CreateSessionViewerRunner);
     }
 
     public static CliApplication CreateDefault() => CreateSynchronizedApplication(new SystemCliConsole());
@@ -90,6 +96,30 @@ public static class CliComposition
         return new CliApplication(services, console, agent);
     }
 
+    private static ISessionManagerRunner CreateSessionViewerRunner()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
+        var codexPaths = TryResolveCodexPaths();
+        var grokPaths = GrokPaths.TryResolve();
+        var claudePaths = ClaudePaths.TryResolve();
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths);
+        // The viewer never copies, so no conversation writers are composed for it (design D6).
+        var operations = new LocalSessionOperations(
+            codexPaths,
+            grokPaths,
+            activeState,
+            new WindowsManagedSessionDirectoryDeleter(),
+            null,
+            null,
+            claudePaths,
+            null);
+        var ansiConsole = AnsiConsole.Console;
+        var view = new SpectreSessionViewerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
+        return new DefaultSessionViewerRunner(new SessionViewerApplication(
+            catalog, new SessionContentReader(), new SessionExporter(), operations, view));
+    }
+
     private static ISessionManagerRunner CreateSessionManagerRunner()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
@@ -130,6 +160,13 @@ public static class CliComposition
             return null;
         }
     }
+}
+
+internal sealed class DefaultSessionViewerRunner(SessionViewerApplication application) : ISessionManagerRunner
+{
+    private readonly SessionViewerApplication application = application ?? throw new ArgumentNullException(nameof(application));
+
+    public Task RunAsync(CancellationToken cancellationToken) => application.RunAsync(cancellationToken);
 }
 
 internal sealed class DefaultSessionManagerRunner(SessionManagerApplication application) : ISessionManagerRunner
