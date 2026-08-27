@@ -22,9 +22,9 @@
 
 ## Task 1: Reading a session's conversation
 
-- [ ] `src/CodexHistorySync.Core/Management/SessionContentReader.cs` — `ISessionContentReader` with `Task<PortableConversation> ReadAsync(ManagedSession session, CancellationToken ct)`, plus a default implementation mapping `ManagedAgent` to `CodexConversationReader` / `GrokConversationReader` / `ClaudeConversationReader`.
-- [ ] Refuse a session whose `CanRead` is false before touching the disk, with a message registered alongside the existing unreadable reasons.
-- [ ] Tests `SessionContentReaderTests`: one case per agent reading a written fixture, an unknown agent, and a `CanRead: false` refusal.
+- [x] `src/CodexHistorySync.Core/Management/SessionContentReader.cs` — `ISessionContentReader` with `Task<PortableConversation> ReadAsync(ManagedSession session, CancellationToken ct)`, plus a default implementation mapping `ManagedAgent` to `CodexConversationReader` / `GrokConversationReader` / `ClaudeConversationReader`.
+- [x] Refuse a session whose `CanRead` is false before touching the disk, with a message registered alongside the existing unreadable reasons.
+- [x] Tests `SessionContentReaderTests`: one case per agent reading a written fixture, an unknown agent, and a `CanRead: false` refusal.
 
 ## Task 2: Flattening a conversation into display lines
 
