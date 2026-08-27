@@ -49,11 +49,23 @@ public sealed class SessionViewerApplication(
         while (!cancellationToken.IsCancellationRequested)
         {
             state = state.SetViewportRows(view.ContentRows);
-            // Reading happens here, never while a frame is being built (design D3).
-            if (KeyFor(state.SelectedSession) != loadedFor)
+            // Reading happens here, never while a frame is being built (design D3). Holding a
+            // movement key would otherwise read one whole session per row — measured at 79 ms
+            // median and 394 ms worst on this machine — so a pending keystroke defers the read
+            // until the selection settles.
+            var selectedKey = KeyFor(state.SelectedSession);
+            if (selectedKey != loadedFor)
             {
-                loadedFor = KeyFor(state.SelectedSession);
-                state = await LoadAsync(state, cancellationToken).ConfigureAwait(false);
+                if (view.IsInputPending)
+                {
+                    if (state.Content.Status != SessionContentStatus.Loading)
+                        state = state.WithContent(new SessionContentState(SessionContentStatus.Loading));
+                }
+                else
+                {
+                    loadedFor = selectedKey;
+                    state = await LoadAsync(state, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             view.Render(state);

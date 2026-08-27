@@ -55,6 +55,40 @@ public sealed class SessionViewerApplicationTests
     }
 
     [Fact]
+    public async Task Sessions_passed_through_while_keys_are_still_queued_are_never_read()
+    {
+        // Holding a movement key would otherwise read one whole session per row; reading is the
+        // expensive half, measured at 79 ms median and 394 ms worst on real sessions.
+        var view = new ScriptedView(
+            SessionViewerCommand.MoveDown, SessionViewerCommand.MoveDown, SessionViewerCommand.Exit)
+        {
+            PendingInputTurns = 3
+        };
+        var reader = new RecordingReader();
+
+        await Run(view, reader);
+
+        Assert.Empty(reader.Read);
+        Assert.All(view.RenderedStates, state => Assert.NotEqual(SessionContentStatus.Loaded, state.Content.Status));
+    }
+
+    [Fact]
+    public async Task The_session_the_selection_settles_on_is_the_one_that_is_read()
+    {
+        // Two movements arrive together, then input goes quiet: only the destination is read.
+        var view = new ScriptedView(
+            SessionViewerCommand.MoveDown, SessionViewerCommand.MoveDown, SessionViewerCommand.Exit)
+        {
+            PendingInputTurns = 2
+        };
+        var reader = new RecordingReader();
+
+        await Run(view, reader);
+
+        Assert.Equal(["oldest"], reader.Read.Select(session => session.SessionId));
+    }
+
+    [Fact]
     public async Task A_session_that_cannot_be_read_explains_itself_and_leaves_the_list_usable()
     {
         var view = new ScriptedView(SessionViewerCommand.MoveDown, SessionViewerCommand.Exit);
@@ -182,6 +216,11 @@ public sealed class SessionViewerApplicationTests
 
         public int ContentRows => 10;
         public int ContentWidth => 40;
+
+        /// <summary>How many more loop turns should report a keystroke already waiting.</summary>
+        public int PendingInputTurns { get; set; }
+
+        public bool IsInputPending => PendingInputTurns-- > 0;
 
         public Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken) =>
             interaction(cancellationToken);

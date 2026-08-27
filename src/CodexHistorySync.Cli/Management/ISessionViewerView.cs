@@ -16,4 +16,10 @@ public interface ISessionViewerView
 
     /// <summary>Columns the content pane can show, so the document wraps to what fits.</summary>
     int ContentWidth { get; }
+
+    /// <summary>
+    /// True while another keystroke is already waiting. Reading a session costs tens to hundreds
+    /// of milliseconds, so the loop skips it while the selection is still moving.
+    /// </summary>
+    bool IsInputPending { get; }
 }

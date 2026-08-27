@@ -208,6 +208,12 @@ public sealed class SpectreSessionViewerViewTests
     private static ManagedSession Session(ManagedAgent agent, string id, int minutes) =>
         new(agent, id, $@"C:\native\{id}", id, DateTimeOffset.UnixEpoch.AddMinutes(minutes), false, true);
 
+    [Fact]
+    public void IsInputPending_is_false_on_a_console_that_cannot_be_polled()
+    {
+        Assert.False(new SpectreSessionViewerView(Console(out _, 120, 30), new FakeInput()).IsInputPending);
+    }
+
     private static ConsoleKeyInfo Key(ConsoleKey key) => new('\0', key, false, false, false);
 
     private static ConsoleKeyInfo Key(char character, ConsoleKey key) => new(character, key, false, false, false);
