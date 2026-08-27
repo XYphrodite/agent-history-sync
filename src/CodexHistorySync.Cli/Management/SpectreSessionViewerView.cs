@@ -46,6 +46,19 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
 
     public int ContentWidth => Math.Max(ConversationDocument.MinimumWidth, console.Profile.Width - ListWidth - 8);
 
+    public bool IsInputPending
+    {
+        get
+        {
+            try { return console.Input.IsKeyAvailable(); }
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
+            {
+                // A console that cannot be polled simply never defers a read.
+                return false;
+            }
+        }
+    }
+
     public async Task RunDisplayAsync(Func<CancellationToken, Task> interaction, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(interaction);
