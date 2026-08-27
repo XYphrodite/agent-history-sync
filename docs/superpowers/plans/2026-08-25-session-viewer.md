@@ -48,11 +48,11 @@
 
 ## Task 5: The screen
 
-- [ ] `SessionViewerCommand` — `MoveUp`, `MoveDown`, `PageUp`, `PageDown`, `Home`, `End`, `FocusList`, `FocusContent`, `Search`, `NextMatch`, `Export`, `Delete`, `Refresh`, `Exit`.
-- [ ] `ISessionViewerView` + `SpectreSessionViewerView` — left list with `AGENT`, `SESSION`, `UPDATED`; right pane with the conversation, the active-and-unreadable markers reused from the manager, and a footer of keys.
-- [ ] `SessionViewerApplication` — the loop: load on selection change, render, read a command, act. Deletion goes through `ILocalSessionOperations.DeleteAsync` behind the existing confirmation.
-- [ ] A session that fails to load shows why in the pane and leaves the list usable.
-- [ ] Tests `SessionViewerApplicationTests` and `SpectreSessionViewerViewTests`: a session rendered beside its list, the loading placeholder, an unreadable session, key mapping, export reporting its path, and a confirmed delete removing the row.
+- [x] `SessionViewerCommand` — `MoveUp`, `MoveDown`, `PageUp`, `PageDown`, `Home`, `End`, `FocusList`, `FocusContent`, `Search`, `NextMatch`, `Export`, `Delete`, `Refresh`, `Exit`.
+- [x] `ISessionViewerView` + `SpectreSessionViewerView` — left list with `AGENT`, `SESSION`, `UPDATED`; right pane with the conversation, the active-and-unreadable markers reused from the manager, and a footer of keys.
+- [x] `SessionViewerApplication` — the loop: load on selection change, render, read a command, act. Deletion goes through `ILocalSessionOperations.DeleteAsync` behind the existing confirmation.
+- [x] A session that fails to load shows why in the pane and leaves the list usable.
+- [x] Tests `SessionViewerApplicationTests` and `SpectreSessionViewerViewTests`: a session rendered beside its list, the loading placeholder, an unreadable session, key mapping, export reporting its path, and a confirmed delete removing the row.
 
 ## Task 6: CLI wiring and docs
 
