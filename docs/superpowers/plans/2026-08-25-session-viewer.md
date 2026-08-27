@@ -28,10 +28,10 @@
 
 ## Task 2: Flattening a conversation into display lines
 
-- [ ] `src/CodexHistorySync.Core/Conversion/ConversationDocument.cs` — `Build(PortableConversation, int width)` returning an indexed `IReadOnlyList<ConversationLine>` where each line carries its text and whether it is a role header, so the view can style it without re-parsing.
-- [ ] Wrap on word boundaries; never split a word narrower than the pane; preserve blank lines between turns.
-- [ ] `FindMatches(string query)` returning the line indexes that contain the query, case-insensitive.
-- [ ] Tests `ConversationDocumentTests`: wrapping at an exact boundary, a word longer than the width, role headers present, blank-line separation, match indexes, and an empty query matching nothing.
+- [x] `src/CodexHistorySync.Core/Conversion/ConversationDocument.cs` — `Build(PortableConversation, int width)` returning an indexed `IReadOnlyList<ConversationLine>` where each line carries its text and whether it is a role header, so the view can style it without re-parsing.
+- [x] Wrap on word boundaries; never split a word narrower than the pane; preserve blank lines between turns.
+- [x] `FindMatches(string query)` returning the line indexes that contain the query, case-insensitive.
+- [x] Tests `ConversationDocumentTests`: wrapping at an exact boundary, a word longer than the width, role headers present, blank-line separation, match indexes, and an empty query matching nothing.
 
 ## Task 3: Viewer state
 
