@@ -128,6 +128,64 @@ public sealed class SpectreSessionViewerViewTests
         Assert.False(no.ConfirmLocalDelete(session, CancellationToken.None));
     }
 
+    [Fact]
+    public void Render_keeps_every_list_row_on_a_single_line()
+    {
+        // A wrapped cell doubles a row's height, so the frame grows taller than the viewport
+        // allows and the reading pane stops aligning with the list.
+        var console = Console(out var output, 160, 30);
+        var view = new SpectreSessionViewerView(console, new FakeInput());
+        var state = SessionViewerState.Create(LongTitles(), viewportRows: 6)
+            .WithContent(new SessionContentState(SessionContentStatus.Empty));
+
+        view.Render(state);
+
+        var lines = output.ToString().TrimEnd().Split('\n').Select(line => line.TrimEnd('\r')).ToArray();
+        // Two borders, the column header, the viewport, a message line and the footer.
+        Assert.Equal(state.ViewportRows + 5, lines.Length);
+    }
+
+    [Fact]
+    public void Render_never_writes_past_the_terminal_width()
+    {
+        var console = Console(out var output, 100, 24);
+
+        new SpectreSessionViewerView(console, new FakeInput())
+            .Render(SessionViewerState.Create(LongTitles(), viewportRows: 6));
+
+        foreach (var line in output.ToString().Split('\n'))
+            Assert.True(line.TrimEnd().Length <= 100, $"line wider than the terminal: '{line.TrimEnd()}'");
+    }
+
+    [Fact]
+    public void Render_closes_both_panels_on_the_same_row()
+    {
+        var console = Console(out var output, 160, 30);
+
+        new SpectreSessionViewerView(console, new FakeInput()).Render(Loaded());
+
+        var bottoms = output.ToString().Split('\n')
+            .Where(line => line.Contains('\u2570'))
+            .ToArray();
+        var single = Assert.Single(bottoms);
+        Assert.Equal(2, single.Count(character => character == '\u2570'));
+    }
+
+    private static SessionCatalogSnapshot LongTitles()
+    {
+        var sessions = Enumerable.Range(0, 12)
+            .Select(index => new ManagedSession(
+                ManagedAgent.Claude,
+                $"session-{index}",
+                $@"C:\native\session-{index}",
+                "a deliberately long session title that cannot fit the list column " + index,
+                DateTimeOffset.UnixEpoch.AddMinutes(index),
+                IsActive: false,
+                CanRead: true))
+            .ToArray();
+        return new SessionCatalogSnapshot([], [], sessions) { ConfiguredAgents = ManagedAgents.All };
+    }
+
     private static SessionViewerState Loaded()
     {
         var conversation = new PortableConversation(
