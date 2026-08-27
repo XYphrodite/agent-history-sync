@@ -42,9 +42,9 @@
 
 ## Task 4: Export
 
-- [ ] `src/CodexHistorySync.Core/Management/SessionExporter.cs` — renders `PortableConversation` to Markdown and writes it to `%USERPROFILE%\Documents\agent-sync\<agent>-<session-id>.md`, creating the directory, validating the file-name component, and returning the full path.
-- [ ] Write through a temporary file and move into place, so an interrupted export never leaves a half-written document.
-- [ ] Tests `SessionExporterTests`: heading and turn layout, an unsafe session id refused, and an existing file overwritten atomically.
+- [x] `src/CodexHistorySync.Core/Management/SessionExporter.cs` — renders `PortableConversation` to Markdown and writes it to `%USERPROFILE%\Documents\agent-sync\<agent>-<session-id>.md`, creating the directory, validating the file-name component, and returning the full path.
+- [x] Write through a temporary file and move into place, so an interrupted export never leaves a half-written document.
+- [x] Tests `SessionExporterTests`: heading and turn layout, an unsafe session id refused, and an existing file overwritten atomically.
 
 ## Task 5: The screen
 
