@@ -64,4 +64,7 @@
 
 - [x] `dotnet build` clean, no new warnings.
 - [x] `dotnet test` green across all four test projects.
-- [ ] Manual: `agent-sync --sessions` lists every agent's sessions, opens a Claude, a Codex, and a Grok session, searches inside one, exports one, and deletes a disposable one.
+- [x] Manual, confirmed on a real terminal: the combined list renders one line per row beside the reading pane, holding a movement key scrolls without stalling, and `E` wrote a Markdown export.
+- [ ] Manual, still open: `/` and `N` inside a long session, `Del` on a disposable session, and opening a Codex and a Grok session specifically.
+
+Two defects were found by that pass and fixed: list rows wrapped to two lines because the table sized columns with padding of its own, and every list movement read a whole session — 79 ms median, 394 ms worst — which is now deferred until the selection settles.
