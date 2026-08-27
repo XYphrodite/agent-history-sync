@@ -11,7 +11,10 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
     private const string EnterDisplay = "\u001b[?1049h\u001b[H";
     private const string LeaveDisplay = "\u001b[?1049l";
     private const int ChromeRows = 8;
-    private const int ListWidth = 46;
+    private const int ListWidth = 52;
+    // Panel borders take two columns and each table column carries one space of padding.
+    private const int AgentColumn = 6;
+    private const int UpdatedColumn = 11;
     private static readonly Style FocusedBorder = new(Color.Cyan1);
     private static readonly Style UnfocusedBorder = new(Color.Grey23);
     private static readonly Style FocusedSelection = new(Color.Cyan1, decoration: Decoration.Bold);
@@ -117,15 +120,25 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
             : new Rows(panels, message, footer);
     }
 
+    /// <summary>
+    /// Rows are laid out by hand into fixed-width fields rather than by a table. A table sizes
+    /// its columns with padding of its own, so a cell that looks like it fits still wraps, and a
+    /// wrapped cell doubles the row height, halves how much of the list fits, and leaves the
+    /// reading pane ending on a different row than the list.
+    /// </summary>
     private Panel BuildList(SessionViewerState state)
     {
         var focused = state.Focus == SessionViewerFocus.List;
-        var table = new Table { Border = TableBorder.None, Expand = true, ShowHeaders = true };
-        table.AddColumn(new TableColumn(new Text("AGENT", MutedText)) { Width = 7, NoWrap = true });
-        table.AddColumn(new TableColumn(new Text("SESSION", MutedText)) { NoWrap = true });
-        table.AddColumn(new TableColumn(new Text("UPDATED", MutedText)) { Width = 11, NoWrap = true });
+        var inner = ListWidth - 4;
+        var titleWidth = Math.Max(8, inner - AgentColumn - UpdatedColumn - 2);
+        var rows = new List<IRenderable>
+        {
+            new Text(Row("AGENT", "SESSION", "UPDATED", titleWidth), MutedText)
+        };
 
-        for (var index = state.ListOffset; index < state.Sessions.Count && index < state.ListOffset + state.ViewportRows; index++)
+        for (var index = state.ListOffset;
+             index < state.Sessions.Count && index < state.ListOffset + state.ViewportRows;
+             index++)
         {
             var session = state.Sessions[index];
             var selected = index == state.SelectedIndex;
@@ -133,23 +146,32 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
                 : !session.CanRead ? UnreadableText
                 : session.IsActive ? ActiveText
                 : NormalText;
-            table.AddRow(
-                new Text(AgentName(session.Agent), selected && focused ? FocusedSelection : MutedText),
-                new Text(FormatTitle(session, selected && focused), style),
-                new Text(session.LastModifiedAt.ToLocalTime().ToString("MM-dd HH:mm", CultureInfo.InvariantCulture),
-                    selected && focused ? FocusedSelection : MutedText));
+            rows.Add(new Text(
+                Row(
+                    AgentName(session.Agent),
+                    FormatTitle(session, selected && focused, titleWidth),
+                    session.LastModifiedAt.ToLocalTime().ToString("MM-dd HH:mm", CultureInfo.InvariantCulture),
+                    titleWidth),
+                style));
         }
 
-        return new Panel(table)
+        while (rows.Count <= state.ViewportRows) rows.Add(new Text(string.Empty));
+
+        return new Panel(new Rows(rows))
         {
             Header = new PanelHeader(focused ? "[cyan1 bold]* SESSIONS[/]" : "[grey58]  SESSIONS[/]"),
             Border = BoxBorder.Rounded,
             BorderStyle = focused ? FocusedBorder : UnfocusedBorder,
             Width = ListWidth,
             Expand = false,
-            Padding = new Padding(0, 0, 0, 0)
+            Padding = new Padding(1, 0, 1, 0)
         };
     }
+
+    private static string Row(string agent, string title, string updated, int titleWidth) =>
+        Fit(agent, AgentColumn).PadRight(AgentColumn) + ' ' +
+        Fit(title, titleWidth).PadRight(titleWidth) + ' ' +
+        Fit(updated, UpdatedColumn);
 
     private Panel BuildContent(SessionViewerState state)
     {
@@ -183,6 +205,10 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
                 if (lines.Count == 0) rows.Add(new Text("This session has no conversation text.", MutedText));
                 break;
         }
+
+        // One taller than the viewport, matching the list`s column header, so both panels end
+        // on the same row instead of one trailing the other.
+        while (rows.Count < state.ViewportRows + 1) rows.Add(new Text(string.Empty));
 
         var header = state.SelectedSession is { } session
             ? $"{(focused ? "[cyan1 bold]* " : "[grey58]  ")}{Markup.Escape(Shorten(session.Title, ContentWidth - 4))}[/]"
@@ -299,18 +325,22 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
         console.WriteLine();
     }
 
-    private static string FormatTitle(ManagedSession session, bool focusedSelection)
+    private static string FormatTitle(ManagedSession session, bool focusedSelection, int width)
     {
         var marker = (session.IsActive, session.CanRead) switch
         {
-            (true, false) => "*! ",
-            (true, true) => "* ",
-            (false, false) => "! ",
+            (true, false) => "*!",
+            (true, true) => "*",
+            (false, false) => "!",
             _ => string.Empty
         };
-        var title = string.IsNullOrWhiteSpace(session.Title) ? session.SessionId : session.Title.Trim();
-        return (focusedSelection ? "> " : "  ") + marker + Shorten(title, 22);
+        var prefix = (focusedSelection ? ">" : " ") + marker + " ";
+        var title = string.IsNullOrWhiteSpace(session.Title) ? session.SessionId : session.Title;
+        return prefix + Shorten(title, Math.Max(1, width - prefix.Length));
     }
+
+    private static string Fit(string value, int width) =>
+        value.Length <= width ? value : value[..width];
 
     private static string Shorten(string value, int maximum)
     {
