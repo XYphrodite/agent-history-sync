@@ -35,10 +35,10 @@
 
 ## Task 3: Viewer state
 
-- [ ] `src/CodexHistorySync.Cli/Management/SessionViewerState.cs` — the flat session list (catalog snapshot flattened and sorted newest-first), the selected row, the loaded document, the content scroll offset, the search query, and the current match.
-- [ ] `Focus` of either the list or the content, so the arrow keys mean one thing at a time.
-- [ ] Selection and scroll clamp exactly like `SessionManagerState` does; a snapshot replacement keeps the selected session by id when it survives.
-- [ ] Tests `SessionViewerStateTests`: ordering across agents, selection movement, focus switching, scroll clamping at both ends, search stepping and wrap-around, and snapshot replacement preserving the selection.
+- [x] `src/CodexHistorySync.Cli/Management/SessionViewerState.cs` — the flat session list (catalog snapshot flattened and sorted newest-first), the selected row, the loaded document, the content scroll offset, the search query, and the current match.
+- [x] `Focus` of either the list or the content, so the arrow keys mean one thing at a time.
+- [x] Selection and scroll clamp exactly like `SessionManagerState` does; a snapshot replacement keeps the selected session by id when it survives.
+- [x] Tests `SessionViewerStateTests`: ordering across agents, selection movement, focus switching, scroll clamping at both ends, search stepping and wrap-around, and snapshot replacement preserving the selection.
 
 ## Task 4: Export
 
