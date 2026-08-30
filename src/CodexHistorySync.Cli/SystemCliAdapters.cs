@@ -28,7 +28,8 @@ public static class CliComposition
         ICliConsole console,
         Func<ICliConsole, CliApplication> createSynchronizedApplication,
         Func<ISessionManagerRunner> createSessionManagerRunner,
-        Func<ISessionManagerRunner>? createSessionViewerRunner = null)
+        Func<ISessionManagerRunner>? createSessionViewerRunner = null,
+        Func<ISelfUpdateOperations>? createSelfUpdateOperations = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(console);
@@ -40,6 +41,8 @@ public static class CliComposition
             ["--manage"] => new CliApplication(console, createSessionManagerRunner()),
             ["--sessions"] when createSessionViewerRunner is not null =>
                 new CliApplication(console, createSessionViewerRunner()),
+            ["update", ..] when createSelfUpdateOperations is not null =>
+                new CliApplication(console, createSelfUpdateOperations()),
             _ => createSynchronizedApplication(console)
         };
     }
@@ -49,7 +52,7 @@ public static class CliComposition
         ArgumentNullException.ThrowIfNull(args);
         var console = new SystemCliConsole();
         return CreateForArguments(args, console, CreateSynchronizedApplication, CreateSessionManagerRunner,
-            CreateSessionViewerRunner);
+            CreateSessionViewerRunner, static () => new DefaultSelfUpdateOperations());
     }
 
     public static CliApplication CreateDefault() => CreateSynchronizedApplication(new SystemCliConsole());
@@ -93,7 +96,7 @@ public static class CliComposition
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
             new WindowsNotifier(), new RotatingAgentLogger(localAppData));
         var agent = new DefaultAgentCliOperations(worker, scheduler, () => Environment.ProcessPath);
-        return new CliApplication(services, console, agent);
+        return new CliApplication(services, console, agent, selfUpdate: new DefaultSelfUpdateOperations());
     }
 
     private static ISessionManagerRunner CreateSessionViewerRunner()

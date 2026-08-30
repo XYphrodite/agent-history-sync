@@ -6,6 +6,7 @@ using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
+using CodexHistorySync.Core.Update;
 using CodexHistorySync.Windows;
 
 namespace CodexHistorySync.IntegrationTests;
@@ -78,6 +79,166 @@ public sealed class CliTests
         Assert.Equal(0, exitCode);
         Assert.Equal(1, manager.RunCount);
     }
+
+    [Fact]
+    public async Task Version_flag_prints_the_stamped_assembly_version()
+    {
+        var fixture = new Fixture();
+
+        var exitCode = await fixture.Application.RunAsync(["--version"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Matches(@"^agent-sync \d+\.\d+\.\d+\s*$", fixture.Console.OutputText);
+        Assert.Empty(fixture.Console.ErrorText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Update_applies_the_latest_release_and_reports_both_versions()
+    {
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(Report(SelfUpdateStatus.Updated));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(new SelfUpdateRequest(CheckOnly: false, Tag: null), update.Request);
+        Assert.Contains("0.7.0 -> 0.8.0", fixture.Console.OutputText);
+        Assert.Contains("v0.8.0", fixture.Console.OutputText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Update_check_asks_for_a_check_and_names_the_command_that_applies_it()
+    {
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(Report(SelfUpdateStatus.UpdateAvailable));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update", "--check"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.True(update.Request!.CheckOnly);
+        Assert.Contains("Update available: 0.7.0 -> 0.8.0", fixture.Console.OutputText);
+        Assert.Contains("agent-sync update", fixture.Console.OutputText);
+    }
+
+    [Fact]
+    public async Task Update_check_on_a_pinned_older_tag_does_not_call_it_an_available_update()
+    {
+        // Pinning an older tag is a rollback the user asked for, and reading "update available:
+        // 0.8.0 -> 0.7.0" as a version bump is exactly the confusion to avoid.
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(new SelfUpdateReport(SelfUpdateStatus.UpdateAvailable,
+            new ReleaseVersion(0, 8, 0), new ReleaseVersion(0, 7, 0), "v0.7.0"));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update", "--check", "--version", "0.7.0"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.DoesNotContain("Update available", fixture.Console.OutputText);
+        Assert.Contains("Pinned release v0.7.0 would replace 0.8.0 with 0.7.0", fixture.Console.OutputText);
+        Assert.Contains("agent-sync update --version v0.7.0", fixture.Console.OutputText);
+    }
+
+    [Fact]
+    public async Task Update_reports_an_up_to_date_installation_without_pretending_to_install()
+    {
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(Report(SelfUpdateStatus.AlreadyCurrent));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Already up to date", fixture.Console.OutputText);
+        Assert.DoesNotContain("Updated agent-sync", fixture.Console.OutputText);
+    }
+
+    [Fact]
+    public async Task Update_passes_a_pinned_tag_through()
+    {
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(Report(SelfUpdateStatus.Updated));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update", "--version", "0.6.1"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("0.6.1", update.Request!.Tag);
+    }
+
+    [Theory]
+    [InlineData("--bogus")]
+    [InlineData("0.8.0")]
+    [InlineData("--version")]
+    [InlineData("--check", "--check")]
+    [InlineData("--version", "latest")]
+    [InlineData("--version", "0.8.0-rc1")]
+    [InlineData("--version", "../../evil")]
+    public async Task Update_rejects_arguments_it_cannot_act_on_without_calling_the_updater(params string[] arguments)
+    {
+        // A pinned tag ends up in a release URL, so anything unparsed stops at the command line.
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(Report(SelfUpdateStatus.Updated));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update", .. arguments], CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Equal(0, update.Calls);
+        Assert.Contains("Usage: agent-sync", fixture.Console.ErrorText);
+    }
+
+    [Fact]
+    public async Task Update_reports_why_it_refused_a_release()
+    {
+        var fixture = new Fixture();
+        var update = new FakeSelfUpdate(new InvalidDataException("The downloaded release failed its checksum."));
+        var application = new CliApplication(fixture.Services, fixture.Console, selfUpdate: update);
+
+        var exitCode = await application.RunAsync(["update"], CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Update failed: The downloaded release failed its checksum.", fixture.Console.ErrorText);
+    }
+
+    [Fact]
+    public async Task Update_without_an_updater_is_a_usage_error()
+    {
+        var fixture = new Fixture();
+
+        var exitCode = await fixture.Application.RunAsync(["update"], CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("update", fixture.Console.ErrorText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Update_composition_does_not_construct_sync_or_remote_services()
+    {
+        // The machine most in need of a newer binary is the one whose Git or Codex setup is
+        // broken, so composing the sync stack to run an update would be the wrong dependency.
+        var console = new FakeConsole();
+        var update = new FakeSelfUpdate(Report(SelfUpdateStatus.Updated));
+        var application = CliComposition.CreateForArguments(
+            ["update"],
+            console,
+            _ => throw new InvalidOperationException("Git/GitHub construction must not run."),
+            () => throw new InvalidOperationException("The session manager must not be constructed."),
+            null,
+            () => update);
+
+        var exitCode = await application.RunAsync(["update"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(1, update.Calls);
+    }
+
+    private static SelfUpdateReport Report(SelfUpdateStatus status) =>
+        new(status, new ReleaseVersion(0, 7, 0), new ReleaseVersion(0, 8, 0), "v0.8.0");
 
     [Fact]
     public async Task Manage_active_state_marks_only_live_grok_and_locked_codex_sessions()
@@ -884,6 +1045,28 @@ public sealed class CliTests
             cancellationToken.ThrowIfCancellationRequested();
             RunCount++;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeSelfUpdate : ISelfUpdateOperations
+    {
+        private readonly SelfUpdateReport? report;
+        private readonly Exception? failure;
+
+        public FakeSelfUpdate(SelfUpdateReport report) => this.report = report;
+
+        public FakeSelfUpdate(Exception failure) => this.failure = failure;
+
+        public SelfUpdateRequest? Request { get; private set; }
+
+        public int Calls { get; private set; }
+
+        public Task<SelfUpdateReport> UpdateAsync(SelfUpdateRequest request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Calls++;
+            Request = request;
+            return failure is not null ? Task.FromException<SelfUpdateReport>(failure) : Task.FromResult(report!);
         }
     }
 

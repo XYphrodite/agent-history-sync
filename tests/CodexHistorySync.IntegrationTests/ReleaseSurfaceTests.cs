@@ -6,20 +6,38 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class ReleaseSurfaceTests
 {
     [Fact]
-    public async Task Release_cli_reports_version_0_7_0_and_advertises_manager_mode()
+    public async Task Release_cli_reports_version_0_8_0_and_advertises_manager_mode()
     {
         var cliDirectory = Path.Combine(RepositoryRoot(), "src", "CodexHistorySync.Cli", "bin", "Release", "net10.0", "win-x64");
         var executable = Path.Combine(cliDirectory, "agent-sync.exe");
         var assembly = Path.Combine(cliDirectory, "agent-sync.dll");
 
         Assert.True(File.Exists(executable), $"Built release executable was not found: {executable}");
-        Assert.Equal("0.7.0", AssemblyName.GetAssemblyName(assembly).Version!.ToString(3));
+        Assert.Equal("0.8.0", AssemblyName.GetAssemblyName(assembly).Version!.ToString(3));
 
         var result = await RunAsync(executable, "--help");
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Usage: agent-sync", result.Output);
         Assert.Contains("[--manage]", result.Output);
+    }
+
+    [Fact]
+    public async Task Release_cli_answers_the_probe_that_gates_its_own_update()
+    {
+        // An update keeps a freshly installed binary only if it answers --help; one that
+        // cannot would be rolled back on every machine that tried to install it.
+        var executable = Path.Combine(RepositoryRoot(), "src", "CodexHistorySync.Cli", "bin", "Release",
+            "net10.0", "win-x64", "agent-sync.exe");
+
+        Assert.True(File.Exists(executable), $"Built release executable was not found: {executable}");
+
+        var probe = await RunAsync(executable, "--help");
+        var version = await RunAsync(executable, "--version");
+
+        Assert.Equal(0, probe.ExitCode);
+        Assert.Equal(0, version.ExitCode);
+        Assert.Contains("agent-sync 0.8.0", version.Output);
     }
 
     [Fact]
