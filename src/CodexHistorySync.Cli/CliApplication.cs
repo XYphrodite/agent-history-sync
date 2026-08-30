@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
+using CodexHistorySync.Core.Update;
 
 namespace CodexHistorySync.Cli;
 
@@ -73,29 +74,47 @@ public interface ISessionManagerRunner
     Task RunAsync(CancellationToken cancellationToken);
 }
 
+public interface ISelfUpdateOperations
+{
+    Task<SelfUpdateReport> UpdateAsync(SelfUpdateRequest request, CancellationToken cancellationToken);
+}
+
 public sealed class CliApplication
 {
     private readonly ICliServices? services;
     private readonly ICliConsole console;
     private readonly IAgentCliOperations? agentOperations;
     private readonly ISessionManagerRunner? managerRunner;
+    private readonly ISelfUpdateOperations? selfUpdate;
 
     public CliApplication(
         ICliServices services,
         ICliConsole console,
         IAgentCliOperations? agentOperations = null,
-        ISessionManagerRunner? managerRunner = null)
+        ISessionManagerRunner? managerRunner = null,
+        ISelfUpdateOperations? selfUpdate = null)
     {
         this.services = services ?? throw new ArgumentNullException(nameof(services));
         this.console = console ?? throw new ArgumentNullException(nameof(console));
         this.agentOperations = agentOperations;
         this.managerRunner = managerRunner;
+        this.selfUpdate = selfUpdate;
     }
 
     internal CliApplication(ICliConsole console, ISessionManagerRunner managerRunner)
     {
         this.console = console ?? throw new ArgumentNullException(nameof(console));
         this.managerRunner = managerRunner ?? throw new ArgumentNullException(nameof(managerRunner));
+    }
+
+    /// <summary>
+    /// Update-only application. The moment a machine most needs a newer binary is the moment
+    /// its Git, GitHub, or Codex setup is broken, so this path constructs none of them.
+    /// </summary>
+    internal CliApplication(ICliConsole console, ISelfUpdateOperations selfUpdate)
+    {
+        this.console = console ?? throw new ArgumentNullException(nameof(console));
+        this.selfUpdate = selfUpdate ?? throw new ArgumentNullException(nameof(selfUpdate));
     }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
@@ -114,6 +133,7 @@ public sealed class CliApplication
             return args.Length == 0 ? Usage() : args[0] switch
             {
                 "--help" or "-h" when args.Length == 1 => Help(),
+                "--version" when args.Length == 1 => ReportVersion(),
                 "init" => await RunInitAsync(args, cancellationToken).ConfigureAwait(false),
                 "join" => await RunJoinAsync(args, cancellationToken).ConfigureAwait(false),
                 "sync" when args.Length == 1 => await RunSyncAsync(SyncMode.Bidirectional, cancellationToken).ConfigureAwait(false),
@@ -124,6 +144,7 @@ public sealed class CliApplication
                 "conflicts" when args.Length == 1 => await RunConflictsAsync(cancellationToken).ConfigureAwait(false),
                 "resolve" => await RunResolveAsync(args, cancellationToken).ConfigureAwait(false),
                 "agent" => await RunAgentAsync(args, cancellationToken).ConfigureAwait(false),
+                "update" => await RunUpdateAsync(args, cancellationToken).ConfigureAwait(false),
                 _ => Usage()
             };
         }
@@ -382,18 +403,84 @@ public sealed class CliApplication
         return 0;
     }
 
+    private async Task<int> RunUpdateAsync(string[] args, CancellationToken cancellationToken)
+    {
+        if (selfUpdate is null) return Usage();
+
+        var checkOnly = false;
+        string? tag = null;
+        for (var index = 1; index < args.Length; index++)
+        {
+            switch (args[index])
+            {
+                case "--check" when !checkOnly:
+                    checkOnly = true;
+                    break;
+                case "--version" when tag is null && index + 1 < args.Length:
+                    tag = args[++index];
+                    break;
+                default:
+                    return Usage();
+            }
+        }
+
+        if (tag is not null && !ReleaseVersion.TryParse(tag, out _)) return Usage();
+
+        try
+        {
+            var report = await selfUpdate.UpdateAsync(new SelfUpdateRequest(checkOnly, tag), cancellationToken)
+                .ConfigureAwait(false);
+            switch (report.Status)
+            {
+                case SelfUpdateStatus.AlreadyCurrent:
+                    console.WriteLine($"Already up to date: agent-sync {report.Installed} (latest release {SafeToken(report.Tag)}).");
+                    break;
+                case SelfUpdateStatus.UpdateAvailable when report.Release > report.Installed:
+                    console.WriteLine($"Update available: {report.Installed} -> {report.Release} ({SafeToken(report.Tag)}).");
+                    console.WriteLine("Run 'agent-sync update' to install it.");
+                    break;
+                case SelfUpdateStatus.UpdateAvailable:
+                    // A pinned tag reaches this branch by being asked for, not by being newer,
+                    // so calling it an available update would misread as a version bump.
+                    console.WriteLine($"Pinned release {SafeToken(report.Tag)} would replace {report.Installed} with {report.Release}.");
+                    console.WriteLine($"Run 'agent-sync update --version {SafeToken(report.Tag)}' to install it.");
+                    break;
+                default:
+                    console.WriteLine($"Updated agent-sync {report.Installed} -> {report.Release} ({SafeToken(report.Tag)}).");
+                    console.WriteLine("The replaced binary stays beside the new one until a later run removes it.");
+                    break;
+            }
+            return 0;
+        }
+        catch (InvalidDataException exception)
+        {
+            // Every message on this path is authored in the update code and carries no path or
+            // secret, so the reason serves the user better than the generic type token.
+            console.WriteError($"Update failed: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private int ReportVersion()
+    {
+        console.WriteLine($"agent-sync {CliVersion.Current}");
+        return 0;
+    }
+
     private int Usage()
     {
-        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage] [--sessions]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update> [options] [--manage] [--sessions] [--version]");
         return 2;
     }
 
     private int Help()
     {
-        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent> [options] [--manage] [--sessions]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update> [options] [--manage] [--sessions] [--version]");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
+        console.WriteLine("update [--check] [--version <tag>]  install the latest published release");
         console.WriteLine("--manage    copy and delete sessions across agents");
         console.WriteLine("--sessions  read session contents, search, export, delete");
+        console.WriteLine("--version   print the installed version");
         return 0;
     }
 

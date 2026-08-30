@@ -212,6 +212,29 @@ then `codex.exe` on `PATH`. VSCodium does not use the Microsoft Marketplace by d
 
 If Codex is not installed, `join` prints a warning and continues so Grok sessions and on-disk Codex JSONL can still be imported. When Codex *is* present but the disposable reindex probe fails, `join` hard-fails with `Gate failed: codex-compatibility` and a `diagnostic:` line. Install the OpenAI Codex IDE extension (VS Code / Cursor / Windsurf) or put `codex.exe` on `PATH` / set `CODEX_EXE` so reindex can be verified. Use `doctor --compatibility-session <jsonl> --codex-exe <path>` to re-test the probe alone.
 
+## Updating
+
+```powershell
+agent-sync --version
+agent-sync update --check
+agent-sync update
+agent-sync update --version 0.7.0
+```
+
+`update` replaces the running `agent-sync.exe` with a release published in `XYphrodite/agent-history-sync`. The source repository is fixed in code: there is no option, environment variable, or configuration entry that points the command at another origin.
+
+Without `--version` the command installs the latest release and does nothing when that release is not newer than the installed build, including when "latest" moves backwards. A pinned `--version` is an instruction rather than a comparison: it installs that tag even when it is the same version or older, which is how a bad release is undone. A tag that is not `vX.Y.Z` is refused rather than ordered by guesswork.
+
+Every applied update passes three refusals before anything is replaced: the download must match the release's `agent-sync.exe.sha256` asset, it must be a Windows executable, and it must answer `--help` within 30 seconds while still in its staging directory. `--help` is the probe because every published release answers it, so pinning an older tag still works. Any of the three failing leaves the installed binary untouched.
+
+The same probe runs once more against the installed path after the swap, and a failure there restores the previous binary. It runs in that order for a concrete reason: the release binary is a single-file bundle that loads its own assemblies back out of its own file, so once the running executable has renamed itself away it can no longer load anything it has not already touched. The staging run is what makes the second run possible at all.
+
+Windows cannot overwrite a running image, so the previous binary is renamed to `agent-sync.exe.old-<timestamp>` beside the new one. That file stays mapped by the process that performed the update, so it is deleted by a later `agent-sync update` run rather than by the one that created it.
+
+`update` constructs no Git, GitHub, or Codex services, so it still works on a machine whose sync configuration is broken. It does not touch the background agent task: the install path does not change, and the `AgentHistorySync` task keeps pointing at the updated binary. Close `--manage` and `--sessions` first — another running agent-sync holds the same file.
+
+The command replaces an installed `agent-sync.exe` only. Started any other way, including through `dotnet run`, it declines rather than replacing whatever is hosting it. A build older than 0.8.0 has no `update` command at all: install once with `scripts/install.ps1`, then use `agent-sync update` from then on.
+
 ## Background agent
 
 Install or remove the current executable's per-user logon task:

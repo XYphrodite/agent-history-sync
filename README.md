@@ -58,6 +58,17 @@ Copy-Item .\agent-sync.exe (Join-Path $install 'agent-sync.exe')
 
 **Publish a new release** (maintainers): push an annotated tag `vX.Y.Z` (or run `.\scripts\publish-release.ps1 -Version X.Y.Z`). GitHub Actions builds `win-x64` and attaches `agent-sync.exe` + SHA-256.
 
+### Update
+
+```powershell
+agent-sync --version          # what is installed
+agent-sync update --check     # what is published
+agent-sync update             # install the latest release
+agent-sync update --version v0.7.0   # pin a tag, including an older one
+```
+
+`update` replaces the running `agent-sync.exe` in place. The download must match the release's SHA-256 asset, be a Windows executable, and answer `--help` before it is installed and again afterwards; any failure leaves the previous binary in place. The source repository is fixed in code and cannot be redirected. Close `--manage` and `--sessions` first, and note that a build older than 0.8.0 has no `update` command — install it once with `scripts/install.ps1`. See [operations](docs/operations.md#updating).
+
 ### Initialize and join
 
 On the first PC (empty private data repo):
@@ -87,6 +98,7 @@ agent-sync pull    # download only
 agent-sync sync    # bidirectional
 agent-sync agent install
 agent-sync agent uninstall
+agent-sync update
 agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # or --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
@@ -179,6 +191,17 @@ Copy-Item .\agent-sync.exe (Join-Path $install 'agent-sync.exe')
 
 **Новый релиз** (для maintainers): тег `vX.Y.Z` или `.\scripts\publish-release.ps1 -Version X.Y.Z` — Actions соберёт `win-x64` и приложит `agent-sync.exe` + SHA-256.
 
+### Обновление
+
+```powershell
+agent-sync --version          # что установлено
+agent-sync update --check     # что опубликовано
+agent-sync update             # поставить последний релиз
+agent-sync update --version v0.7.0   # закрепить тег, в том числе более старый
+```
+
+`update` заменяет запущенный `agent-sync.exe` на месте. Скачанный файл обязан совпасть с SHA-256 из релиза, быть Windows-исполняемым и ответить на `--help` до установки и ещё раз после; любая осечка оставляет прежний бинарь на месте. Репозиторий-источник зашит в коде и не переопределяется. Сначала закройте `--manage` и `--sessions`; сборка старше 0.8.0 команды `update` не знает — её ставят один раз через `scripts/install.ps1`. Подробности — в [operations](docs/operations.md#updating).
+
 ### Init и join
 
 Первый ПК (пустой private data-репо):
@@ -208,6 +231,7 @@ agent-sync pull    # только принять
 agent-sync sync    # в обе стороны
 agent-sync agent install
 agent-sync agent uninstall
+agent-sync update
 agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # или --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
