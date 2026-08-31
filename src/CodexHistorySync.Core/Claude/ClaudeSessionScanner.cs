@@ -84,7 +84,7 @@ public sealed class ClaudeSessionScanner
         var activeSince = now() - activityWindow;
 
         var complete = true;
-        var candidates = new List<ObservedCandidate>();
+        var observed = new List<ObservedCandidate>();
         foreach (var transcriptPath in transcripts)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -108,10 +108,19 @@ public sealed class ClaudeSessionScanner
                 continue;
             }
 
-            // Defer instead of failing, exactly like a locked Grok session.
-            if (claudeRunning && observation.LastWriteTimeUtc >= activeSince.UtcDateTime) { complete = false; continue; }
+            observed.Add(new ObservedCandidate(transcriptPath, observation));
+        }
 
-            candidates.Add(new ObservedCandidate(transcriptPath, observation));
+        var candidates = new List<ObservedCandidate>();
+        foreach (var live in SelectLiveCopies(observed))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Defer instead of failing, exactly like a locked Grok session. Applied to the live
+            // copy only, and after the choice: deferring it must not let a frozen older copy of
+            // the same session publish in its place.
+            if (claudeRunning && live.First.LastWriteTimeUtc >= activeSince.UtcDateTime) { complete = false; continue; }
+
+            candidates.Add(live);
         }
 
         if (candidates.Count != 0)
@@ -135,6 +144,8 @@ public sealed class ClaudeSessionScanner
             if (objectsById.TryAdd(item.Id, item)) objects.Add(item);
             else
             {
+                // Unreachable while one session id yields one candidate, and kept as the guard
+                // that keeps it that way: two objects under one id must never reach a publish.
                 duplicates.Add(item.Id);
                 uncertain.Add(ObjectKind.ClaudeSession);
                 if (objectsById.Remove(item.Id, out var prior)) objects.Remove(prior);
@@ -144,6 +155,26 @@ public sealed class ClaudeSessionScanner
         if (!complete) uncertain.Add(ObjectKind.ClaudeSession);
         return new SessionScanResult(objects, uncertain, duplicates);
     }
+
+    /// <summary>
+    /// Reduces the transcripts sharing one session id to the one that is still being written.
+    ///
+    /// A Claude session whose working directory changes is copied into the project folder for
+    /// the new directory and continued there; the copy left in the old folder stops at the
+    /// moment of the move. Both files carry the same session id, so treating them as two objects
+    /// would publish one session twice under one logical id — and refusing the scan over it
+    /// stops every agent from synchronizing, not just Claude. The newest write is the session;
+    /// size and path only break ties, so the choice is the same on every machine and every run.
+    /// </summary>
+    private static IEnumerable<ObservedCandidate> SelectLiveCopies(List<ObservedCandidate> observed) =>
+        observed
+            .GroupBy(candidate => Path.GetFileNameWithoutExtension(candidate.TranscriptPath),
+                StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderByDescending(candidate => candidate.First.LastWriteTimeUtc)
+                .ThenByDescending(candidate => candidate.First.Length)
+                .ThenBy(candidate => candidate.TranscriptPath, StringComparer.OrdinalIgnoreCase)
+                .First());
 
     private static LocalObject? ReadStable(ObservedCandidate candidate, CancellationToken cancellationToken)
     {

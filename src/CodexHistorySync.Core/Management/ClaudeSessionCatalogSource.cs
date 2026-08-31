@@ -54,10 +54,16 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
         }).ConfigureAwait(false);
 
         var rows = collected.Where(row => row is not null).Select(row => row!).ToArray();
-        // The same session id under two project directories: neither copy can be trusted as the session.
-        var duplicates = rows.GroupBy(row => row.SessionId, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return rows.Select(row => duplicates.Contains(row.SessionId) ? row with { CanRead = false } : row).ToArray();
+        // One session id under two project directories is ordinary Claude behaviour, not damage:
+        // a session whose working directory changes is copied into the new project folder and
+        // continued there, leaving the old copy frozen at the moment of the move. The live copy
+        // is the session, so the rest are dropped instead of being shown as extra rows.
+        return rows
+            .GroupBy(row => row.SessionId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(row => row.LastModifiedAt)
+                .ThenBy(row => row.NativePath, StringComparer.OrdinalIgnoreCase)
+                .First())
+            .ToArray();
     }
 
     private List<(string Candidate, string SessionId)> EnumerateCandidates()

@@ -160,6 +160,44 @@ and before a preview can become a title; the hidden primer turn is matched on
 its own opening text instead. The last-resort title is then a turn the user
 actually wrote.
 
+### D8 — One session id, two project folders: the newest write is the session
+
+Discovered in production, after D2 shipped. Change directory mid-session and
+Claude copies the transcript into the project folder for the new directory and
+continues it there; the copy in the old folder freezes at the moment of the
+move. A real example on the author's machine:
+
+```
+projects/c--Repos-Reborn/05e49a17-....jsonl        950 records, ends 05:55
+projects/c--Repos-xmrig-fleet/05e49a17-....jsonl  3610 records, still growing
+```
+
+Both carry the same `sessionId`, both open with the identical `bridge-session`
+record, and the second contains records with **both** `cwd` values.
+
+D2 makes the logical id the session id alone, so the two files produced one id
+twice. The scanner reported that as a duplicate, and a duplicate id is fatal for
+the whole scan — `SyncEngine.EnsureScanUsable` throws
+`Local history contains duplicate logical object IDs.`, which stopped Codex and
+Grok from synchronizing too. One ordinary Claude session disabled the entire
+tool.
+
+D2 stands: the id must stay machine-independent, and a project folder is neither
+(the mangling is lossy per D1, and the same session lives under different paths
+on different machines). What was wrong is treating a relocation as damage.
+
+The rule is now: **transcripts sharing a session id collapse to the one written
+most recently**; ties break on the longer transcript, then on path, so every
+machine and every run chooses the same file. The frozen copy is an earlier state
+of the same conversation, so ignoring it loses nothing, and it is left on disk.
+
+Order matters against D3: the live copy is chosen **before** the activity window
+is applied. Otherwise deferring a session that is being written would promote its
+frozen copy in its place — publishing an older conversation over a newer one.
+
+The same rule governs the manager and viewer catalog, which previously marked
+both copies unreadable and so refused to open or copy an ordinary session.
+
 ## Layer impact
 
 | Layer | Change |
