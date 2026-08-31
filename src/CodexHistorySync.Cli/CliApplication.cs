@@ -473,7 +473,9 @@ public sealed class CliApplication
 
     private int ReportVersion()
     {
-        console.WriteLine($"agent-sync {CliVersion.Current}");
+        // The commit is what turns a bug report into a diff; the version alone cannot tell two
+        // builds of the same release apart.
+        console.WriteLine($"agent-sync {CliVersion.Current} (commit {SafeToken(CliBuildInfo.Commit)})");
         return 0;
     }
 

@@ -77,6 +77,9 @@ public sealed class SessionViewerApplication(
                 case SessionViewerCommand.Search:
                     state = state.WithSearchQuery(view.ReadSearchQuery(state, cancellationToken));
                     break;
+                case SessionViewerCommand.FilterList:
+                    state = state.WithListFilter(view.ReadListFilter(state, cancellationToken));
+                    break;
                 case SessionViewerCommand.Export:
                     await ExportAsync(state, cancellationToken).ConfigureAwait(false);
                     break;

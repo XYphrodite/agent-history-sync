@@ -94,11 +94,15 @@ One list holds every session from every installed agent, newest first, with an `
 | Up / Down | Move the selection, or scroll the text once it has focus |
 | Left / Right | Move focus between the list and the text |
 | PgUp / PgDn / Home / End | Scroll the text |
-| `/` | Search inside the open session; `N` steps to the next match and wraps |
+| `/` | Follows the focus: with the list focused it filters sessions by title, with the text focused it searches inside the open session; `N` steps to the next match and wraps |
 | `E` | Export the open session to `%USERPROFILE%\Documents\agent-sync\<agent>-<id>.md` |
 | `Del` | Delete the session locally, behind the same confirmation the manager uses |
 | `R` | Rescan |
 | `Q` / `Esc` | Exit |
+
+The two things `/` can do look alike and are not. Filtering narrows the list to sessions whose **title** matches, showing `matched/total` beneath the panels; searching walks the **text** of the one session already open, showing `current/total` matches. The filter keeps the selected session when it survives the query, so typing and clearing lands back where you were rather than at the top of a list of forty. `Esc` clears whichever of the two is active before it offers to leave.
+
+Every screen carries the same header: the name, the version, and the seven-character commit the build came from. `agent-sync --version` prints the same pair.
 
 The text is the conversation as `agent-sync` understands it for cross-agent copying: user and assistant turns only. Reasoning blocks, tool calls, and tool results are **not** shown — they are absent from the portable model, not hidden. Neither are technical wrappers such as `<system-reminder>`, for the same reason.
 

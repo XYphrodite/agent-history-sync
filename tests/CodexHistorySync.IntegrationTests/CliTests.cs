@@ -88,7 +88,8 @@ public sealed class CliTests
         var exitCode = await fixture.Application.RunAsync(["--version"], CancellationToken.None);
 
         Assert.Equal(0, exitCode);
-        Assert.Matches(@"^agent-sync \d+\.\d+\.\d+\s*$", fixture.Console.OutputText);
+        // The commit is what turns a bug report into a diff, so it belongs beside the version.
+        Assert.Matches(@"^agent-sync \d+\.\d+\.\d+ \(commit [0-9a-f]{7}\)\s*$", fixture.Console.OutputText);
         Assert.Empty(fixture.Console.ErrorText);
         Assert.Empty(fixture.Services.Calls);
     }

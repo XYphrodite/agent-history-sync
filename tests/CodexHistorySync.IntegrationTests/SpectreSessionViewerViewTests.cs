@@ -36,11 +36,32 @@ public sealed class SpectreSessionViewerViewTests
     }
 
     [Fact]
-    public void ReadCommand_maps_slash_to_find()
+    public void ReadCommand_maps_slash_to_filter_while_the_list_has_focus()
+    {
+        // Filtering forty sessions by title and finding a word inside one of them are the same
+        // gesture aimed at different panes, so the key follows the focus.
+        var view = new SpectreSessionViewerView(Console(out _, 120, 30), new FakeInput(Key('/', ConsoleKey.Oem2)));
+        view.Render(Loaded());
+
+        Assert.Equal(SessionViewerCommand.FilterList, view.ReadCommand(CancellationToken.None));
+    }
+
+    [Fact]
+    public void ReadCommand_maps_slash_to_find_while_the_text_has_focus()
     {
         var view = new SpectreSessionViewerView(Console(out _, 120, 30), new FakeInput(Key('/', ConsoleKey.Oem2)));
+        view.Render(Loaded().Apply(SessionViewerCommand.FocusContent));
 
         Assert.Equal(SessionViewerCommand.Search, view.ReadCommand(CancellationToken.None));
+    }
+
+    [Fact]
+    public void ReadCommand_never_defaults_to_find_before_anything_is_rendered()
+    {
+        // No state means no focus to follow; the list is where the viewer starts.
+        var view = new SpectreSessionViewerView(Console(out _, 120, 30), new FakeInput(Key('/', ConsoleKey.Oem2)));
+
+        Assert.Equal(SessionViewerCommand.FilterList, view.ReadCommand(CancellationToken.None));
     }
 
     [Fact]
@@ -141,8 +162,9 @@ public sealed class SpectreSessionViewerViewTests
         view.Render(state);
 
         var lines = output.ToString().TrimEnd().Split('\n').Select(line => line.TrimEnd('\r')).ToArray();
-        // Two borders, the column header, the viewport, a message line and the footer.
-        Assert.Equal(state.ViewportRows + 5, lines.Length);
+        // Two borders, the column header, the viewport, a message line and the footer — plus the
+        // four the brand header takes: its own two borders and the two lines between them.
+        Assert.Equal(state.ViewportRows + 9, lines.Length);
     }
 
     [Fact]
@@ -164,11 +186,14 @@ public sealed class SpectreSessionViewerViewTests
 
         new SpectreSessionViewerView(console, new FakeInput()).Render(Loaded());
 
+        // The brand header closes on a line of its own, so the two reading panels are the only
+        // ones that may share a closing row \u2014 and they must.
         var bottoms = output.ToString().Split('\n')
             .Where(line => line.Contains('\u2570'))
             .ToArray();
-        var single = Assert.Single(bottoms);
-        Assert.Equal(2, single.Count(character => character == '\u2570'));
+        Assert.Equal(2, bottoms.Length);
+        Assert.Equal(1, bottoms[0].Count(character => character == '\u2570'));
+        Assert.Equal(2, bottoms[1].Count(character => character == '\u2570'));
     }
 
     private static SessionCatalogSnapshot LongTitles()
