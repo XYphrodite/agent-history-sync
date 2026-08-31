@@ -31,6 +31,8 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     private const string LeaveDisplay = "\u001b[?1049l";
     private const int LayoutRows = 12;
     private const int MinimumPanelWidth = 28;
+    /// <summary>Lines a second band of panels costs: its own borders and header.</summary>
+    private const int BandChrome = 4;
     private static readonly Style FocusedBorder = new(Color.Cyan1);
     private static readonly Style UnfocusedBorder = new(Color.Grey23);
     private static readonly Style FocusedSelection = new(Color.Cyan1, decoration: Decoration.Bold);
@@ -110,19 +112,42 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         console.Write(frame);
     }
 
+    /// <summary>
+    /// How many panels share one band. Bands are balanced rather than filled: four agents on a
+    /// terminal that fits three become two and two, not three and one.
+    /// </summary>
+    internal static int PanelsPerRow(int consoleWidth, int agentCount)
+    {
+        if (agentCount <= 1) return 1;
+        var fit = Math.Max(1, consoleWidth / MinimumPanelWidth);
+        if (fit >= agentCount) return agentCount;
+        var bands = (agentCount + fit - 1) / fit;
+        return (agentCount + bands - 1) / bands;
+    }
+
     private Rows BuildFrame(SessionManagerState state)
     {
         var showSearch = searchEditing || state.SearchQuery.Length > 0;
-        var visibleRows = Math.Max(1, console.Profile.Height - LayoutRows - (showSearch ? 1 : 0));
+        var agents = state.VisibleAgents;
+        // Four agents do not fit side by side on an 80-column terminal, so the panels wrap onto a
+        // second band rather than each being squeezed below the width a title needs. A terminal
+        // wide enough for all of them still gets the single row it always had.
+        var perRow = PanelsPerRow(console.Profile.Width, agents.Count);
+        var bands = (agents.Count + perRow - 1) / perRow;
+        var visibleRows = Math.Max(1,
+            (console.Profile.Height - LayoutRows - (showSearch ? 1 : 0) - (bands - 1) * BandChrome) / bands);
         var displayState = state.SetViewportRows(visibleRows);
-        var agents = displayState.VisibleAgents;
-        var availableWidth = Math.Max(MinimumPanelWidth * agents.Count + 1, console.Profile.Width);
-        var panelWidth = Math.Max(MinimumPanelWidth, (availableWidth - 1) / agents.Count);
+        var availableWidth = Math.Max(MinimumPanelWidth * perRow + 1, console.Profile.Width);
+        var panelWidth = Math.Max(MinimumPanelWidth, (availableWidth - 1) / perRow);
 
-        var panels = new Columns(agents.Select(agent => BuildPanel(displayState, agent, panelWidth)).ToArray())
-        {
-            Expand = true
-        };
+        var columns = Enumerable.Range(0, bands)
+            .Select(band => new Columns(agents.Skip(band * perRow).Take(perRow)
+                .Select(agent => BuildPanel(displayState, agent, panelWidth)).ToArray())
+            {
+                Expand = true
+            })
+            .ToArray();
+        IRenderable panels = columns.Length == 1 ? columns[0] : new Rows(columns);
         var brand = new Panel(new Rows(
             new Markup("[cyan1 bold]<>[/] [white bold]agent[/][grey58]-[/][orange1 bold]sync[/]"),
             new Markup(

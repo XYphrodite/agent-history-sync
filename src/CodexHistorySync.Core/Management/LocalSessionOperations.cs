@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using CodexHistorySync.Core.Claude;
+using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
@@ -18,6 +19,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly CodexPaths? codexPaths;
     private readonly GrokPaths? grokPaths;
     private readonly ClaudePaths? claudePaths;
+    private readonly ContinuePaths? continuePaths;
+    private readonly IConversationWriter? continueWriter;
+    private readonly IConversationReader continueReader;
     private readonly IManagedSessionActiveState activeState;
     private readonly IManagedSessionDirectoryDeleter directoryDeleter;
     private readonly IConversationWriter? codexWriter;
@@ -62,6 +66,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         "The selected Claude identity is invalid.",
         "Claude conversation is invalid.",
         "The staged Claude conversation failed validation.",
+        "The selected Continue target is invalid.",
+        "The selected Continue identity is invalid.",
+        "The Continue session could not be read as a conversation.",
+        "The staged Continue conversation failed validation.",
+        "The Continue session index is not a JSON array.",
         "The selected Grok identity is invalid.",
         "The selected agent is invalid.",
         "The selected session identity changed.",
@@ -83,7 +92,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationWriter? codexWriter,
         IConversationWriter? grokWriter,
         ClaudePaths? claudePaths = null,
-        IConversationWriter? claudeWriter = null)
+        IConversationWriter? claudeWriter = null,
+        ContinuePaths? continuePaths = null,
+        IConversationWriter? continueWriter = null)
         : this(
             codexPaths,
             grokPaths,
@@ -96,7 +107,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             null,
             claudePaths,
             claudeWriter,
-            new ClaudeConversationReader())
+            new ClaudeConversationReader(),
+            continuePaths,
+            continueWriter,
+            new ContinueConversationReader())
     {
     }
 
@@ -112,13 +126,19 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IManagedSessionFingerprintProvider? fingerprintProvider = null,
         ClaudePaths? claudePaths = null,
         IConversationWriter? claudeWriter = null,
-        IConversationReader? claudeReader = null)
+        IConversationReader? claudeReader = null,
+        ContinuePaths? continuePaths = null,
+        IConversationWriter? continueWriter = null,
+        IConversationReader? continueReader = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
         this.claudePaths = claudePaths;
         this.claudeWriter = claudeWriter;
         this.claudeReader = claudeReader ?? new ClaudeConversationReader();
+        this.continuePaths = continuePaths;
+        this.continueWriter = continueWriter;
+        this.continueReader = continueReader ?? new ContinueConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
         this.codexWriter = codexWriter;
@@ -208,6 +228,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Codex => codexWriter,
         ManagedAgent.Grok => grokWriter,
         ManagedAgent.Claude => claudeWriter,
+        ManagedAgent.Continue => continueWriter,
         _ => null
     };
 
@@ -216,12 +237,13 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Codex => codexReader,
         ManagedAgent.Grok => grokReader,
         ManagedAgent.Claude => claudeReader,
+        ManagedAgent.Continue => continueReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 
-    /// <summary>Codex and Claude keep one file per session; Grok keeps a directory package.</summary>
+    /// <summary>Codex, Claude, and Continue keep one file per session; Grok keeps a directory.</summary>
     internal static bool IsFileBackedAgent(ManagedAgent agent) =>
-        agent is ManagedAgent.Codex or ManagedAgent.Claude;
+        agent is ManagedAgent.Codex or ManagedAgent.Claude or ManagedAgent.Continue;
 
     private async Task<ValidatedSource> ReadAndValidateAsync(
         ManagedSession source,
@@ -281,6 +303,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         if (IsFileBackedAgent(source.Agent))
         {
             File.Delete(validated.NativePath);
+            // Continue keeps a second record of the session in the shared index. Leaving it there
+            // would put a row in Continue's list that throws when opened, which is what the
+            // extension's own delete avoids by removing both.
+            if (source.Agent == ManagedAgent.Continue && continuePaths is not null)
+                RemoveFromContinueIndex(source.SessionId);
             return;
         }
 
@@ -426,6 +453,31 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
                 nativePath);
         }
 
+        if (source.Agent == ManagedAgent.Continue)
+        {
+            if (continuePaths is null ||
+                ContinuePaths.IsIndexFile(source.NativePath) ||
+                !string.Equals(
+                    Path.GetFileNameWithoutExtension(Path.GetFullPath(source.NativePath)),
+                    source.SessionId,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(Path.GetExtension(source.NativePath), ".json", StringComparison.OrdinalIgnoreCase) ||
+                !ManagedSessionPathPolicy.TryResolveConcreteTarget(
+                    source.NativePath, continuePaths.Sessions, expectDirectory: false, out var nativePath))
+                throw new InvalidDataException("The selected Continue target is invalid.");
+            try
+            {
+                _ = ContinueSessionPackage.ToLogicalId(source.SessionId);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException("The selected Continue identity is invalid.", exception);
+            }
+            return new Target(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(continuePaths.Sessions)),
+                nativePath);
+        }
+
         throw new InvalidDataException("The selected agent is invalid.");
     }
 
@@ -449,6 +501,38 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         return ManagedSessionFailureReason.Unspecified;
     }
 
+    /// <summary>
+    /// Drops one session from the shared index. The session file is already gone at this point, so
+    /// an index that cannot be parsed is left alone rather than replaced: Continue needs it to
+    /// create sessions at all, and the stale row it keeps is the smaller harm.
+    /// </summary>
+    private void RemoveFromContinueIndex(string sessionId)
+    {
+        var indexPath = continuePaths!.IndexFilePath;
+        if (!File.Exists(indexPath)) return;
+
+        string merged;
+        try
+        {
+            merged = ContinueSessionIndex.Remove(File.ReadAllText(indexPath), sessionId);
+        }
+        catch (InvalidDataException)
+        {
+            return;
+        }
+
+        var temporary = indexPath + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, merged);
+            File.Move(temporary, indexPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
     private static void ValidateConversationIdentity(ManagedSession source, PortableConversation conversation)
     {
         var expectedAgent = source.Agent switch
@@ -456,6 +540,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ManagedAgent.Codex => ConversationAgent.Codex,
             ManagedAgent.Grok => ConversationAgent.Grok,
             ManagedAgent.Claude => ConversationAgent.Claude,
+            ManagedAgent.Continue => ConversationAgent.Continue,
             _ => throw new InvalidDataException("The selected agent is invalid.")
         };
         if (conversation.SourceAgent != expectedAgent ||

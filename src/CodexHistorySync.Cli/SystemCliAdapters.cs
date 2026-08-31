@@ -7,6 +7,7 @@ using System.Text.Json;
 using CodexHistorySync.Cli.Management;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
+using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
@@ -105,8 +106,9 @@ public static class CliComposition
         var codexPaths = TryResolveCodexPaths();
         var grokPaths = GrokPaths.TryResolve();
         var claudePaths = ClaudePaths.TryResolve();
+        var continuePaths = ContinuePaths.TryResolve();
         var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
         // The viewer never copies, so no conversation writers are composed for it (design D6).
         var operations = new LocalSessionOperations(
             codexPaths,
@@ -116,6 +118,8 @@ public static class CliComposition
             null,
             null,
             claudePaths,
+            null,
+            continuePaths,
             null);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionViewerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
@@ -129,15 +133,17 @@ public static class CliComposition
         var codexPaths = TryResolveCodexPaths();
         var grokPaths = GrokPaths.TryResolve();
         var claudePaths = ClaudePaths.TryResolve();
+        var continuePaths = ContinuePaths.TryResolve();
         var resolution = new CodexExecutableLocator().ResolveWithSource();
         var executable = ToCodexExecutableOption(resolution);
         var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
         var codexWriter = codexPaths is null
             ? null
             : new CodexConversationWriter(codexPaths, executable, new CodexCompatibilityProbe());
         var grokWriter = grokPaths is null ? null : new GrokConversationWriter(grokPaths);
         var claudeWriter = claudePaths is null ? null : new ClaudeConversationWriter(claudePaths);
+        var continueWriter = continuePaths is null ? null : new ContinueConversationWriter(continuePaths);
         var operations = new LocalSessionOperations(
             codexPaths,
             grokPaths,
@@ -146,7 +152,9 @@ public static class CliComposition
             codexWriter,
             grokWriter,
             claudePaths,
-            claudeWriter);
+            claudeWriter,
+            continuePaths,
+            continueWriter);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionManagerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
         return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog, operations, view));
@@ -737,6 +745,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly string? codexHome;
     private readonly string? grokHome;
     private readonly string? claudeHome;
+    private readonly string? continueHome;
     private readonly Action<SyncProgress>? syncProgress;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
@@ -766,7 +775,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         string? codexHome = null,
         string? grokHome = null,
         Action<SyncProgress>? syncProgress = null,
-        string? claudeHome = null)
+        string? claudeHome = null,
+        string? continueHome = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -778,6 +788,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.codexHome = codexHome;
         this.grokHome = grokHome;
         this.claudeHome = claudeHome;
+        this.continueHome = continueHome;
         this.syncProgress = syncProgress;
     }
 
@@ -841,7 +852,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         {
             ClaudeHome = ClaudePaths.TryResolve(claudeHome)?.Projects,
             ClaudeSessions = preview.LocalByKind.TryGetValue(ObjectKind.ClaudeSession, out var claudeCount) ? claudeCount : 0,
-            ClaudeUncertain = preview.UncertainKinds.Contains(ObjectKind.ClaudeSession)
+            ClaudeUncertain = preview.UncertainKinds.Contains(ObjectKind.ClaudeSession),
+            ContinueHome = ContinuePaths.TryResolve(continueHome)?.Sessions,
+            ContinueSessions = preview.LocalByKind.TryGetValue(ObjectKind.ContinueSession, out var continueCount) ? continueCount : 0,
+            ContinueUncertain = preview.UncertainKinds.Contains(ObjectKind.ContinueSession)
         };
     }
 
@@ -855,6 +869,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         // Not a failure when Claude is not installed: the check reports whether a home was found
         // at all, which is what tells the user why no Claude panel or sessions appear.
         checks.Add(new("claude-paths", ClaudePaths.TryResolve(claudeHome) is not null));
+        checks.Add(new("continue-paths", ContinuePaths.TryResolve(continueHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));
         checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
         checks.Add(new("github-private", configuration is not null && (await gateway.VerifyPrivateAsync(configuration.RemoteUrl, cancellationToken).ConfigureAwait(false)).Passed));
@@ -907,14 +922,15 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             : CodexPaths.Resolve(codexHome);
         var grokPaths = CodexHistorySync.Core.Grok.GrokPaths.TryResolve(grokHome);
         var claudePaths = ClaudePaths.TryResolve(claudeHome);
+        var continuePaths = ContinuePaths.TryResolve(continueHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
         var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths,
-            claudePaths: claudePaths);
+            claudePaths: claudePaths, continuePaths: continuePaths);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
         var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths,
-            claudePaths: claudePaths);
+            claudePaths: claudePaths, continuePaths: continuePaths);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
             Path.Combine(localAppData, "CodexHistorySync", "repositories"),
@@ -923,7 +939,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
             configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
-            grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths);
+            grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths);
         return new Components(paths, scanner, conflicts, engine);
     }
 

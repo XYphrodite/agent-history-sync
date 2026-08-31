@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
+using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
@@ -19,24 +20,26 @@ public sealed class BackupStore
     private readonly CodexPaths _paths;
     private readonly GrokPaths? _grokPaths;
     private readonly ClaudePaths? _claudePaths;
+    private readonly ContinuePaths? _continuePaths;
     private readonly IAtomicFileSystem _fileSystem;
     private readonly TimeProvider _clock;
     private readonly TimeSpan _retention;
     private readonly IStagingDirectoryCleaner _stagingCleaner;
 
-    public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null)
-        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null, grokPaths, claudePaths) { }
+    public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null)
+        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null, grokPaths, claudePaths, continuePaths) { }
 
-    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null)
+    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null)
     {
         ArgumentNullException.ThrowIfNull(codexPaths);
         PathSafety.ValidateFileComponent(repositoryId, nameof(repositoryId));
         var local = PathSafety.Canonicalize(localAppDataDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), nameof(localAppDataDirectory));
         RootPath = Path.GetFullPath(Path.Combine(local, "CodexHistorySync", "repositories", repositoryId, "backups"));
-        PathSafety.EnsureOutsideCodex(RootPath, codexPaths, nameof(localAppDataDirectory), grokPaths, claudePaths);
+        PathSafety.EnsureOutsideCodex(RootPath, codexPaths, nameof(localAppDataDirectory), grokPaths, claudePaths, continuePaths);
         _paths = codexPaths;
         _grokPaths = grokPaths;
         _claudePaths = claudePaths;
+        _continuePaths = continuePaths;
         _fileSystem = fileSystem ?? new AtomicFileSystem();
         _clock = timeProvider ?? TimeProvider.System;
         _retention = retention ?? DefaultRetention;
@@ -158,6 +161,7 @@ public sealed class BackupStore
         var roots = new List<string> { _paths.Sessions, _paths.ArchivedSessions, _paths.Attachments };
         if (_grokPaths is not null) roots.Add(_grokPaths.Sessions);
         if (_claudePaths is not null) roots.Add(_claudePaths.Projects);
+        if (_continuePaths is not null) roots.Add(_continuePaths.Sessions);
         if (!roots.Any(root => CodexPaths.IsPathWithin(canonical, root) && !StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(root))))
             throw new ArgumentException("The backup source is outside synchronized history paths.", nameof(path));
         return canonical;

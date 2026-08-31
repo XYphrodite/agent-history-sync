@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Claude;
+using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
@@ -85,6 +86,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly GrokSessionScanner? _grokScanner;
     private readonly ClaudePaths? _claudePaths;
     private readonly ClaudeSessionScanner? _claudeScanner;
+    private readonly ContinuePaths? _continuePaths;
+    private readonly ContinueSessionScanner? _continueScanner;
     private readonly byte[] _masterKey;
     private readonly SessionScanner _scanner;
     private readonly RepositoryCrypto _crypto;
@@ -104,16 +107,18 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory,
         GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null, Action<SyncProgress>? progress = null,
-        ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null)
+        ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null,
+        ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
             provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner, progress,
-            claudePaths, claudeScanner) { }
+            claudePaths, claudeScanner, continuePaths, continueScanner) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory, ISyncEngineHooks hooks,
         IOperationDirectoryCleaner operationCleaner, GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null,
-        Action<SyncProgress>? progress = null, ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null)
+        Action<SyncProgress>? progress = null, ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null,
+        ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -126,6 +131,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _grokScanner = grokScanner ?? (grokPaths is null ? null : new GrokSessionScanner());
         _claudePaths = claudePaths;
         _claudeScanner = claudeScanner ?? (claudePaths is null ? null : new ClaudeSessionScanner());
+        _continuePaths = continuePaths;
+        _continueScanner = continueScanner ?? (continuePaths is null ? null : new ContinueSessionScanner());
         _masterKey = masterKey.ToArray();
         _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
         _crypto = crypto ?? throw new ArgumentNullException(nameof(crypto));
@@ -135,7 +142,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
-        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths);
+        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths);
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
         _progress = progress;
@@ -146,9 +153,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private async Task<SessionScanResult> ScanLocalAsync(CancellationToken ct)
     {
         var codexTask = _scanner.ScanDetailedAsync(_paths, ct);
-        var extraTasks = new List<Task<SessionScanResult>>(2);
+        var extraTasks = new List<Task<SessionScanResult>>(3);
         if (_grokPaths is not null && _grokScanner is not null) extraTasks.Add(_grokScanner.ScanDetailedAsync(_grokPaths, ct));
         if (_claudePaths is not null && _claudeScanner is not null) extraTasks.Add(_claudeScanner.ScanDetailedAsync(_claudePaths, ct));
+        if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
         if (extraTasks.Count == 0) return await codexTask.ConfigureAwait(false);
 
         await Task.WhenAll(extraTasks.Prepend(codexTask)).ConfigureAwait(false);
@@ -284,9 +292,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                 catch (InvalidDataException exception) when (
                                     exception.Message.Contains("changed after stable scanning", StringComparison.Ordinal) ||
                                     exception.Message.Contains("Grok session", StringComparison.OrdinalIgnoreCase) ||
-                                    exception.Message.Contains("Claude session", StringComparison.OrdinalIgnoreCase))
+                                    exception.Message.Contains("Claude session", StringComparison.OrdinalIgnoreCase) ||
+                                    exception.Message.Contains("Continue session", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    // Live Codex/Grok/Claude sessions can mutate between scan and stage; defer them.
+                                    // A live session of any agent can mutate between scan and stage; defer it.
                                     deferred.Add(action.ObjectId);
                                 }
                                 catch (IOException exception) when (IsTransientSharingViolation(exception))
@@ -610,6 +619,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             ? ResolveGrokDestination(id, plaintext)
                             : kind == ObjectKind.ClaudeSession
                             ? ResolveClaudeDestination(id, plaintext)
+                            : kind == ObjectKind.ContinueSession
+                            ? ResolveContinueDestination(id, plaintext)
                             : Path.Combine(kind switch
                     {
                         ObjectKind.ActiveSession => _paths.Sessions,
@@ -817,6 +828,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (!string.Equals(ClaudeSessionPackage.ToLogicalId(package.SessionId), id.Value, StringComparison.Ordinal))
             throw new InvalidDataException("Claude conflict payload id does not match the logical object id.");
         return _claudePaths.SessionFilePath(package.Project, package.SessionId);
+    }
+
+    private string ResolveContinueDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_continuePaths is null) throw new InvalidOperationException("Continue paths are not configured.");
+        var package = ContinueSessionPackage.Parse(plaintext);
+        if (!string.Equals(ContinueSessionPackage.ToLogicalId(package.SessionId), id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Continue conflict payload id does not match the logical object id.");
+        return _continuePaths.SessionFilePath(package.SessionId);
     }
 
     private string ResolveGrokDestination(LogicalObjectId id, byte[] plaintext)
@@ -1151,7 +1171,17 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
 
         LocalObject? relocateFrom = null;
         string path;
-        if (version.Kind == ObjectKind.ClaudeSession)
+        if (version.Kind == ObjectKind.ContinueSession)
+        {
+            if (_continuePaths is null) throw new InvalidOperationException("Continue paths are not configured.");
+            var package = ContinueSessionPackage.Parse(plaintext);
+            path = _continuePaths.SessionFilePath(package.SessionId);
+            if (existing is not null && existing.Kind != ObjectKind.ContinueSession)
+                relocateFrom = existing;
+            else if (existing is not null)
+                path = existing.SourcePath;
+        }
+        else if (version.Kind == ObjectKind.ClaudeSession)
         {
             if (_claudePaths is null) throw new InvalidOperationException("Claude paths are not configured.");
             var package = ClaudeSessionPackage.Parse(plaintext);
@@ -1199,6 +1229,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             {
                 ObjectKind.GrokSession => ".grokpkg",
                 ObjectKind.ClaudeSession => ".claudepkg",
+                ObjectKind.ContinueSession => ".continuepkg",
                 _ => ".jsonl"
             });
         await using (var output = new FileStream(stagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920,
@@ -1237,6 +1268,14 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private static void ValidateHistoryPayload(ObjectKind kind, byte[] bytes, LogicalObjectId expectedId,
         CancellationToken ct)
     {
+        if (kind == ObjectKind.ContinueSession)
+        {
+            var continuePackage = ContinueSessionPackage.Parse(bytes);
+            if (!string.Equals(ContinueSessionPackage.ToLogicalId(continuePackage.SessionId), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Continue session package id does not match its logical object ID.");
+            return;
+        }
+
         if (kind == ObjectKind.ClaudeSession)
         {
             var claudePackage = ClaudeSessionPackage.Parse(bytes);
@@ -1298,6 +1337,16 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     {
         byte[] plaintext;
         if (sourcePath is null) plaintext = Array.Empty<byte>();
+        else if (kind == ObjectKind.ContinueSession)
+        {
+            if (_continuePaths is null) throw new InvalidOperationException("Continue paths are not configured.");
+            // The entry belongs to the package, so the shared index is read here rather than at
+            // import time; a session the index has lost still stages, with a synthesized entry.
+            var index = File.Exists(_continuePaths.IndexFilePath)
+                ? await File.ReadAllTextAsync(_continuePaths.IndexFilePath, ct).ConfigureAwait(false)
+                : null;
+            plaintext = ContinueSessionPackage.BuildFromFile(sourcePath, index);
+        }
         else if (kind == ObjectKind.ClaudeSession) plaintext = ClaudeSessionPackage.BuildFromFile(sourcePath);
         else if (kind == ObjectKind.GrokSession)
         {

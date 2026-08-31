@@ -257,7 +257,7 @@ internal static class PathSafety
     }
 
     public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null,
-        Claude.ClaudePaths? claudePaths = null)
+        Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
@@ -274,12 +274,35 @@ internal static class PathSafety
                 if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
                     throw new ArgumentException("The storage path must not overlap synchronized Claude paths.", parameterName);
         }
+        if (continuePaths is not null)
+        {
+            foreach (var synchronizedPath in new[] { continuePaths.Home, continuePaths.Sessions })
+                if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
+                    throw new ArgumentException("The storage path must not overlap synchronized Continue paths.", parameterName);
+        }
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
-        Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null)
+        Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
+        if (kind == ObjectKind.ContinueSession)
+        {
+            if (continuePaths is null)
+                throw new ArgumentException("Continue paths are required for Continue session destinations.", parameterName);
+            // sessions/<uuid>.json exactly: the directory is flat, and the shared index lives in it.
+            if (!StringComparer.OrdinalIgnoreCase.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(canonical) ?? string.Empty),
+                    Path.TrimEndingDirectorySeparator(continuePaths.Sessions)))
+                throw new ArgumentException("The destination is outside the synchronized Continue sessions directory.", parameterName);
+            if (Continue.ContinuePaths.IsIndexFile(canonical))
+                throw new ArgumentException("The Continue session index is not a session destination.", parameterName);
+            if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetExtension(canonical), ".json") ||
+                !Guid.TryParseExact(Path.GetFileNameWithoutExtension(canonical), "D", out _))
+                throw new ArgumentException("Continue session destinations must be named <uuid>.json.", parameterName);
+            return canonical;
+        }
+
         if (kind == ObjectKind.ClaudeSession)
         {
             if (claudePaths is null)

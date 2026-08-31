@@ -1,8 +1,8 @@
 # Agent History Sync
 
-Windows 11 x64 CLI that synchronizes **Codex**, **Grok CLI**, and **Claude Code** conversation history through an encrypted private GitHub repository.
+Windows 11 x64 CLI that synchronizes **Codex**, **Grok CLI**, **Claude Code**, and **Continue** conversation history through an encrypted private GitHub repository.
 
-CLI для Windows 11 x64: синхронизация истории **Codex**, **Grok CLI** и **Claude Code** через зашифрованный private-репозиторий GitHub.
+CLI для Windows 11 x64: синхронизация истории **Codex**, **Grok CLI**, **Claude Code** и **Continue** через зашифрованный private-репозиторий GitHub.
 
 ---
 
@@ -17,6 +17,7 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 | **Codex** | `%USERPROFILE%\.codex` | Active/archived session JSONL (size-normalized; no SQLite, auth, logs, or attachments) |
 | **Grok CLI** | `%USERPROFILE%\.grok\sessions` | Per-session package: `chat_history` + `summary` (no `terminal/` logs) |
 | **Claude Code** | `%USERPROFILE%\.claude\projects` | One transcript JSONL per session (nothing from `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
+| **Continue** | `%USERPROFILE%\.continue\sessions` | One session JSON plus its entry in the shared `sessions.json` (nothing from `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
 
 Each successful publish rewrites `main` to a **single orphan commit** (snapshot store, not append-only history). Large tool outputs, compaction snapshots, and images are stripped or truncated before encrypt/upload. Local agent homes on disk are **not** modified.
 
@@ -114,7 +115,7 @@ Manual `sync`, `push`, and `pull` print elapsed phase updates while they run. Co
 agent-sync --manage
 ```
 
-This opens a session manager with one panel per installed agent (Codex, Grok, Claude) for local copy and local deletion. It does not contact GitHub, Git, or the configured sync repository, and it does not change sync state. See [operations](docs/operations.md#local-cross-agent-session-manager) for the safety rules and controls.
+This opens a session manager with one panel per installed agent (Codex, Grok, Claude, Continue) for local copy and local deletion. Panels wrap onto a second band when the terminal is too narrow for all of them side by side. It does not contact GitHub, Git, or the configured sync repository, and it does not change sync state. See [operations](docs/operations.md#local-cross-agent-session-manager) for the safety rules and controls.
 
 ### Session viewer
 
@@ -150,6 +151,7 @@ Deleting `%LOCALAPPDATA%\CodexHistorySync` removes keys, config, conflict eviden
 | **Codex** | `%USERPROFILE%\.codex` | JSONL активных/архивных сессий (сжатый вид; без SQLite, auth, логов, вложений) |
 | **Grok CLI** | `%USERPROFILE%\.grok\sessions` | Пакет на сессию: `chat_history` + `summary` (без логов `terminal/`) |
 | **Claude Code** | `%USERPROFILE%\.claude\projects` | По одному JSONL-транскрипту на сессию (ничего из `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
+| **Continue** | `%USERPROFILE%\.continue\sessions` | JSON сессии плюс её запись в общем `sessions.json` (ничего из `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
 
 Каждый успешный publish переписывает `main` в **один orphan-коммит** (хранилище-snapshot, не append-only история). Крупные tool-output’ы, compaction и картинки отбрасываются или обрезаются перед шифрованием. Локальные каталоги агентов **не меняются**.
 
@@ -247,7 +249,7 @@ agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
 agent-sync --manage
 ```
 
-Менеджер сессий с панелью на каждого установленного агента (Codex, Grok, Claude) для локального копирования и удаления. Не обращается к GitHub/Git и не меняет состояние синхронизации. Правила и клавиши — в [operations](docs/operations.md#local-cross-agent-session-manager).
+Менеджер сессий с панелью на каждого установленного агента (Codex, Grok, Claude, Continue) для локального копирования и удаления. Если терминал узкий, панели переносятся на вторую полосу. Не обращается к GitHub/Git и не меняет состояние синхронизации. Правила и клавиши — в [operations](docs/operations.md#local-cross-agent-session-manager).
 
 ### Просмотр сессий
 
