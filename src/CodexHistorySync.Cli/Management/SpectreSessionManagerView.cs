@@ -419,21 +419,10 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         return builder.ToString();
     }
 
-    private static BuildDetails ReadBuildDetails()
-    {
-        var assembly = typeof(SpectreSessionManagerView).Assembly;
-        var informationalVersion = assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        var versionParts = (informationalVersion ?? assembly.GetName().Version?.ToString(3) ?? "unknown")
-            .Split('+', 2);
-        var revision = versionParts.Length == 2 ? versionParts[1] : string.Empty;
-        var commit = revision.Length > 7 ? revision[..7] : revision;
-        var author = assembly.GetCustomAttribute<AssemblyCompanyAttribute>()?.Company;
-        return new BuildDetails(
-            versionParts[0],
-            string.IsNullOrWhiteSpace(commit) ? "unknown" : commit,
-            string.IsNullOrWhiteSpace(author) ? "unknown" : author);
-    }
+    // Reading the assembly moved to CliBuildInfo once the viewer and `--version` needed the same
+    // three values; this stays as the shape the panel is built from.
+    private static BuildDetails ReadBuildDetails() =>
+        new(CliBuildInfo.Version, CliBuildInfo.Commit, CliBuildInfo.Author);
 
     private void WriteMessage(string message, bool isError)
     {

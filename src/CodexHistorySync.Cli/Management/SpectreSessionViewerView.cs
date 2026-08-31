@@ -10,7 +10,8 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
 {
     private const string EnterDisplay = "\u001b[?1049h\u001b[H";
     private const string LeaveDisplay = "\u001b[?1049l";
-    private const int ChromeRows = 8;
+    // Footer, message line, panel borders — plus the four the brand header now takes.
+    private const int ChromeRows = 12;
     private const int ListWidth = 52;
     // Panel borders take two columns and each table column carries one space of padding.
     private const int AgentColumn = 6;
@@ -34,6 +35,7 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
     private PendingMessage? pendingMessage;
     private PendingMessage? exitMessage;
     private bool searchEditing;
+    private bool filterEditing;
     private int displayActive;
 
     public SpectreSessionViewerView(IAnsiConsole console, ISessionManagerInput input)
@@ -114,6 +116,21 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
     private Rows BuildFrame(SessionViewerState state)
     {
         var panels = new Columns([BuildList(state), BuildContent(state)]) { Expand = true };
+        // The header the manager already carried. Without it the viewer was the one screen that
+        // never said which build drew it — exactly what you want to know when it misbehaves.
+        var brand = new Panel(new Rows(
+            new Markup("[cyan1 bold]<>[/] [white bold]agent[/][grey58]-[/][orange1 bold]sync[/]"),
+            new Markup(
+                $"[grey58]version[/] [white]{Markup.Escape(CliBuildInfo.Version)}[/]  " +
+                $"[grey58]commit[/] [cyan1]{Markup.Escape(CliBuildInfo.Commit)}[/]  " +
+                $"[grey58]by[/] [orange1]{Markup.Escape(CliBuildInfo.Author)}[/]")))
+        {
+            Border = BoxBorder.Rounded,
+            BorderStyle = FocusedBorder,
+            Padding = new Padding(1, 0, 1, 0),
+            Width = 49,
+            Expand = false
+        };
         var message = pendingMessage is { } pending
             ? new Text(pending.Message, pending.IsError ? ErrorStyle : InformationStyle)
             : new Text(string.Empty);
@@ -122,15 +139,26 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
             (state.Matches.Count == 0
                 ? state.SearchQuery.Length == 0 ? string.Empty : "  [red]no matches[/]"
                 : $"  [grey58]{state.MatchIndex + 1}/{state.Matches.Count}[/]"));
+        var filter = new Markup(
+            $"[cyan1 bold]>[/] [grey58]Filter:[/] [grey82]{Markup.Escape(state.ListFilter)}[/]" +
+            (state.ListFilter.Length == 0
+                ? string.Empty
+                : state.Sessions.Count == 0
+                    ? "  [red]no sessions match[/]"
+                    : $"  [grey58]{state.Sessions.Count}/{state.AllSessions.Count}[/]"));
         var footer = new Markup(
             "[cyan1]Up/Dn[/] [grey58]move[/]   [cyan1]Lt/Rt[/] [grey58]list/text[/]   " +
-            "[cyan1]PgUp/PgDn Home/End[/] [grey58]scroll[/]   [cyan1]/[/] [grey58]find[/]   " +
+            "[cyan1]PgUp/PgDn Home/End[/] [grey58]scroll[/]   " +
+            $"[cyan1]/[/] [grey58]{(state.Focus == SessionViewerFocus.Content ? "find" : "filter")}[/]   " +
             "[cyan1]N[/] [grey58]next[/]   [cyan1]E[/] [grey58]export[/]   [cyan1]Del[/] [grey58]delete[/]   " +
             "[cyan1]R[/] [grey58]refresh[/]   [cyan1]Q[/] [grey58]exit[/]");
         pendingMessage = null;
-        return searchEditing || state.SearchQuery.Length > 0
-            ? new Rows(panels, search, message, footer)
-            : new Rows(panels, message, footer);
+        var rows = new List<IRenderable> { brand, panels };
+        if (filterEditing || state.ListFilter.Length > 0) rows.Add(filter);
+        if (searchEditing || state.SearchQuery.Length > 0) rows.Add(search);
+        rows.Add(message);
+        rows.Add(footer);
+        return new Rows(rows);
     }
 
     /// <summary>
@@ -242,7 +270,12 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
         while (true)
         {
             var key = input.ReadKey(cancellationToken);
-            if (key.KeyChar == '/') return SessionViewerCommand.Search;
+            // One key, two jobs, chosen by where you are: filtering a list of forty sessions and
+            // finding a word inside one of them are the same gesture aimed at different panes.
+            if (key.KeyChar == '/')
+                return latestState?.Focus == SessionViewerFocus.Content
+                    ? SessionViewerCommand.Search
+                    : SessionViewerCommand.FilterList;
             switch (key.Key)
             {
                 case ConsoleKey.UpArrow: return SessionViewerCommand.MoveUp;
@@ -259,8 +292,10 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
                 case ConsoleKey.R: return SessionViewerCommand.Refresh;
                 case ConsoleKey.Q: return SessionViewerCommand.Exit;
                 case ConsoleKey.Escape:
-                    return latestState?.SearchQuery.Length > 0
-                        ? SessionViewerCommand.Search
+                    // Escape clears what is narrowing the view before it offers to leave.
+                    if (latestState?.SearchQuery.Length > 0) return SessionViewerCommand.Search;
+                    return latestState?.ListFilter.Length > 0
+                        ? SessionViewerCommand.FilterList
                         : SessionViewerCommand.Exit;
             }
         }
@@ -299,6 +334,42 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
         finally
         {
             searchEditing = false;
+        }
+    }
+
+    public string ReadListFilter(SessionViewerState state, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        var query = state.ListFilter;
+        filterEditing = true;
+        try
+        {
+            Render(state.WithListFilter(query));
+            while (true)
+            {
+                var key = input.ReadKey(cancellationToken);
+                switch (key.Key)
+                {
+                    case ConsoleKey.Enter:
+                        return query;
+                    case ConsoleKey.Escape:
+                        query = string.Empty;
+                        Render(state.WithListFilter(query));
+                        return query;
+                    case ConsoleKey.Backspace:
+                        if (query.Length > 0) query = query[..^1];
+                        break;
+                    default:
+                        if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar)) query += key.KeyChar;
+                        else continue;
+                        break;
+                }
+                Render(state.WithListFilter(query));
+            }
+        }
+        finally
+        {
+            filterEditing = false;
         }
     }
 

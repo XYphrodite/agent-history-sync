@@ -178,6 +178,97 @@ public sealed class SessionViewerStateTests
                 SessionContentStatus.Loaded, ConversationDocument.Build(conversation, width)));
     }
 
+    [Fact]
+    public void ListFilterNarrowsByTitleWithoutLosingWhatItFilteredOut()
+    {
+        var state = SessionViewerState.Create(ThreeSessions());
+
+        var filtered = state.WithListFilter("t");
+
+        Assert.Equal(["two", "three"], filtered.Sessions.Select(session => session.SessionId));
+        Assert.Equal(3, filtered.AllSessions.Count);
+        Assert.Equal(3, filtered.WithListFilter(string.Empty).Sessions.Count);
+    }
+
+    [Fact]
+    public void ListFilterIsCaseInsensitiveAndMatchesAnywhereInTheTitle()
+    {
+        var state = SessionViewerState.Create(ThreeSessions());
+
+        Assert.Equal(["three"], state.WithListFilter("HRE").Sessions.Select(session => session.SessionId));
+    }
+
+    [Fact]
+    public void ListFilterKeepsTheSelectedSessionWhenItSurvives()
+    {
+        // Typing a query that still matches what you were reading must not move you off it.
+        var state = SessionViewerState.Create(ThreeSessions()).Apply(SessionViewerCommand.MoveDown);
+        Assert.Equal("two", state.SelectedSession?.SessionId);
+
+        var filtered = state.WithListFilter("t");
+
+        Assert.Equal("two", filtered.SelectedSession?.SessionId);
+        Assert.Equal(0, filtered.SelectedIndex);
+    }
+
+    [Fact]
+    public void ListFilterSelectsTheFirstMatchWhenTheSelectedSessionIsFilteredOut()
+    {
+        var state = SessionViewerState.Create(ThreeSessions());
+        Assert.Equal("one", state.SelectedSession?.SessionId);
+
+        var filtered = state.WithListFilter("t");
+
+        Assert.Equal("two", filtered.SelectedSession?.SessionId);
+    }
+
+    [Fact]
+    public void AFilterMatchingNothingLeavesNoSelectionRatherThanACrash()
+    {
+        var filtered = SessionViewerState.Create(ThreeSessions()).WithListFilter("no such session");
+
+        Assert.Empty(filtered.Sessions);
+        Assert.Null(filtered.SelectedSession);
+        Assert.Equal(0, filtered.SelectedIndex);
+    }
+
+    [Fact]
+    public void MovementStaysInsideTheFilteredList()
+    {
+        var filtered = SessionViewerState.Create(ThreeSessions()).WithListFilter("t");
+
+        var last = filtered.Apply(SessionViewerCommand.End);
+        var pastTheEnd = last.Apply(SessionViewerCommand.MoveDown);
+
+        Assert.Equal("three", last.SelectedSession?.SessionId);
+        Assert.Equal("three", pastTheEnd.SelectedSession?.SessionId);
+    }
+
+    [Fact]
+    public void ARescanKeepsTheFilterAndTheSelectionUnderIt()
+    {
+        var filtered = SessionViewerState.Create(ThreeSessions()).WithListFilter("t")
+            .Apply(SessionViewerCommand.MoveDown);
+        Assert.Equal("three", filtered.SelectedSession?.SessionId);
+
+        var rescanned = filtered.ReplaceSnapshot(ThreeSessions());
+
+        Assert.Equal("t", rescanned.ListFilter);
+        Assert.Equal(["two", "three"], rescanned.Sessions.Select(session => session.SessionId));
+        Assert.Equal("three", rescanned.SelectedSession?.SessionId);
+    }
+
+    [Fact]
+    public void TheFilterAndTheFindQueryAreIndependent()
+    {
+        // They look alike and are not: one narrows the list, the other walks the open text.
+        var state = SessionViewerState.Create(ThreeSessions()).WithListFilter("t").WithSearchQuery("hello");
+
+        Assert.Equal("t", state.ListFilter);
+        Assert.Equal("hello", state.SearchQuery);
+        Assert.Equal(["two", "three"], state.Sessions.Select(session => session.SessionId));
+    }
+
     private static SessionCatalogSnapshot ThreeSessions() => Snapshot(
         codex:
         [

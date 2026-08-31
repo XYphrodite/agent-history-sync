@@ -8,6 +8,9 @@ public interface ISessionViewerView
     void Render(SessionViewerState state);
     SessionViewerCommand ReadCommand(CancellationToken cancellationToken);
     string ReadSearchQuery(SessionViewerState state, CancellationToken cancellationToken);
+
+    /// <summary>Reads the list's title filter, live, the same way the find prompt reads its query.</summary>
+    string ReadListFilter(SessionViewerState state, CancellationToken cancellationToken);
     bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken);
     void ShowMessage(string message, bool isError);
 

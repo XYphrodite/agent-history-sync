@@ -232,6 +232,11 @@ public sealed class SessionViewerApplicationTests
         public string ReadSearchQuery(SessionViewerState state, CancellationToken cancellationToken) =>
             SearchQueries.Dequeue();
 
+        public Queue<string> ListFilters { get; } = new();
+
+        public string ReadListFilter(SessionViewerState state, CancellationToken cancellationToken) =>
+            ListFilters.Dequeue();
+
         public bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken) =>
             DeleteConfirmations.Dequeue();
 

@@ -123,7 +123,7 @@ This opens a session manager with one panel per installed agent (Codex, Grok, Cl
 agent-sync --sessions
 ```
 
-One list of every session from every installed agent, with the selected conversation beside it. Scroll it, search inside it, export it to Markdown, and delete it. Also local-only. See [operations](docs/operations.md#session-viewer).
+One list of every session from every installed agent, with the selected conversation beside it. `/` filters the list by title or searches inside the open session, depending on which pane has focus; export to Markdown and delete are here too. Also local-only. See [operations](docs/operations.md#session-viewer).
 
 ### Docs
 
@@ -257,7 +257,7 @@ agent-sync --manage
 agent-sync --sessions
 ```
 
-Один список сессий всех установленных агентов и текст выбранной рядом. Прокрутка, поиск внутри сессии, экспорт в Markdown и удаление. Тоже только локально. Подробности — в [operations](docs/operations.md#session-viewer).
+Один список сессий всех установленных агентов и текст выбранной рядом. `/` фильтрует список по названию или ищет внутри открытой сессии — смотря какая панель в фокусе; есть экспорт в Markdown и удаление. Тоже только локально. Подробности — в [operations](docs/operations.md#session-viewer).
 
 ### Документация
 
