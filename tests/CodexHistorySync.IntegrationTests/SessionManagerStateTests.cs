@@ -219,6 +219,25 @@ public sealed class SessionManagerStateTests
     }
 
     [Fact]
+    public void ContinueTakesItsOwnPanelAndItsOwnSelection()
+    {
+        var state = new SessionManagerState(FourAgentSnapshot(
+            [Session(ManagedAgent.Codex, "a")], [Session(ManagedAgent.Grok, "b")],
+            [Session(ManagedAgent.Claude, "c")], [Session(ManagedAgent.Continue, "d")]));
+
+        var last = state
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight);
+
+        Assert.Equal(ManagedAgents.All, state.VisibleAgents);
+        Assert.Equal(ManagedAgent.Continue, last.FocusedAgent);
+        Assert.Equal("d", last.SelectedSession?.SessionId);
+        Assert.Equal(ManagedAgent.Claude,
+            last.ApplyNavigation(SessionManagerCommand.FocusLeft).FocusedAgent);
+    }
+
+    [Fact]
     public void FocusRightStepsThroughVisiblePanelsAndStopsAtTheLast()
     {
         var state = new SessionManagerState(ThreeAgentSnapshot(
@@ -288,7 +307,19 @@ public sealed class SessionManagerStateTests
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude) =>
-        new(codex, grok, claude) { ConfiguredAgents = ManagedAgents.All };
+        // Named agents rather than "all of them": these tests are about what a three-agent machine
+        // shows, and every agent added later would otherwise silently grow them a panel.
+        new(codex, grok, claude)
+        {
+            ConfiguredAgents = [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude]
+        };
+
+    private static SessionCatalogSnapshot FourAgentSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude,
+        IReadOnlyList<ManagedSession> continueSessions) =>
+        new(codex, grok, claude, continueSessions) { ConfiguredAgents = ManagedAgents.All };
 
     private static ManagedSession Session(ManagedAgent agent, string id, string? title = null) =>
         new(agent, id, $"C:\\injected\\{id}", title ?? id, DateTimeOffset.UnixEpoch, false, true);

@@ -17,6 +17,14 @@ public sealed record CliStatusReport(int Local, int Remote, int Pending, int Con
     /// <summary>Resolved Claude projects root, or null when no Claude home was found.</summary>
     public string? ClaudeHome { get; init; }
 
+    /// <summary>Resolved Continue sessions directory, or null when no Continue home was found.</summary>
+    public string? ContinueHome { get; init; }
+
+    public int ContinueSessions { get; init; }
+
+    /// <summary>True when the Continue scan could not confirm what it did not find.</summary>
+    public bool ContinueUncertain { get; init; }
+
     public int ClaudeSessions { get; init; }
 
     /// <summary>True when the Claude scan could not confirm what it did not find.</summary>
@@ -310,6 +318,8 @@ public sealed class CliApplication
             $"remote-revision={SafeToken(result.RemoteRevision)} last-successful-revision={SafeToken(result.LastSuccessfulRevision)}");
         console.WriteLine($"claude-home={(result.ClaudeHome is null ? "none" : SafeToken(result.ClaudeHome))} " +
             $"claude-sessions={result.ClaudeSessions} claude-uncertain={(result.ClaudeUncertain ? "yes" : "no")}");
+        console.WriteLine($"continue-home={(result.ContinueHome is null ? "none" : SafeToken(result.ContinueHome))} " +
+            $"continue-sessions={result.ContinueSessions} continue-uncertain={(result.ContinueUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

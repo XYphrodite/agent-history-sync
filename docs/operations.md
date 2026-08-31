@@ -181,6 +181,40 @@ Repository index contains an invalid object kind.
 
 That breaks `pull` on the old machine completely, not just for Claude objects. **Upgrade every machine that shares the repository before the first push that carries a Claude session.** Checking is cheap: `agent-sync status` prints `claude-sessions=` on an upgraded build and does not on an older one.
 
+## Continue sessions
+
+When `%USERPROFILE%\.continue\sessions` exists, `agent-sync` also inventories Continue (the VS Code extension) sessions. Set `CONTINUE_GLOBAL_DIR` to point at a different Continue home, the same way `CLAUDE_CONFIG_DIR`, `GROK_HOME`, and `CODEX_HOME` work.
+
+A Continue session is the one agent whose session is not self-contained on disk. The conversation lives in `sessions\<uuid>.json`, but the shared `sessions\sessions.json` decides whether Continue can see it: restore only the file and the session is invisible, restore only the entry and opening it throws. So one encrypted object under logical id `co-<uuid>` carries both.
+
+Nothing else in `~/.continue` is read or synchronized — not `config.yaml` or `config.ts`, which are assistant configuration and can hold API keys, and not `dev_data/`, `index/`, `types/`, or `package.json`.
+
+### Upgrade every machine before the first Continue push
+
+`ObjectKind.ContinueSession` is a new integer in the encrypted index, and the rule from [the Claude gate](#upgrade-every-machine-before-the-first-claude-push) applies unchanged: a build that does not know the value rejects the **whole** index and its `pull` stops working for every agent, not just Continue. Upgrade every machine sharing the repository before the first push that carries a Continue session. `agent-sync status` prints `continue-sessions=` on a build that knows the kind and does not on an older one.
+
+### The shared index is merged, never replaced
+
+An import updates the entry for the session it is importing and appends it when it is missing. Every other entry is left exactly as it was, which matters more than it sounds: on a machine that has just joined, most of them describe sessions this repository has never seen.
+
+The entry for the imported session is replaced outright rather than merged field by field. Keeping fields the incoming entry does not carry would make two machines rebuild different objects for one session, and each would then see the other's copy as changed — one session republished back and forth forever.
+
+An index that does not parse as a JSON array stops the import. Continue itself refuses to create a session at all when this file is malformed, so replacing it would turn one broken file into a lost list of every local session. The index is backed up before it is written and replaced atomically, and formatting matches what the extension writes — two-space indentation, LF, no escaping of non-ASCII — so an import that changes nothing leaves the bytes alone.
+
+Deleting a Continue session in `--manage` or `--sessions` removes its entry too. A row pointing at a file that is gone is a row Continue throws on when it is opened.
+
+### Liveness without a process
+
+Continue runs inside the VS Code extension host, so there is no `continue` process to probe the way Claude's is. The only candidate signal, `Code.exe`, is running whenever the editor is open and would defer everything forever.
+
+A Continue session is therefore deferred on write recency alone: written within the last 30 seconds, it waits for a later run. The two-observation stability read still rejects a file that changes while it is being scanned, which is what actually prevents publishing a half-written session. For the same reason the manager never marks a Continue session as active; a session being typed into is caught by the change check instead, immediately before any copy or delete.
+
+### Cross-agent copy
+
+`workspaceDirectory` is a file URI with the drive colon percent-encoded (`file:///c%3A/Repos/Reborn`). Copying out of Continue decodes it to a real path, so a session copied into Claude lands in the project directory the conversation came from. Copying into Continue writes the URI back in the same shape, and a conversation with no working directory gets an empty string rather than a missing field.
+
+Continue's two roles are shaped differently in its own files — a user message holds an array of content parts, an assistant message a plain string — and a copy into Continue writes each the way the extension expects. `thinking` entries, empty assistant placeholders, `contextItems`, `editorState`, and `promptLogs` are dropped: the portable model is text turns only.
+
 ## Status and diagnostics
 
 ```powershell

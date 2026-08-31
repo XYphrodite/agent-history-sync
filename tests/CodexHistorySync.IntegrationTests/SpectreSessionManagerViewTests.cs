@@ -565,6 +565,45 @@ public sealed class SpectreSessionManagerViewTests
         Assert.DoesNotContain("stale message", output.ToString());
     }
 
+    [Theory]
+    // A terminal wide enough for every panel keeps the single row it always had.
+    [InlineData(140, 4, 4)]
+    [InlineData(120, 4, 4)]
+    // Below that the panels wrap, and the bands are balanced rather than filled: two and two, not
+    // three and one, so no panel is left alone on a line of its own.
+    [InlineData(100, 4, 2)]
+    [InlineData(80, 4, 2)]
+    [InlineData(80, 3, 2)]
+    [InlineData(40, 4, 1)]
+    [InlineData(140, 1, 1)]
+    public void Panels_wrap_into_balanced_bands_when_the_terminal_is_narrow(
+        int width, int agents, int expectedPerRow) =>
+        Assert.Equal(expectedPerRow, SpectreSessionManagerView.PanelsPerRow(width, agents));
+
+    [Fact]
+    public void Render_draws_four_panels_and_keeps_titles_readable_on_a_narrow_terminal()
+    {
+        // The reason the layout wraps at all: four panels side by side on 80 columns leave about
+        // nineteen each, and a title is cut to nothing.
+        var console = CreateConsole(out var output, 80, 40);
+        var state = new SessionManagerState(FourAgentSnapshot(
+            [Session(ManagedAgent.Codex, "one", "Codex title")],
+            [Session(ManagedAgent.Grok, "two", "Grok title")],
+            [Session(ManagedAgent.Claude, "three", "Claude title")],
+            [Session(ManagedAgent.Continue, "four", "Fourth panel")]));
+
+        new SpectreSessionManagerView(console, new FakeInput()).Render(state);
+
+        var rendered = output.ToString();
+        Assert.Contains("CODEX", rendered, StringComparison.Ordinal);
+        Assert.Contains("GROK", rendered, StringComparison.Ordinal);
+        Assert.Contains("CLAUDE", rendered, StringComparison.Ordinal);
+        Assert.Contains("CONTINUE", rendered, StringComparison.Ordinal);
+        // Twelve characters of title survive here. Four panels across 80 columns would leave two,
+        // which is the whole reason the bands wrap.
+        Assert.Contains("Fourth panel", rendered, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Render_draws_one_panel_per_configured_agent()
     {
@@ -634,7 +673,19 @@ public sealed class SpectreSessionManagerViewTests
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude) =>
-        new(codex, grok, claude) { ConfiguredAgents = ManagedAgents.All };
+        // Named agents rather than "all of them", so a later agent does not silently add a panel
+        // to tests that are about how three of them are drawn.
+        new(codex, grok, claude)
+        {
+            ConfiguredAgents = [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude]
+        };
+
+    private static SessionCatalogSnapshot FourAgentSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude,
+        IReadOnlyList<ManagedSession> continueSessions) =>
+        new(codex, grok, claude, continueSessions) { ConfiguredAgents = ManagedAgents.All };
 
     private static ManagedSession Session(
         ManagedAgent agent,

@@ -15,7 +15,13 @@ public enum ObjectKind
     /// an undefined value fails the whole index, so existing members must keep their numbers and
     /// every machine must be upgraded before the first push carrying this kind (design D4).
     /// </summary>
-    ClaudeSession
+    ClaudeSession,
+    /// <summary>
+    /// Continue session package (one session file plus its entry in the shared sessions.json).
+    /// Appended after ClaudeSession for the same reason that one was appended last, and carrying
+    /// the same obligation: upgrade every machine before the first push that includes one (C3).
+    /// </summary>
+    ContinueSession
 }
 
 public readonly record struct LogicalObjectId(string Value);

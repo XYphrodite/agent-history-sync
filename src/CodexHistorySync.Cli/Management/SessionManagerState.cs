@@ -125,7 +125,8 @@ public sealed class SessionManagerState
     private static SessionCatalogSnapshot Copy(SessionCatalogSnapshot snapshot) => new(
         Array.AsReadOnly(snapshot.Codex.ToArray()),
         Array.AsReadOnly(snapshot.Grok.ToArray()),
-        Array.AsReadOnly(snapshot.Claude.ToArray()))
+        Array.AsReadOnly(snapshot.Claude.ToArray()),
+        Array.AsReadOnly(snapshot.Continue.ToArray()))
     {
         ConfiguredAgents = Array.AsReadOnly(snapshot.ConfiguredAgents.ToArray())
     };
@@ -137,7 +138,8 @@ public sealed class SessionManagerState
         return new SessionCatalogSnapshot(
             Match(snapshot.Codex, query),
             Match(snapshot.Grok, query),
-            Match(snapshot.Claude, query))
+            Match(snapshot.Claude, query),
+            Match(snapshot.Continue, query))
         {
             ConfiguredAgents = Array.AsReadOnly(snapshot.ConfiguredAgents.ToArray())
         };

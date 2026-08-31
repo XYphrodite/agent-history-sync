@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Core.Claude;
+using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
@@ -28,6 +29,7 @@ public sealed class CodexHistoryWriter
     private readonly CodexPaths _paths;
     private readonly GrokPaths? _grokPaths;
     private readonly ClaudePaths? _claudePaths;
+    private readonly ContinuePaths? _continuePaths;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
     private readonly IAtomicFileSystem _fileSystem;
@@ -35,7 +37,8 @@ public sealed class CodexHistoryWriter
     internal readonly record struct RollbackCapture(string Path, string? BackupId);
 
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
-        IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null)
+        IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null,
+        ContinuePaths? continuePaths = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _backups = backups ?? throw new ArgumentNullException(nameof(backups));
@@ -43,12 +46,13 @@ public sealed class CodexHistoryWriter
         _fileSystem = fileSystem ?? new AtomicFileSystem();
         _grokPaths = grokPaths;
         _claudePaths = claudePaths;
+        _continuePaths = continuePaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -60,7 +64,7 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
@@ -70,6 +74,9 @@ public sealed class CodexHistoryWriter
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.ClaudeSession)
             return await ImportClaudePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.ContinueSession)
+            return await ImportContinuePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
 
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -103,7 +110,7 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
@@ -197,6 +204,53 @@ public sealed class CodexHistoryWriter
         }
     }
 
+    /// <summary>
+    /// Imports a Continue session. Unlike the other three agents this touches a file the import
+    /// does not own — the shared session index — so the index is backed up alongside the session,
+    /// and an index that does not parse stops the import instead of being replaced (design C5).
+    /// </summary>
+    private async Task<ImportApplyResult> ImportContinuePackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_continuePaths is null) throw new InvalidOperationException("Continue paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = ContinueSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        var package = ContinueSessionPackage.Parse(packageBytes);
+        if (!string.Equals(ContinueSessionPackage.ToLogicalId(package.SessionId), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Continue session package id does not match the logical object id.");
+
+        // Read before writing anything: a malformed index means Continue itself cannot create a
+        // session, and replacing it would destroy the list of every session on this machine.
+        var indexPath = _continuePaths.IndexFilePath;
+        if (File.Exists(indexPath))
+            ContinueSessionIndex.Parse(await File.ReadAllTextAsync(indexPath, ct).ConfigureAwait(false));
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.ContinueSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+        if (File.Exists(indexPath))
+            await _backups.CreateAsync(indexPath, operationId, ct).ConfigureAwait(false);
+
+        try
+        {
+            EnsureCodexInactive();
+            ContinueSessionPackage.Materialize(package, _continuePaths);
+            var after = await ContentHashAsync(destination, ObjectKind.ContinueSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Continue session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
     private async Task WaitIfRunningAsync(CancellationToken ct)
     {
         if (_processDetector.IsRunning()) await _processDetector.WaitForExitAsync(ct).ConfigureAwait(false);
@@ -206,7 +260,7 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
         if (!await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
@@ -221,14 +275,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
@@ -284,6 +338,24 @@ public sealed class CodexHistoryWriter
 
     private static async Task<ContentHash?> ContentHashAsync(string destination, ObjectKind kind, CancellationToken ct)
     {
+        if (kind == ObjectKind.ContinueSession)
+        {
+            if (!File.Exists(destination)) return null;
+            try
+            {
+                // The hash covers the session together with its index entry, so the index has to
+                // be read back here too — it is the sibling of every session file.
+                var indexPath = Path.Combine(Path.GetDirectoryName(destination)!, ContinuePaths.IndexFileName);
+                var index = File.Exists(indexPath) ? File.ReadAllText(indexPath) : null;
+                return ContinueSessionPackage.HashPackage(ContinueSessionPackage.BuildFromFile(destination, index));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
+                                                  or JsonException or DecoderFallbackException or ArgumentException)
+            {
+                return null;
+            }
+        }
+
         if (kind == ObjectKind.ClaudeSession)
         {
             if (!File.Exists(destination)) return null;
