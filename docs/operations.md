@@ -163,6 +163,14 @@ On import, packages are written back to `%USERPROFILE%\.claude\projects\<project
 
 Claude publishes no active-session file. A session is treated as live — and deferred to a later run rather than failing the run — when a `claude` process is running **and** its transcript was written within the last 30 seconds. Expect your own open session to stay unsynchronized until it goes quiet or the process exits.
 
+### A session that changes working directory
+
+Change directory during a session and Claude copies its transcript into the project folder for the new directory and continues it there. The copy left in the old folder stops at the moment of the move, so one session id exists as two files whose contents differ.
+
+Both the sync scan and the session viewer keep the copy with the most recent write and ignore the rest; a write-time tie is broken on the longer transcript, then on path, so every machine chooses the same file. The frozen copy is an earlier state of the same conversation, so nothing is lost by ignoring it — and it is left on disk untouched.
+
+The live copy is chosen before the liveness rule above is applied. A session still being written is therefore deferred as a whole rather than having its frozen copy published in its place.
+
 ### Upgrade every machine before the first Claude push
 
 `ObjectKind` is stored in the encrypted index as an integer, and an older `agent-sync` rejects the **entire** index when it meets a value it does not know:

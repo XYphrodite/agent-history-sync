@@ -1308,17 +1308,25 @@ public sealed class LocalSessionCatalogTests
     }
 
     [Fact]
-    public async Task ScanAsync_DemotesAClaudeSessionThatExistsUnderTwoProjects()
+    public async Task ScanAsync_ListsOnlyTheLiveCopyOfARelocatedClaudeSession()
     {
-        // The same id in two project directories: neither copy can be trusted as the session.
+        // One id under two project directories is how Claude records a session whose working
+        // directory changed: the old folder keeps a copy frozen at the move. Demoting both as
+        // untrustworthy is what made an ordinary session unreadable in the viewer.
         await using var fixture = new CatalogFixture();
-        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "First", "one", "2026-08-24T10:00:00Z", "c--Repos-Demo");
-        await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Second", "two", "2026-08-24T11:00:00Z", "c--Repos-Other");
+        var frozen = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "Before the move", "one",
+            "2026-08-24T10:00:00Z", "c--Repos-Demo");
+        var live = await fixture.WriteClaudeAsync("80000000-0000-0000-0000-000000000008", "After the move", "two",
+            "2026-08-24T11:00:00Z", "c--Repos-Other");
+        File.SetLastWriteTimeUtc(frozen, new DateTime(2026, 8, 24, 10, 0, 0, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(live, new DateTime(2026, 8, 24, 11, 0, 0, DateTimeKind.Utc));
 
         var snapshot = await fixture.CreateCatalog().ScanAsync(CancellationToken.None);
 
-        Assert.Equal(2, snapshot.Claude.Count);
-        Assert.All(snapshot.Claude, session => Assert.False(session.CanRead));
+        var session = Assert.Single(snapshot.Claude);
+        Assert.Equal("After the move", session.Title);
+        Assert.Equal(Path.GetFullPath(live), session.NativePath);
+        Assert.True(session.CanRead);
     }
 
     [Fact]
