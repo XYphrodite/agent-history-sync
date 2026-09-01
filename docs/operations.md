@@ -309,6 +309,21 @@ then `codex.exe` on `PATH`. VSCodium does not use the Microsoft Marketplace by d
 
 If Codex is not installed, `join` prints a warning and continues so Grok sessions and on-disk Codex JSONL can still be imported. When Codex *is* present but the disposable reindex probe fails, `join` hard-fails with `Gate failed: codex-compatibility` and a `diagnostic:` line. Install the OpenAI Codex IDE extension (VS Code / Cursor / Windsurf) or put `codex.exe` on `PATH` / set `CODEX_EXE` so reindex can be verified. Use `doctor --compatibility-session <jsonl> --codex-exe <path>` to re-test the probe alone.
 
+### When a command only prints an exception type
+
+`Operation failed: <Type>.` is deliberately all the console says: the message of an exception can
+carry a path, a remote URL, or the text of a prompt, and a console is the thing people paste into
+a chat. The detail is written instead to a file on the machine that failed, and the command prints
+where:
+
+```
+%LOCALAPPDATA%CodexHistorySynclogslast-failure.log
+```
+
+It holds the version, the commit, the time, and the full exception chain with its stack, and it is
+overwritten by the next failure. Read it there rather than re-running with more switches; there are
+none. It is written best-effort, so a failure that is itself about the disk may leave none behind.
+
 ## Updating
 
 ```powershell

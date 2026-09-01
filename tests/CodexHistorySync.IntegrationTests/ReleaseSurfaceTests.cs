@@ -89,6 +89,11 @@ public sealed class ReleaseSurfaceTests
     /// would have to be edited on the way to every release, and would fail the suite on the way
     /// to the ones where it was forgotten.
     /// </summary>
+    /// <remarks>
+    /// These tests read the release artifact already on disk. A stale one fails here rather than
+    /// quietly passing, which is the point: it is the artifact a release would ship.
+    /// Rebuild with <c>dotnet build src/CodexHistorySync.Cli -c Release -r win-x64</c>.
+    /// </remarks>
     private static string DeclaredVersion()
     {
         var properties = Path.Combine(RepositoryRoot(), "Directory.Build.props");

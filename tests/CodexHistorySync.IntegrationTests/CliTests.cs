@@ -687,6 +687,29 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task An_operational_failure_leaves_a_report_behind_to_diagnose_it_from()
+    {
+        // The console gets a type name and nothing else, which on its own does not say which of
+        // a dozen directories was missing. The report is what makes the failure answerable.
+        var local = Path.Combine(Path.GetTempPath(), $"agent-sync-failure-{Guid.NewGuid():N}");
+        var fixture = new Fixture(local);
+        fixture.Services.Failure = new DirectoryNotFoundException($"missing while using {Passphrase}");
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        var report = Path.Combine(local, "CodexHistorySync", "logs", "last-failure.log");
+        Assert.True(File.Exists(report), $"No failure report at {report}.");
+        var text = await File.ReadAllTextAsync(report);
+        Assert.Contains("DirectoryNotFoundException", text, StringComparison.Ordinal);
+        Assert.Contains(CliVersion.Current.ToString(), text, StringComparison.Ordinal);
+        Assert.Contains(report, fixture.Console.AllText, StringComparison.Ordinal);
+        // The report is a local file, but the console still says only where it is.
+        Assert.DoesNotContain(Passphrase, fixture.Console.AllText, StringComparison.Ordinal);
+        Directory.Delete(local, recursive: true);
+    }
+
+    [Fact]
     public async Task Init_checks_private_visibility_before_reading_any_passphrase()
     {
         var fixture = new Fixture();
@@ -1012,7 +1035,8 @@ public sealed class CliTests
         public FakeConsole Console { get; } = new();
         public CliApplication Application { get; }
 
-        public Fixture() => Application = new CliApplication(Services, Console);
+        public Fixture(string? localAppDataDirectory = null) =>
+            Application = new CliApplication(Services, Console, localAppDataDirectory: localAppDataDirectory);
     }
 
     private sealed class FakeConsole : ICliConsole
