@@ -358,7 +358,7 @@ public sealed class CliApplication
             var compatibility = await Services.ProbeCompatibilitySessionAsync(sourceSession!, codexExecutable!, cancellationToken)
                 .ConfigureAwait(false);
             console.WriteLine($"codex-compatibility: {(compatibility.IsCompatible ? "PASS" : "FAIL")} " +
-                $"version={SafeToken(compatibility.CodexVersion)} diagnostic={SafeToken(compatibility.Diagnostic)}");
+                $"version={SafeToken(compatibility.CodexVersion)} diagnostic={SafeMessage(compatibility.Diagnostic)}");
             return compatibility.IsCompatible ? 0 : 3;
         }
 
