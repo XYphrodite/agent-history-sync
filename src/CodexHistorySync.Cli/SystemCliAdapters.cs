@@ -570,7 +570,9 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
     public async Task<CliGateResult> VerifyPrivateAsync(string remoteUrl, CancellationToken cancellationToken)
     {
         var result = await visibilityVerifier.VerifyPrivateAsync(ParseRepository(remoteUrl), cancellationToken).ConfigureAwait(false);
-        return new CliGateResult(result.IsPrivate, "private-visibility");
+        // The verifier already distinguishes an unauthenticated gh from a repository that is
+        // genuinely public, and says which. Dropping that left both looking identical.
+        return new CliGateResult(result.IsPrivate, "private-visibility", result.Diagnostic);
     }
 
     public async Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken)

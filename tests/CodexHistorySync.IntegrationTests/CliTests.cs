@@ -687,6 +687,23 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task A_failed_gate_says_what_it_saw_in_a_sentence_that_survived()
+    {
+        // An unauthenticated gh and a repository that is genuinely public both fail this gate, and
+        // the fix differs. The name alone cannot tell them apart, so the diagnostic has to arrive -
+        // as a sentence, not as a token with its spaces eaten.
+        var fixture = new Fixture();
+        fixture.Services.SetupGate = new CliGateResult(false, "private-visibility",
+            "GitHub visibility could not be verified. Run 'gh auth status' and retry setup.");
+
+        var exitCode = await fixture.Application.RunAsync(["join", Remote], CancellationToken.None);
+
+        Assert.Equal(3, exitCode);
+        Assert.Contains("gh auth status", fixture.Console.AllText, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.Console.SecretReadCount);
+    }
+
+    [Fact]
     public async Task A_machine_that_never_joined_is_told_to_join_rather_than_shown_a_failure()
     {
         // Syncing before joining is a step not taken, not a defect, so it earns no failure report
