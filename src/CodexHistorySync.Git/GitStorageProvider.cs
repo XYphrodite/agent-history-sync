@@ -485,6 +485,15 @@ public sealed class GitStorageProvider : IStorageProvider
     private void EnsureOwnedClone()
     {
         var marker = Path.Combine(_clonePath, ".git", "codex-history-sync", "repository-id");
+        // A clone interrupted between git and the marker leaves a directory that is ours in every
+        // way except the one this check reads. Refusing it is right - it could equally be somebody
+        // else's directory - but "Expected regular file was not found" named a file nobody has
+        // heard of and left no way forward. Say which directory is in the way instead.
+        if (Directory.Exists(_clonePath) && !File.Exists(marker))
+            throw new InvalidOperationException(
+                "An unrecognized clone directory is in the way and was not touched. It is either a " +
+                "clone interrupted before it was marked, or a directory that is not ours. Move or " +
+                $"remove it and run the command again: {_clonePath}");
         EnsureSafeFile(marker);
         if (!StringComparer.Ordinal.Equals(File.ReadAllText(marker, Encoding.UTF8).Trim(), _repositoryId))
             throw new InvalidOperationException("Refusing to modify a clone not owned by this repository.");

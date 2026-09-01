@@ -314,6 +314,24 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task An_interrupted_clone_names_the_directory_that_is_in_the_way()
+    {
+        // A clone that died between git and the ownership marker leaves a directory this refuses
+        // to touch - rightly, since it could be anyone's. What it used to say was that a file
+        // nobody has heard of was missing, which named nothing anyone could act on.
+        var clones = Path.Combine(_root, "interrupted-clones");
+        var clone = Path.Combine(clones, "interrupted", "git");
+        Directory.CreateDirectory(Path.Combine(clone, ".git"));
+        var provider = new GitStorageProvider("interrupted", _remote, GitRemoteKind.Local, clones);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => provider.ReadSnapshotAsync(CancellationToken.None));
+
+        Assert.Contains(clone, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("run the command again", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GitFailureException_RedactsEveryUrlQueryValue()
     {
         var script = Path.Combine(_root, "git-error.cmd");
