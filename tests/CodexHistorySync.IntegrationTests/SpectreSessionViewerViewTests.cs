@@ -235,6 +235,39 @@ public sealed class SpectreSessionViewerViewTests
         Assert.Contains("(stale)", output.ToString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Render_shows_our_own_title_when_the_agent_name_kept_the_row()
+    {
+        // The row belongs to the name the agent gave the session, so without this line a title of
+        // our own would be stored and never seen.
+        var console = Console(out var output, 160, 30);
+        var view = new SpectreSessionViewerView(console, new FakeInput());
+
+        view.Render(LoadedWithDescription("what this session did"));
+
+        Assert.Contains(
+            "A title of our own - what this session did", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Render_does_not_repeat_a_title_that_is_already_the_row()
+    {
+        var console = Console(out var output, 160, 30);
+        var view = new SpectreSessionViewerView(console, new FakeInput());
+        var state = LoadedWithDescription("what this session did");
+        var owned = state.AllSessions[0] with { Title = "A title of our own" };
+        var rowIsOurs = SessionViewerState
+            .Create(new SessionCatalogSnapshot([owned], [], [], []), viewportRows: 10)
+            .WithContent(state.Content);
+
+        view.Render(rowIsOurs);
+
+        // The row and the panel header already carry it; the description line says the rest.
+        var text = output.ToString();
+        Assert.DoesNotContain("A title of our own - what this session did", text, StringComparison.Ordinal);
+        Assert.Contains("what this session did", text, StringComparison.Ordinal);
+    }
+
     private static SessionViewerState LoadedWithDescription(string description, bool stale = false)
     {
         var annotation = new CodexHistorySync.Core.Annotations.SessionAnnotation(

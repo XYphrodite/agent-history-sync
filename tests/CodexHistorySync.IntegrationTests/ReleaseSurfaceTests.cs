@@ -6,14 +6,14 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class ReleaseSurfaceTests
 {
     [Fact]
-    public async Task Release_cli_reports_version_0_9_1_and_advertises_manager_mode()
+    public async Task Release_cli_reports_the_declared_version_and_advertises_manager_mode()
     {
         var cliDirectory = Path.Combine(RepositoryRoot(), "src", "CodexHistorySync.Cli", "bin", "Release", "net10.0", "win-x64");
         var executable = Path.Combine(cliDirectory, "agent-sync.exe");
         var assembly = Path.Combine(cliDirectory, "agent-sync.dll");
 
         Assert.True(File.Exists(executable), $"Built release executable was not found: {executable}");
-        Assert.Equal("0.9.1", AssemblyName.GetAssemblyName(assembly).Version!.ToString(3));
+        Assert.Equal(DeclaredVersion(), AssemblyName.GetAssemblyName(assembly).Version!.ToString(3));
 
         var result = await RunAsync(executable, "--help");
 
@@ -37,7 +37,7 @@ public sealed class ReleaseSurfaceTests
 
         Assert.Equal(0, probe.ExitCode);
         Assert.Equal(0, version.ExitCode);
-        Assert.Contains("agent-sync 0.9.1", version.Output);
+        Assert.Contains($"agent-sync {DeclaredVersion()}", version.Output);
     }
 
     [Fact]
@@ -82,6 +82,20 @@ public sealed class ReleaseSurfaceTests
         var standardError = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
         return new ProcessResult(process.ExitCode, await standardOutput + await standardError);
+    }
+
+    /// <summary>
+    /// The version the build declares, read rather than repeated. A number written here as well
+    /// would have to be edited on the way to every release, and would fail the suite on the way
+    /// to the ones where it was forgotten.
+    /// </summary>
+    private static string DeclaredVersion()
+    {
+        var properties = Path.Combine(RepositoryRoot(), "Directory.Build.props");
+        var match = System.Text.RegularExpressions.Regex.Match(
+            File.ReadAllText(properties), @"<Version>([^<]+)</Version>");
+        Assert.True(match.Success, $"{properties} declares no <Version>.");
+        return match.Groups[1].Value.Trim();
     }
 
     private static string RepositoryRoot()

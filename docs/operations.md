@@ -114,6 +114,8 @@ Sessions marked `!` cannot be opened. That is the same readability verdict that 
 
 ### Titles of your own
 
+A title of your own is shown above the conversation of the session it belongs to, ahead of its description. When the agent left no name of its own, it also becomes the row in the list; when the agent did name the session, that name keeps the row and the line above the conversation is where your title is read.
+
 Sessions arrive named by the agent that wrote them, or not named at all. Codex, Grok, and Claude titles are used as they are; where an agent left nothing, the row falls back to the first user message or the bare id, and that is what a title of your own replaces. An official name is never overwritten.
 
 `T` asks a local model to name the open session; `A` opens the same two fields for typing. Both write one file per session under `%LOCALAPPDATA%\CodexHistorySync\annotations` and never into an agent home.
