@@ -50,7 +50,8 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
                 nativePath,
                 DisplayTitle(metadata.Title, sessionId),
                 ResolveLastModified(nativePath, metadata.LastModifiedAt),
-                metadata.CanRead);
+                metadata.CanRead,
+                TitleSourceOf(metadata));
         }).ConfigureAwait(false);
 
         var rows = collected.Where(row => row is not null).Select(row => row!).ToArray();
@@ -164,10 +165,14 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
                 ? null
                 : await ReadTailTitleAsync(transcript, sessionId, limiter, cancellationToken).ConfigureAwait(false);
 
+            // Only a title record names the session; the preview merely stands in when none does.
+            // The two have to stay tellable apart for an annotation to know when it may step in.
+            var officialTitle = tailTitle ?? aiTitle ?? summaryTitle;
             return new Metadata(
-                tailTitle ?? aiTitle ?? summaryTitle ?? firstUserPreview,
+                officialTitle ?? firstUserPreview,
                 modified,
-                readable && identityConfirmed);
+                readable && identityConfirmed,
+                officialTitle is not null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -290,6 +295,11 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
     private static string? NormalizeTitle(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
+    private static ManagedTitleSource TitleSourceOf(Metadata metadata) =>
+        NormalizeTitle(metadata.Title) is null ? ManagedTitleSource.SessionId
+            : metadata.TitleIsOfficial ? ManagedTitleSource.Official
+            : ManagedTitleSource.Fallback;
+
     private static string DisplayTitle(string? value, string fallback)
     {
         var title = NormalizeTitle(value) ?? fallback;
@@ -324,5 +334,9 @@ internal sealed class ClaudeSessionCatalogSource(ClaudePaths paths, ISessionCata
             latest = timestamp;
     }
 
-    private sealed record Metadata(string? Title, DateTimeOffset? LastModifiedAt, bool CanRead);
+    private sealed record Metadata(
+        string? Title,
+        DateTimeOffset? LastModifiedAt,
+        bool CanRead,
+        bool TitleIsOfficial = false);
 }

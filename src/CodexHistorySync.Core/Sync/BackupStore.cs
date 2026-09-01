@@ -21,15 +21,16 @@ public sealed class BackupStore
     private readonly GrokPaths? _grokPaths;
     private readonly ClaudePaths? _claudePaths;
     private readonly ContinuePaths? _continuePaths;
+    private readonly string? _annotationsDirectory;
     private readonly IAtomicFileSystem _fileSystem;
     private readonly TimeProvider _clock;
     private readonly TimeSpan _retention;
     private readonly IStagingDirectoryCleaner _stagingCleaner;
 
-    public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null)
-        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null, grokPaths, claudePaths, continuePaths) { }
+    public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null, string? annotationsDirectory = null)
+        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null, grokPaths, claudePaths, continuePaths, annotationsDirectory) { }
 
-    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null)
+    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null, string? annotationsDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(codexPaths);
         PathSafety.ValidateFileComponent(repositoryId, nameof(repositoryId));
@@ -40,6 +41,7 @@ public sealed class BackupStore
         _grokPaths = grokPaths;
         _claudePaths = claudePaths;
         _continuePaths = continuePaths;
+        _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
         _fileSystem = fileSystem ?? new AtomicFileSystem();
         _clock = timeProvider ?? TimeProvider.System;
         _retention = retention ?? DefaultRetention;
@@ -162,6 +164,8 @@ public sealed class BackupStore
         if (_grokPaths is not null) roots.Add(_grokPaths.Sessions);
         if (_claudePaths is not null) roots.Add(_claudePaths.Projects);
         if (_continuePaths is not null) roots.Add(_continuePaths.Sessions);
+        // Annotations are backed up like history: a title someone typed is not regenerable either.
+        if (_annotationsDirectory is not null) roots.Add(_annotationsDirectory);
         if (!roots.Any(root => CodexPaths.IsPathWithin(canonical, root) && !StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(root))))
             throw new ArgumentException("The backup source is outside synchronized history paths.", nameof(path));
         return canonical;

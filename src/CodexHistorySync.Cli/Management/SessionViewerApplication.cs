@@ -1,3 +1,4 @@
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Management;
 
@@ -8,9 +9,18 @@ public sealed class SessionViewerApplication(
     ISessionContentReader contentReader,
     ISessionExporter exporter,
     ILocalSessionOperations operations,
-    ISessionViewerView view)
+    ISessionViewerView view,
+    ISessionAnnotationStore? annotations = null,
+    ISessionTitleSuggester? suggester = null,
+    string? titlingRejection = null)
 {
     private const string DeleteSyncWarning = "Local deletion may be restored by sync.";
+
+    /// <summary>Stamped on a title typed for a session whose conversation could not be read.</summary>
+    private const string ManualDigestHash = "manual";
+
+    /// <summary>How often a running suggestion looks up to see whether a key is waiting.</summary>
+    private static readonly TimeSpan SuggestionPollInterval = TimeSpan.FromMilliseconds(50);
 
     private readonly ILocalSessionCatalog catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
     private readonly ISessionContentReader contentReader = contentReader ?? throw new ArgumentNullException(nameof(contentReader));
@@ -83,6 +93,14 @@ public sealed class SessionViewerApplication(
                 case SessionViewerCommand.Export:
                     await ExportAsync(state, cancellationToken).ConfigureAwait(false);
                     break;
+                case SessionViewerCommand.GenerateAnnotation:
+                    (state, loadedFor) = await GenerateAnnotationAsync(state, loadedFor, cancellationToken)
+                        .ConfigureAwait(false);
+                    break;
+                case SessionViewerCommand.EditAnnotation:
+                    (state, loadedFor) = await EditAnnotationAsync(state, loadedFor, cancellationToken)
+                        .ConfigureAwait(false);
+                    break;
                 case SessionViewerCommand.Delete:
                     (state, loadedFor) = await DeleteAsync(state, cancellationToken).ConfigureAwait(false);
                     break;
@@ -102,14 +120,14 @@ public sealed class SessionViewerApplication(
         if (session is null) return state.WithContent(new SessionContentState(SessionContentStatus.Empty));
 
         var key = KeyFor(session)!;
-        if (TryGetCached(key) is { } hit) return state.WithContent(Loaded(hit));
+        if (TryGetCached(key) is { } hit) return state.WithContent(Loaded(session, hit));
 
         view.Render(state.WithContent(new SessionContentState(SessionContentStatus.Loading)));
         try
         {
             var conversation = await contentReader.ReadAsync(session, cancellationToken).ConfigureAwait(false);
             Remember(key, conversation);
-            return state.WithContent(Loaded(conversation));
+            return state.WithContent(Loaded(session, conversation));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -123,9 +141,209 @@ public sealed class SessionViewerApplication(
         }
     }
 
-    private SessionContentState Loaded(PortableConversation conversation) => new(
+    private SessionContentState Loaded(ManagedSession session, PortableConversation conversation) => new(
         SessionContentStatus.Loaded,
-        ConversationDocument.Build(conversation, view.ContentWidth));
+        ConversationDocument.Build(conversation, view.ContentWidth),
+        AnnotationIsStale: session.Annotation is { } annotation &&
+                           !string.Equals(annotation.DigestHash, SessionDigest.Build(conversation).Hash,
+                               StringComparison.Ordinal));
+
+    private async Task<(SessionViewerState State, string? LoadedFor)> GenerateAnnotationAsync(
+        SessionViewerState state,
+        string? loadedFor,
+        CancellationToken cancellationToken)
+    {
+        var session = state.SelectedSession;
+        if (session is null)
+        {
+            view.ShowMessage("No session is selected.", true);
+            return (state, loadedFor);
+        }
+
+        if (annotations is null || suggester is null || !suggester.IsConfigured)
+        {
+            view.ShowMessage(TitlingUnavailable(), true);
+            return (state, loadedFor);
+        }
+
+        // A title someone typed is not something a model gets to overwrite unasked.
+        if (session.Annotation is { Source: SessionAnnotationSource.Edited } &&
+            !view.ConfirmAnnotationOverwrite(session, cancellationToken))
+            return (state, loadedFor);
+
+        var conversation = await ConversationForAsync(session, cancellationToken).ConfigureAwait(false);
+        if (conversation is null)
+        {
+            view.ShowMessage("This session could not be read.", true);
+            return (state, loadedFor);
+        }
+
+        var digest = SessionDigest.Build(conversation);
+        if (digest.IsEmpty)
+        {
+            view.ShowMessage("There is nothing to name in this session.", true);
+            return (state, loadedFor);
+        }
+
+        view.ShowMessage("Naming this session\u2026", false);
+        view.Render(state);
+        var (cancelled, draft) = await SuggestAsync(digest, cancellationToken).ConfigureAwait(false);
+        // A keystroke is its own answer: the user asked for the screen back, not for a message.
+        if (cancelled) return (state, loadedFor);
+        if (draft is null)
+        {
+            view.ShowMessage("The titling endpoint answered nothing usable.", true);
+            return (state, loadedFor);
+        }
+
+        return await StoreAsync(
+            state,
+            loadedFor,
+            session,
+            new SessionAnnotation(
+                draft.Title,
+                draft.Description,
+                SessionAnnotationSource.Generated,
+                digest.Hash,
+                draft.Model,
+                DateTimeOffset.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<(SessionViewerState State, string? LoadedFor)> EditAnnotationAsync(
+        SessionViewerState state,
+        string? loadedFor,
+        CancellationToken cancellationToken)
+    {
+        var session = state.SelectedSession;
+        if (session is null)
+        {
+            view.ShowMessage("No session is selected.", true);
+            return (state, loadedFor);
+        }
+
+        if (annotations is null)
+        {
+            view.ShowMessage("Titles cannot be stored on this machine.", true);
+            return (state, loadedFor);
+        }
+
+        // Typing a title asks nothing of a model, so it works with no endpoint configured.
+        var edit = view.ReadAnnotation(session, session.Annotation, cancellationToken);
+        if (edit is null || string.IsNullOrWhiteSpace(edit.Title)) return (state, loadedFor);
+
+        var conversation = await ConversationForAsync(session, cancellationToken).ConfigureAwait(false);
+        var description = string.IsNullOrWhiteSpace(edit.Description) ? null : edit.Description.Trim();
+        return await StoreAsync(
+            state,
+            loadedFor,
+            session,
+            new SessionAnnotation(
+                edit.Title.Trim(),
+                description,
+                SessionAnnotationSource.Edited,
+                conversation is null ? ManualDigestHash : SessionDigest.Build(conversation).Hash,
+                null,
+                DateTimeOffset.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs the suggestion off the render path and gives the screen back the moment a key is
+    /// pressed. A model of this size answers in tens of seconds, which is far too long to hold.
+    /// </summary>
+    private async Task<(bool Cancelled, SessionAnnotationDraft? Draft)> SuggestAsync(
+        SessionDigestResult digest,
+        CancellationToken cancellationToken)
+    {
+        using var abandon = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var suggestion = suggester!.SuggestAsync(digest, abandon.Token);
+        var abandoned = false;
+
+        while (!suggestion.IsCompleted)
+        {
+            if (view.IsInputPending)
+            {
+                abandoned = true;
+                await abandon.CancelAsync().ConfigureAwait(false);
+                break;
+            }
+
+            var settled = await Task.WhenAny(suggestion, Task.Delay(SuggestionPollInterval, abandon.Token))
+                .ConfigureAwait(false);
+            if (settled == suggestion) break;
+        }
+
+        try
+        {
+            return (abandoned, await suggestion.ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
+            return (true, null);
+        }
+        catch (Exception)
+        {
+            return (false, null);
+        }
+    }
+
+    private async Task<(SessionViewerState State, string? LoadedFor)> StoreAsync(
+        SessionViewerState state,
+        string? loadedFor,
+        ManagedSession session,
+        SessionAnnotation annotation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await annotations!.SaveAsync(
+                new SessionAnnotationKey(session.Agent, session.SessionId), annotation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            view.ShowMessage("That title could not be stored.", true);
+            return (state, loadedFor);
+        }
+
+        view.ShowMessage($"Named: {annotation.Title}", false);
+        // The rescan is what carries the new title onto the row, through the same overlay every
+        // other title comes through.
+        return (await RefreshAsync(state, cancellationToken).ConfigureAwait(false), null);
+    }
+
+    private async Task<PortableConversation?> ConversationForAsync(
+        ManagedSession session,
+        CancellationToken cancellationToken)
+    {
+        var key = KeyFor(session)!;
+        if (TryGetCached(key) is { } cached) return cached;
+
+        try
+        {
+            var conversation = await contentReader.ReadAsync(session, cancellationToken).ConfigureAwait(false);
+            Remember(key, conversation);
+            return conversation;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private string TitlingUnavailable() =>
+        string.IsNullOrWhiteSpace(titlingRejection)
+            ? "Titling is not configured."
+            : $"Titling is not configured: {titlingRejection}";
 
     private async Task ExportAsync(SessionViewerState state, CancellationToken cancellationToken)
     {
@@ -173,6 +391,12 @@ public sealed class SessionViewerApplication(
         try
         {
             await operations.DeleteAsync(session, cancellationToken).ConfigureAwait(false);
+            // The session is gone, so its title goes with it rather than outliving it as an
+            // orphan that would travel to every other machine.
+            if (annotations is not null)
+                await annotations
+                    .DeleteAsync(new SessionAnnotationKey(session.Agent, session.SessionId), cancellationToken)
+                    .ConfigureAwait(false);
             cache.Clear();
             return (await RefreshAsync(state, cancellationToken).ConfigureAwait(false), null);
         }

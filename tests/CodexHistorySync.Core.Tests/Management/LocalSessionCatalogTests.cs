@@ -1341,6 +1341,107 @@ public sealed class LocalSessionCatalogTests
         Assert.True(Assert.Single(snapshot.Claude).IsActive);
     }
 
+    [Fact]
+    public async Task ScanAsync_ReportsAnOfficialClaudeTitleAsOfficial()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync(
+            "80000000-0000-0000-0000-000000000101", "Official name", "question", "2026-08-24T10:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Claude);
+
+        Assert.Equal("Official name", session.Title);
+        Assert.Equal(ManagedTitleSource.Official, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsAClaudeFirstMessagePreviewAsAFallback()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteClaudeAsync(
+            "80000000-0000-0000-0000-000000000102", null, "what the user asked", "2026-08-24T10:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Claude);
+
+        Assert.Equal("what the user asked", session.Title);
+        Assert.Equal(ManagedTitleSource.Fallback, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsAClaudeSessionWithNothingToNameItByItsId()
+    {
+        await using var fixture = new CatalogFixture();
+        const string id = "80000000-0000-0000-0000-000000000103";
+        await fixture.WriteClaudeAsync(id, null, "<environment_context> injected", "2026-08-24T10:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Claude);
+
+        Assert.Equal(id, session.Title);
+        Assert.Equal(ManagedTitleSource.SessionId, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsAnOfficialCodexTitleAsOfficial()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("codex-official", "Official name", "question", "2026-08-09T15:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("Official name", session.Title);
+        Assert.Equal(ManagedTitleSource.Official, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsACodexFirstMessagePreviewAsAFallback()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("codex-fallback", null, "what the user asked", "2026-08-09T15:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("what the user asked", session.Title);
+        Assert.Equal(ManagedTitleSource.Fallback, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsACodexSessionWithNothingToNameItByItsId()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteCodexAsync("codex-nameless", null, "<environment_context> injected", "2026-08-09T15:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Codex);
+
+        Assert.Equal("codex-nameless", session.Title);
+        Assert.Equal(ManagedTitleSource.SessionId, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsAnOfficialGrokTitleAsOfficial()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteGrokAsync(
+            "71000000-0000-0000-0000-000000000101", "Official name", "question", "2026-08-09T15:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.Equal("Official name", session.Title);
+        Assert.Equal(ManagedTitleSource.Official, session.TitleSource);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ReportsAGrokFirstMessagePreviewAsAFallback()
+    {
+        await using var fixture = new CatalogFixture();
+        await fixture.WriteGrokAsync(
+            "71000000-0000-0000-0000-000000000102", null, "what the user asked", "2026-08-09T15:00:00Z");
+
+        var session = Assert.Single((await fixture.CreateCatalog().ScanAsync(CancellationToken.None)).Grok);
+
+        Assert.Equal("what the user asked", session.Title);
+        Assert.Equal(ManagedTitleSource.Fallback, session.TitleSource);
+    }
+
     private sealed class CatalogFixture : IAsyncDisposable
     {
         private static readonly UTF8Encoding Utf8 = new(false);

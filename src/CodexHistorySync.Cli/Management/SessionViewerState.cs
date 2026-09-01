@@ -11,7 +11,9 @@ public enum SessionContentStatus { Empty, Loading, Loaded, Failed }
 public sealed record SessionContentState(
     SessionContentStatus Status,
     ConversationDocument? Document = null,
-    string? Message = null);
+    string? Message = null,
+    // True when the open session has an annotation made from a conversation it has since outgrown.
+    bool AnnotationIsStale = false);
 
 public sealed class SessionViewerState
 {

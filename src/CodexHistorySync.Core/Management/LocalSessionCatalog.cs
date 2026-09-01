@@ -110,7 +110,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             candidate.Title,
             candidate.LastModifiedAt,
             activity.Unknown || activity.SessionIds.Contains(candidate.SessionId),
-            candidate.CanRead)).ToArray();
+            candidate.CanRead,
+            candidate.TitleSource)).ToArray();
     }
 
     private async Task<ActiveIds> ReadActiveIdsAsync(

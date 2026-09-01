@@ -283,9 +283,25 @@ internal static class PathSafety
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
-        Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null)
+        Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null,
+        string? annotationsDirectory = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
+        if (kind == ObjectKind.SessionAnnotations)
+        {
+            // An annotation is not session history and never lands in an agent home: its only
+            // destination is one flat file directly inside the annotations directory.
+            if (string.IsNullOrWhiteSpace(annotationsDirectory))
+                throw new ArgumentException("An annotations directory is required for annotation destinations.", parameterName);
+            if (!StringComparer.OrdinalIgnoreCase.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(canonical) ?? string.Empty),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(annotationsDirectory))))
+                throw new ArgumentException("The destination is outside the annotations directory.", parameterName);
+            if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetExtension(canonical), ".json"))
+                throw new ArgumentException("Annotation destinations must be named <agent>-<session>.json.", parameterName);
+            return canonical;
+        }
+
         if (kind == ObjectKind.ContinueSession)
         {
             if (continuePaths is null)

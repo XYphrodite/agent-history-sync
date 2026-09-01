@@ -1,4 +1,5 @@
 using System.Globalization;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Management;
 using Spectre.Console;
@@ -35,6 +36,10 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
     private PendingMessage? pendingMessage;
     private PendingMessage? exitMessage;
     private bool searchEditing;
+
+    // Rows the description took on the frame the viewport was last sized for. Kept rather than
+    // recomputed mid-frame so both panels always end on the same row.
+    private int annotationRows;
     private bool filterEditing;
     private int displayActive;
 
@@ -44,7 +49,7 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
         this.input = input ?? throw new ArgumentNullException(nameof(input));
     }
 
-    public int ContentRows => Math.Max(1, console.Profile.Height - ChromeRows);
+    public int ContentRows => Math.Max(1, console.Profile.Height - ChromeRows - annotationRows);
 
     public int ContentWidth => Math.Max(ConversationDocument.MinimumWidth, console.Profile.Width - ListWidth - 8);
 
@@ -103,6 +108,8 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
         ArgumentNullException.ThrowIfNull(state);
         latestState = state;
         var frame = BuildFrame(state);
+        // Sized for the next frame: this one was already laid out for the count it had.
+        annotationRows = DescriptionLines(state).Count;
         if (liveContext is { } context)
         {
             context.UpdateTarget(frame);
@@ -150,7 +157,8 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
             "[cyan1]Up/Dn[/] [grey58]move[/]   [cyan1]Lt/Rt[/] [grey58]list/text[/]   " +
             "[cyan1]PgUp/PgDn Home/End[/] [grey58]scroll[/]   " +
             $"[cyan1]/[/] [grey58]{(state.Focus == SessionViewerFocus.Content ? "find" : "filter")}[/]   " +
-            "[cyan1]N[/] [grey58]next[/]   [cyan1]E[/] [grey58]export[/]   [cyan1]Del[/] [grey58]delete[/]   " +
+            "[cyan1]N[/] [grey58]next[/]   [cyan1]E[/] [grey58]export[/]   " +
+            "[cyan1]T[/] [grey58]name[/]   [cyan1]A[/] [grey58]edit[/]   [cyan1]Del[/] [grey58]delete[/]   " +
             "[cyan1]R[/] [grey58]refresh[/]   [cyan1]Q[/] [grey58]exit[/]");
         pendingMessage = null;
         var rows = new List<IRenderable> { brand, panels };
@@ -196,7 +204,7 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
                 style));
         }
 
-        while (rows.Count <= state.ViewportRows) rows.Add(new Text(string.Empty));
+        while (rows.Count <= state.ViewportRows + annotationRows) rows.Add(new Text(string.Empty));
 
         return new Panel(new Rows(rows))
         {
@@ -219,6 +227,13 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
         var focused = state.Focus == SessionViewerFocus.Content;
         var rows = new List<IRenderable>();
         var query = state.SearchQuery;
+
+        // The description sits above the conversation, in the rows the viewport gave up for it.
+        var description = DescriptionLines(state);
+        for (var index = 0; index < annotationRows; index++)
+        {
+            rows.Add(new Text(index < description.Count ? description[index] : string.Empty, MutedText));
+        }
 
         switch (state.Content.Status)
         {
@@ -249,7 +264,7 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
 
         // One taller than the viewport, matching the list`s column header, so both panels end
         // on the same row instead of one trailing the other.
-        while (rows.Count < state.ViewportRows + 1) rows.Add(new Text(string.Empty));
+        while (rows.Count < state.ViewportRows + 1 + annotationRows) rows.Add(new Text(string.Empty));
 
         var header = state.SelectedSession is { } session
             ? $"{(focused ? "[cyan1 bold]* " : "[grey58]  ")}{Markup.Escape(Shorten(session.Title, ContentWidth - 4))}[/]"
@@ -288,6 +303,8 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
                 case ConsoleKey.End: return SessionViewerCommand.End;
                 case ConsoleKey.N: return SessionViewerCommand.NextMatch;
                 case ConsoleKey.E: return SessionViewerCommand.Export;
+                case ConsoleKey.T: return SessionViewerCommand.GenerateAnnotation;
+                case ConsoleKey.A: return SessionViewerCommand.EditAnnotation;
                 case ConsoleKey.Delete: return SessionViewerCommand.Delete;
                 case ConsoleKey.R: return SessionViewerCommand.Refresh;
                 case ConsoleKey.Q: return SessionViewerCommand.Exit;
@@ -388,6 +405,129 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
             pendingMessage = null;
             Render(state);
         }
+    }
+
+    public SessionAnnotationEdit? ReadAnnotation(
+        ManagedSession session,
+        SessionAnnotation? current,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var state = latestState ??
+                    throw new InvalidOperationException("A session state must be rendered before an edit.");
+        try
+        {
+            var title = ReadField(state, "Title", current?.Title ?? string.Empty,
+                SessionAnnotation.MaximumTitleLength, cancellationToken);
+            if (string.IsNullOrWhiteSpace(title)) return null;
+
+            var description = ReadField(state, "Description", current?.Description ?? string.Empty,
+                SessionAnnotation.MaximumDescriptionLength, cancellationToken);
+            return description is null ? null : new SessionAnnotationEdit(title, description);
+        }
+        finally
+        {
+            pendingMessage = null;
+            Render(state);
+        }
+    }
+
+    /// <summary>Enter keeps what is typed, Escape abandons the whole edit.</summary>
+    private string? ReadField(
+        SessionViewerState state,
+        string label,
+        string seed,
+        int maximumLength,
+        CancellationToken cancellationToken)
+    {
+        var text = seed;
+        while (true)
+        {
+            pendingMessage = new PendingMessage($"{label}: {text}", false);
+            Render(state);
+            var key = input.ReadKey(cancellationToken);
+            switch (key.Key)
+            {
+                case ConsoleKey.Enter:
+                    return text.Trim();
+                case ConsoleKey.Escape:
+                    return null;
+                case ConsoleKey.Backspace:
+                    if (text.Length > 0) text = text[..^1];
+                    break;
+                default:
+                    if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar) && text.Length < maximumLength)
+                        text += key.KeyChar;
+                    break;
+            }
+        }
+    }
+
+    public bool ConfirmAnnotationOverwrite(ManagedSession session, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var state = latestState ??
+                    throw new InvalidOperationException("A session state must be rendered before confirmation.");
+        pendingMessage = new PendingMessage(
+            $"Replace the title you typed for '{session.Title}'? [y/N] ", false);
+        Render(state);
+        try
+        {
+            return input.ReadKey(cancellationToken).Key == ConsoleKey.Y;
+        }
+        finally
+        {
+            pendingMessage = null;
+            Render(state);
+        }
+    }
+
+    /// <summary>
+    /// The description of the open session, wrapped and clipped to two rows. A stale annotation
+    /// says so rather than quietly describing a conversation that has moved on since.
+    /// </summary>
+    private IReadOnlyList<string> DescriptionLines(SessionViewerState? state)
+    {
+        if (state?.SelectedSession?.Annotation?.Description is not { } description ||
+            string.IsNullOrWhiteSpace(description))
+            return [];
+
+        var text = (state.Content.AnnotationIsStale ? "(stale) " : string.Empty) + description.Trim();
+        return Wrap(text, Math.Max(20, ContentWidth - 2), 2);
+    }
+
+    private static IReadOnlyList<string> Wrap(string text, int width, int maximumLines)
+    {
+        var lines = new List<string>();
+        var line = new System.Text.StringBuilder();
+        foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.Length > 0 && line.Length + 1 + word.Length > width)
+            {
+                lines.Add(line.ToString());
+                if (lines.Count == maximumLines) return Clip(lines, text, width, maximumLines);
+                line.Clear();
+            }
+
+            if (line.Length > 0) line.Append(' ');
+            line.Append(word.Length <= width ? word : word[..width]);
+        }
+
+        if (line.Length > 0) lines.Add(line.ToString());
+        return lines;
+    }
+
+    private static IReadOnlyList<string> Clip(
+        List<string> lines,
+        string text,
+        int width,
+        int maximumLines)
+    {
+        // More was written than fits: the last row ends in an ellipsis rather than mid-word.
+        var used = lines.Sum(row => row.Length + 1);
+        if (used < text.Length && lines.Count == maximumLines && lines[^1].Length > 1)
+            lines[^1] = Shorten(lines[^1] + " " + text[Math.Min(text.Length, used)..], width);
+        return lines;
     }
 
     public void ShowMessage(string message, bool isError)

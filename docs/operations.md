@@ -87,7 +87,7 @@ Read what is inside a session without opening its native file:
 agent-sync --sessions
 ```
 
-One list holds every session from every installed agent, newest first, with an `AGENT` column; the selected conversation is rendered beside it. Like the manager, this screen never contacts the network, opens the sync repository, or writes sync state.
+One list holds every session from every installed agent, newest first, with an `AGENT` column; the selected conversation is rendered beside it. This screen never opens the sync repository or writes sync state. It contacts the network in exactly one case: the `T` key below, when titling has been configured, and never otherwise. `--manage` contacts it in no case at all.
 
 | Key | Action |
 |---|---|
@@ -96,6 +96,8 @@ One list holds every session from every installed agent, newest first, with an `
 | PgUp / PgDn / Home / End | Scroll the text |
 | `/` | Follows the focus: with the list focused it filters sessions by title, with the text focused it searches inside the open session; `N` steps to the next match and wraps |
 | `E` | Export the open session to `%USERPROFILE%\Documents\agent-sync\<agent>-<id>.md` |
+| `T` | Name the open session with the configured local model, when one is configured |
+| `A` | Type a title and a description for the open session |
 | `Del` | Delete the session locally, behind the same confirmation the manager uses |
 | `R` | Rescan |
 | `Q` / `Esc` | Exit |
@@ -107,6 +109,35 @@ Every screen carries the same header: the name, the version, and the seven-chara
 The text is the conversation as `agent-sync` understands it for cross-agent copying: user and assistant turns only. Reasoning blocks, tool calls, and tool results are **not** shown — they are absent from the portable model, not hidden. Neither are technical wrappers such as `<system-reminder>`, for the same reason.
 
 Sessions marked `!` cannot be opened. That is the same readability verdict that blocks copying them, so the pane explains itself rather than showing an empty conversation.
+
+### Titles of your own
+
+Sessions arrive named by the agent that wrote them, or not named at all. Codex, Grok, and Claude titles are used as they are; where an agent left nothing, the row falls back to the first user message or the bare id, and that is what a title of your own replaces. An official name is never overwritten.
+
+`T` asks a local model to name the open session; `A` opens the same two fields for typing. Both write one file per session under `%LOCALAPPDATA%\CodexHistorySync\annotations` and never into an agent home.
+
+Titles and descriptions synchronize with everything else, so a session named on one machine arrives named on the others - read [the upgrade gate](#upgrade-every-machine-before-the-first-annotation-push) before the first push that carries one.
+
+Titling is off until an endpoint is configured, and there is no default endpoint. Write `%LOCALAPPDATA%\CodexHistorySync\titles.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "endpoint": "http://100.105.87.52:11434",
+  "model": "qwen3:8b",
+  "language": "auto"
+}
+```
+
+`endpoint` is an Ollama-compatible host; `/api/chat` is appended to it. Only `localhost`, a loopback address, and private addresses are accepted - see [the titling boundary](security.md#session-titling-boundary) for the exact list and for what is sent. `model` defaults to `qwen3:8b`. `language` is `auto`, `ru`, or `en`; `auto` answers in whatever language the transcript is in.
+
+`AGENT_SYNC_TITLE_ENDPOINT`, `AGENT_SYNC_TITLE_MODEL`, and `AGENT_SYNC_TITLE_LANGUAGE` override the file, which is the quickest way to try another model:
+
+```powershell
+$env:AGENT_SYNC_TITLE_MODEL = "gpt-oss:20b"; agent-sync --sessions
+```
+
+A model of this size takes tens of seconds to answer, and the screen stays usable while it does: the request is cancelled by any keystroke. An endpoint that is down costs a message and nothing else.
 
 Copying between agents stays in `--manage`: it needs the destination prompt that screen already has.
 
@@ -196,6 +227,14 @@ Nothing else in `~/.continue` is read or synchronized — not `config.yaml` or `
 ### Upgrade every machine before the first Continue push
 
 `ObjectKind.ContinueSession` is a new integer in the encrypted index, and the rule from [the Claude gate](#upgrade-every-machine-before-the-first-claude-push) applies unchanged: a build that does not know the value rejects the **whole** index and its `pull` stops working for every agent, not just Continue. Upgrade every machine sharing the repository before the first push that carries a Continue session. `agent-sync status` prints `continue-sessions=` on a build that knows the kind and does not on an older one.
+
+### Upgrade every machine before the first annotation push
+
+`ObjectKind.SessionAnnotations` is a new integer in the encrypted index, and the rule from [the Claude gate](#upgrade-every-machine-before-the-first-claude-push) applies unchanged: a build that does not know the value rejects the **whole** index and its `pull` stops working for every agent, not just for titles. Upgrade every machine sharing the repository before the first push that carries an annotation. `agent-sync status` prints an `annotations=` line on a build that knows the kind and does not on an older one.
+
+An annotation is the first synchronized object that is not session history. It is encrypted like every other object, it is addressed by the agent and session it names, and it is written only into `%LOCALAPPDATA%\CodexHistorySync\annotations` - never into an agent home. Deleting the annotation of a session publishes a tombstone the way deleting a session does, so a title removed on one machine is removed on the others.
+
+Two machines that name the same session between synchronizations conflict on that annotation, exactly as two machines editing one session do, and it is resolved the same way with `--keep-local` or `--keep-remote`. Nothing is merged automatically: the repository index carries hashes, not timestamps, so there is no honest way to tell which title is the newer one without opening both.
 
 ### The shared index is merged, never replaced
 
