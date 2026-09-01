@@ -426,6 +426,28 @@ public sealed class CliServiceTests
         Assert.NotNull(report);
     }
 
+    [Fact]
+    public async Task A_failing_gh_command_carries_what_gh_said_into_the_failure()
+    {
+        // A bare 'Unable to read the repository revision.' fits a missing branch, an expired
+        // token and a dead network equally, and those are three different things to go and do.
+        var root = Path.Combine(Path.GetTempPath(), $"agent-sync-gh-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var script = Path.Combine(root, "gh-fails.cmd");
+            await File.WriteAllTextAsync(script,
+                "@echo gh: Not Found (HTTP 404) 1>&2" + Environment.NewLine + "@exit /b 1" + Environment.NewLine);
+            var gateway = new GitHubCliRepositoryGateway(ghExecutable: script);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => gateway.ReadCurrentRevisionAsync("https://github.com/owner/repository.git", CancellationToken.None));
+
+            Assert.Contains("Unable to read the repository revision.", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("HTTP 404", exception.Message, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
     private sealed class NeverJoinedLocalRepository : ICliLocalRepository
     {
         public Task SaveKeyAsync(string repositoryId, ReadOnlyMemory<byte> key, CancellationToken cancellationToken) =>

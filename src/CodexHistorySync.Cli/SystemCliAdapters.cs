@@ -664,8 +664,12 @@ public sealed class GitHubCliRepositoryGateway : ICliRepositoryGateway
 
     private static Task RequireSuccessAsync(GitCommandResult result, string message)
     {
-        if (result.ExitCode != 0 || result.TimedOut) throw new InvalidOperationException(message);
-        return Task.CompletedTask;
+        if (result.ExitCode == 0 && !result.TimedOut) return Task.CompletedTask;
+        // Git already said what went wrong - no credential helper, no network, no such ref - and
+        // dropping it left a sentence that fits every one of those equally. The stream is redacted
+        // where it is captured, so the credential-bearing parts of a URL are already gone.
+        var detail = result.TimedOut ? "The Git command timed out." : result.StandardError.Trim();
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail) ? message : message + " " + detail);
     }
 }
 
