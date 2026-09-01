@@ -309,6 +309,17 @@ then `codex.exe` on `PATH`. VSCodium does not use the Microsoft Marketplace by d
 
 If Codex is not installed, `join` prints a warning and continues so Grok sessions and on-disk Codex JSONL can still be imported. When Codex *is* present but the disposable reindex probe fails, `join` hard-fails with `Gate failed: codex-compatibility` and a `diagnostic:` line. Install the OpenAI Codex IDE extension (VS Code / Cursor / Windsurf) or put `codex.exe` on `PATH` / set `CODEX_EXE` so reindex can be verified. Use `doctor --compatibility-session <jsonl> --codex-exe <path>` to re-test the probe alone.
 
+### A gate that failed on the first join
+
+`Gate failed: private-visibility.` now comes with the `diagnostic:` line that says which of the two
+causes it was. An unauthenticated `gh` and a repository that is genuinely public fail the same gate,
+and the fix differs:
+
+```powershell
+gh auth status   # 401 here means the first cause
+gh auth login
+```
+
 ### A machine that never joined
 
 Every command except `init`, `join`, `update`, and `titles` needs a local configuration, and a

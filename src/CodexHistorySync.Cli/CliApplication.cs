@@ -202,7 +202,7 @@ public sealed class CliApplication
     {
         if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1])) return Usage();
         var gate = await Services.VerifyInitializationTargetAsync(args[1], cancellationToken).ConfigureAwait(false);
-        if (!gate.Passed) return GateFailure(gate.Name);
+        if (!gate.Passed) return GateFailure(gate.Name, gate.Diagnostic);
 
         char[]? first = null;
         char[]? confirmation = null;
@@ -231,7 +231,7 @@ public sealed class CliApplication
         var apply = args.Length == 3 && args[2] == "--apply";
         if ((args.Length != 2 && !apply) || string.IsNullOrWhiteSpace(args[1])) return Usage();
         var gate = await Services.VerifyPrivateRepositoryAsync(args[1], cancellationToken).ConfigureAwait(false);
-        if (!gate.Passed) return GateFailure(gate.Name);
+        if (!gate.Passed) return GateFailure(gate.Name, gate.Diagnostic);
 
         char[]? passphrase = null;
         CliAuthenticatedRepository? repository = null;
@@ -710,7 +710,7 @@ public sealed class CliApplication
     {
         console.WriteError($"Gate failed: {SafeToken(name)}.");
         if (!string.IsNullOrWhiteSpace(diagnostic))
-            console.WriteError($"diagnostic: {SafeToken(diagnostic)}");
+            console.WriteError($"diagnostic: {SafeMessage(diagnostic)}");
         return 3;
     }
 
@@ -753,6 +753,17 @@ public sealed class CliApplication
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// A diagnostic is a sentence we wrote, not a token, and it has to survive as one: run through
+    /// <see cref="SafeToken"/> it came out as Run__gh_auth_status__and_retry_setup. Spaces and
+    /// ordinary punctuation are kept; control characters, which could rewrite the console, are not.
+    /// </summary>
+    private static string SafeMessage(string value)
+    {
+        var kept = value.Where(character => !char.IsControl(character) && character < (char)127).Take(300);
+        return new string(kept.ToArray()).Trim();
     }
 
     private static string SafeToken(string? value)
