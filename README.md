@@ -25,6 +25,8 @@ Beside the sessions themselves, `agent-sync` synchronizes the **titles and descr
 
 Each successful publish rewrites `main` to a **single orphan commit** (snapshot store, not append-only history). Large tool outputs, compaction snapshots, and images are stripped or truncated before encrypt/upload. Local agent homes on disk are **not** modified.
 
+Session titling is turned on with `agent-sync titles set http://<host>:11434`, checked with `agent-sync titles test`, and turned off with `agent-sync titles off`.
+
 The public command is `agent-sync`, and the release binary is `agent-sync.exe`. Prerequisites: Git, GitHub CLI (`gh`), and the agents you use.
 
 For compatibility with existing installations, the installer deliberately keeps `agent-sync.exe` under `%LOCALAPPDATA%\Programs\CodexHistorySync`, while application state remains under `%LOCALAPPDATA%\CodexHistorySync`. These are separate directories; upgrading does not migrate or rename either one.
