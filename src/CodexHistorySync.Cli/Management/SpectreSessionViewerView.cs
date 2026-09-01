@@ -107,9 +107,10 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
     {
         ArgumentNullException.ThrowIfNull(state);
         latestState = state;
-        var frame = BuildFrame(state);
-        // Sized for the next frame: this one was already laid out for the count it had.
+        // Reserved for the state being drawn rather than the one before it: a description that
+        // has just been generated has to appear on this frame, not on the next keystroke.
         annotationRows = DescriptionLines(state).Count;
+        var frame = BuildFrame(state);
         if (liveContext is { } context)
         {
             context.UpdateTarget(frame);
