@@ -174,6 +174,10 @@ public sealed class CliApplication
         {
             // Keep output free of paths/secrets; surface only a stable type token for support.
             console.WriteError($"Operation failed: {SafeToken(exception.GetType().Name)}.");
+            // A type name on its own says nothing about which of a dozen directories was missing.
+            // The detail goes to a file on the machine that failed, where the paths in it are
+            // already visible anyway, rather than onto a screen that may be shared.
+            if (WriteFailureReport(exception) is { } report) console.WriteError($"Details: {report}");
             return 1;
         }
     }
@@ -705,6 +709,34 @@ public sealed class CliApplication
             difference |= leftValue ^ rightValue;
         }
         return difference == 0;
+    }
+
+    /// <summary>
+    /// Records the last failure where a person can find it. Best effort by design: a diagnostic
+    /// that throws would replace the failure being diagnosed.
+    /// </summary>
+    private string? WriteFailureReport(Exception exception)
+    {
+        try
+        {
+            var root = string.IsNullOrWhiteSpace(localAppDataDirectory)
+                ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+                : localAppDataDirectory;
+            if (string.IsNullOrWhiteSpace(root)) return null;
+            var directory = Path.Combine(root, "CodexHistorySync", "logs");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "last-failure.log");
+            File.WriteAllText(path,
+                $"agent-sync {CliVersion.Current} (commit {CliBuildInfo.Commit})" + Environment.NewLine +
+                DateTimeOffset.UtcNow.ToString("O") + Environment.NewLine + Environment.NewLine +
+                exception.ToString() + Environment.NewLine);
+            return path;
+        }
+        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException
+                                           or ArgumentException or NotSupportedException or System.Security.SecurityException)
+        {
+            return null;
+        }
     }
 
     private static string SafeToken(string? value)
