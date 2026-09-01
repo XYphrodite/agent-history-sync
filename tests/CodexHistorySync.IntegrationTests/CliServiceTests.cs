@@ -400,6 +400,30 @@ public sealed class CliServiceTests
         Assert.Contains(report.Checks, check => check.Name == "process-state");
     }
 
+    [Fact]
+    public async Task A_local_repository_without_a_configuration_says_the_machine_never_joined()
+    {
+        // The file is absent because join never ran here, and the caller can act on that.
+        var root = Path.Combine(Path.GetTempPath(), $"agent-sync-unjoined-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var repository = new FileCliLocalRepository(root, new UnusedKeyStore());
+
+            await Assert.ThrowsAsync<CliNotJoinedException>(
+                () => repository.LoadConfigurationAsync(CancellationToken.None));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+    private sealed class UnusedKeyStore : CodexHistorySync.Windows.IKeyStore
+    {
+        public Task SaveAsync(string repositoryId, ReadOnlyMemory<byte> key, CancellationToken ct) =>
+            throw new InvalidOperationException("The key store must not be reached.");
+        public Task<byte[]?> LoadAsync(string repositoryId, CancellationToken ct) =>
+            throw new InvalidOperationException("The key store must not be reached.");
+        public Task DeleteAsync(string repositoryId, CancellationToken ct) =>
+            throw new InvalidOperationException("The key store must not be reached.");
+    }
     private sealed class FakeGateway(List<string> log) : ICliRepositoryGateway
     {
         public CliPublishedInitialization? Published { get; private set; }

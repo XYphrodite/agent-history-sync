@@ -45,6 +45,15 @@ public sealed class CliGateException : Exception
     public CliGateException(string message, Exception innerException) : base(message, innerException) { }
 }
 
+/// <summary>
+/// Raised when a command that needs a joined repository runs on a machine that has none. It is
+/// not a defect but a step not taken yet, and it reads like one.
+/// </summary>
+public sealed class CliNotJoinedException : Exception
+{
+    public CliNotJoinedException() : base("This machine is not joined to a repository.") { }
+}
+
 public interface ICliConsole
 {
     void WriteLine(string value);
@@ -169,6 +178,13 @@ public sealed class CliApplication
         {
             console.WriteError("Security or compatibility gate failed.");
             return 3;
+        }
+        catch (CliNotJoinedException)
+        {
+            // Nothing is wrong here that a report would explain, so none is written.
+            console.WriteError("This machine is not joined to a repository yet.");
+            console.WriteError("Run: agent-sync join <remote-url>");
+            return 1;
         }
         catch (Exception exception)
         {
