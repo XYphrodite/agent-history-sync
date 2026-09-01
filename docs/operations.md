@@ -106,7 +106,9 @@ The two things `/` can do look alike and are not. Filtering narrows the list to 
 
 Every screen carries the same header: the name, the version, and the seven-character commit the build came from. `agent-sync --version` prints the same pair.
 
-The text is the conversation as `agent-sync` understands it for cross-agent copying: user and assistant turns only. Reasoning blocks, tool calls, and tool results are **not** shown — they are absent from the portable model, not hidden. Neither are technical wrappers such as `<system-reminder>`, for the same reason.
+The text is the conversation as `agent-sync` understands it for cross-agent copying: user and assistant turns only. Reasoning blocks, tool calls, and tool results are **not** shown - they are absent from the portable model, not hidden. Neither are technical wrappers such as `<system-reminder>`, for the same reason.
+
+A wrapper is dropped by itself, not with the turn around it. Claude Code puts editor and reminder context in its own block ahead of the text a person typed, and judging the blocks as one string used to drop the question along with the wrapper - which is how a session could read as the assistant talking to itself.
 
 Sessions marked `!` cannot be opened. That is the same readability verdict that blocks copying them, so the pane explains itself rather than showing an empty conversation.
 

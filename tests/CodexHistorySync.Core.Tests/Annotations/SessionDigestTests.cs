@@ -78,6 +78,37 @@ public sealed class SessionDigestTests
     }
 
     [Fact]
+    public void Build_KeepsTheRequestTheSessionOpenedWith()
+    {
+        // What the session was for. Without it a model names the loudest problem in the
+        // transcript rather than the work the session was.
+        var digest = SessionDigest.Build(Conversation(
+            (ConversationRole.User, "<system-reminder>noise</system-reminder>"),
+            (ConversationRole.User, "make this machine a second GPU box"),
+            (ConversationRole.Assistant, "starting"),
+            (ConversationRole.User, "and put gpt-oss on it")));
+
+        Assert.Equal("make this machine a second GPU box", digest.OpeningRequest);
+    }
+
+    [Fact]
+    public void Build_CutsAnOpeningRequestThatIsAnEssay()
+    {
+        var digest = SessionDigest.Build(Conversation(
+            (ConversationRole.User, new string('o', SessionDigest.MaximumOpeningCharacters + 200))));
+
+        Assert.Equal(SessionDigest.MaximumOpeningCharacters, digest.OpeningRequest?.Length);
+    }
+
+    [Fact]
+    public void Build_HasNoOpeningRequestWhenTheUserNeverSpoke()
+    {
+        var digest = SessionDigest.Build(Conversation((ConversationRole.Assistant, "only an answer")));
+
+        Assert.Null(digest.OpeningRequest);
+    }
+
+    [Fact]
     public void Build_HashesTheSameConversationTheSameWayTwice()
     {
         var first = SessionDigest.Build(Conversation((ConversationRole.User, "question")));
