@@ -48,8 +48,13 @@ public sealed class CliGateException : Exception
 /// <summary>
 /// Raised when a command that needs a joined repository runs on a machine that has none. It is
 /// not a defect but a step not taken yet, and it reads like one.
+///
+/// It stays a <see cref="FileNotFoundException"/> because that is what it is - the configuration
+/// file is not there - and because callers that already tolerate a missing configuration keep
+/// working. `doctor` is one: it reports its environment checks on a machine that never joined,
+/// and a fresh exception type outside that catch silently took that away.
 /// </summary>
-public sealed class CliNotJoinedException : Exception
+public sealed class CliNotJoinedException : FileNotFoundException
 {
     public CliNotJoinedException() : base("This machine is not joined to a repository.") { }
 }

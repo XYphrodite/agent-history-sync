@@ -158,7 +158,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
             Border = BoxBorder.Rounded,
             BorderStyle = FocusedBorder,
             Padding = new Padding(1, 0, 1, 0),
-            Width = 49,
+            Width = CliBuildInfo.PanelWidth,
             Expand = false
         };
         var message = pendingMessage is { } pending

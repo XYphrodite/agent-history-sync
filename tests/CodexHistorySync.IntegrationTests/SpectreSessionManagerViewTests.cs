@@ -33,6 +33,22 @@ public sealed class SpectreSessionManagerViewTests
         Assert.Equal(expected, command);
     }
 
+    [Theory]
+    [InlineData("0.9.1")]
+    [InlineData("0.10.9")]
+    [InlineData("0.10.10")]
+    [InlineData("1.100.100")]
+    public void The_brand_panel_is_wide_enough_for_the_line_it_holds(string version)
+    {
+        // 0.10.10 is one character wider than 0.10.9, and at that width the hard-coded 49 wrapped
+        // the line and dropped the author off the panel entirely.
+        var line = $"version {version}  commit bf5ec73  by XYphrodite";
+
+        var width = CodexHistorySync.Cli.CliBuildInfo.PanelWidthFor(version, "bf5ec73", "XYphrodite");
+
+        // A space of padding and a border character on each side.
+        Assert.True(width >= line.Length + 4, $"{width} cannot hold {line.Length} characters.");
+    }
     [Fact]
     public void ReadCommand_maps_slash_to_search_and_escape_to_clear_an_active_filter()
     {
