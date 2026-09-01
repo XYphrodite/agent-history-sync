@@ -35,6 +35,9 @@ public sealed class OllamaSessionTitleSuggesterTests
         Assert.False(request.GetProperty("stream").GetBoolean());
         Assert.Equal("object", request.GetProperty("format").GetProperty("type").GetString());
         Assert.Equal(16384, request.GetProperty("options").GetProperty("num_ctx").GetInt32());
+        // Reasoning off: with it on the answer costs four times the wall clock and can come
+        // back empty when the token budget goes on thinking instead of on the title.
+        Assert.False(request.GetProperty("think").GetBoolean());
         var messages = request.GetProperty("messages");
         Assert.Equal(2, messages.GetArrayLength());
         Assert.Equal("system", messages[0].GetProperty("role").GetString());

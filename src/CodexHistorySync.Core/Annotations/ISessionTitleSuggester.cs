@@ -16,8 +16,8 @@ public sealed record SessionTitleOptions(string? Endpoint, string Model = "qwen3
     /// <summary>A host that is not listening must be given up on, not waited for.</summary>
     public static TimeSpan ConnectTimeout => TimeSpan.FromSeconds(2);
 
-    /// <summary>A thinking model on a small GPU takes tens of seconds; beyond a minute it is stuck.</summary>
-    public static TimeSpan RequestTimeout => TimeSpan.FromSeconds(60);
+    /// <summary>A small GPU takes tens of seconds on a long session; beyond two minutes it is stuck.</summary>
+    public static TimeSpan RequestTimeout => TimeSpan.FromSeconds(120);
 }
 
 public interface ISessionTitleSuggester
@@ -30,4 +30,10 @@ public interface ISessionTitleSuggester
     /// endpoint down, the answer unusable, or the caller no longer waiting.
     /// </summary>
     Task<SessionAnnotationDraft?> SuggestAsync(SessionDigestResult digest, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Why the last suggestion came back empty, for a diagnostic command to print. The screen
+    /// deliberately does not show it: a failure there costs a keystroke, not an investigation.
+    /// </summary>
+    string? LastFailure { get; }
 }

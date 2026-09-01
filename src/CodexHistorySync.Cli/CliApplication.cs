@@ -531,6 +531,7 @@ public sealed class CliApplication
             console.WriteError($"titling=failed seconds={seconds.ToString("F1", CultureInfo.InvariantCulture)}");
             // Which half failed matters: a host that is down and a model that will not start need
             // different things done to them.
+            if (suggester.LastFailure is { } reason) console.WriteError($"  reason={SafeText(reason)}");
             console.WriteError(
                 await EndpointAnswersAsync(configuration.Options.Endpoint!, cancellationToken).ConfigureAwait(false)
                     ? "The host answered, but no usable title came back. The model may still be loading, " +

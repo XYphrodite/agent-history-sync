@@ -500,6 +500,8 @@ public sealed class SessionViewerApplicationTests
     {
         public bool IsConfigured => true;
 
+        public string? LastFailure => null;
+
         public SessionAnnotationDraft? Draft { get; init; }
 
         public int DelayMilliseconds { get; init; }

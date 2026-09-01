@@ -38,12 +38,17 @@ public sealed class OllamaSessionTitleSuggester : ISessionTitleSuggester, IDispo
 
     public bool IsConfigured => _chatEndpoint is not null;
 
+    public string? LastFailure { get; private set; }
+
     public async Task<SessionAnnotationDraft?> SuggestAsync(
         SessionDigestResult digest,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(digest);
-        if (_chatEndpoint is null || digest.IsEmpty || cancellationToken.IsCancellationRequested) return null;
+        LastFailure = null;
+        if (_chatEndpoint is null) { LastFailure = "No endpoint is configured."; return null; }
+        if (digest.IsEmpty) { LastFailure = "There was nothing in the session to send."; return null; }
+        if (cancellationToken.IsCancellationRequested) { LastFailure = "Cancelled before the request was made."; return null; }
 
         try
         {
@@ -51,6 +56,7 @@ public sealed class OllamaSessionTitleSuggester : ISessionTitleSuggester, IDispo
         }
         catch (OperationCanceledException)
         {
+            LastFailure = "Cancelled while waiting for the endpoint.";
             return null;
         }
 
@@ -63,15 +69,23 @@ public sealed class OllamaSessionTitleSuggester : ISessionTitleSuggester, IDispo
             using var response = await _client
                 .PostAsync(_chatEndpoint, content, cancellationToken)
                 .ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode) return null;
+            if (!response.IsSuccessStatusCode)
+            {
+                var refusal = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                LastFailure = $"The endpoint answered {(int)response.StatusCode}: {Head(refusal)}";
+                return null;
+            }
 
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            return ReadDraft(body);
+            var draft = ReadDraft(body);
+            if (draft is null) LastFailure = $"The answer carried no usable title: {Head(body)}";
+            return draft;
         }
         catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException
                                              or JsonException or InvalidOperationException or IOException)
         {
             // Unreachable, timed out, cancelled, or answering something that is not an answer.
+            LastFailure = $"{exception.GetType().Name}: {Head(exception.Message)}";
             return null;
         }
         finally
@@ -85,6 +99,11 @@ public sealed class OllamaSessionTitleSuggester : ISessionTitleSuggester, IDispo
         _client.Dispose();
         _gate.Dispose();
     }
+
+    private static string Head(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "(nothing)"
+            : value.Length <= 300 ? value.ReplaceLineEndings(" ")
+            : value[..300].ReplaceLineEndings(" ");
 
     private static Uri? ResolveChatEndpoint(string? endpoint)
     {
@@ -100,6 +119,11 @@ public sealed class OllamaSessionTitleSuggester : ISessionTitleSuggester, IDispo
     {
         model = _options.Model,
         stream = false,
+        // No reasoning: it is what a thinking model spends most of its time and its token
+        // budget on, and a budget spent thinking comes back with an empty answer. Measured on
+        // one real session: 9.8 s with this off against 38.5 s with it on, same model, and a
+        // sharper title. Models without a thinking mode ignore it.
+        think = false,
         // The schema is enforced by the server, so a chatty or thinking model still answers JSON.
         format = new
         {
