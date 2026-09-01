@@ -687,6 +687,21 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task The_compatibility_diagnostic_reads_as_a_sentence_too()
+    {
+        var fixture = new Fixture();
+        fixture.Services.CompatibilityResult = new CompatibilityResult(
+            false, "codex-1.2.3", "The imported JSONL thread was not listed by Codex.");
+
+        var exitCode = await fixture.Application.RunAsync(
+            ["doctor", "--compatibility-session", "session.jsonl", "--codex-exe", "codex.exe"],
+            CancellationToken.None);
+
+        Assert.Equal(3, exitCode);
+        Assert.Contains("was not listed by Codex", fixture.Console.AllText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_failed_gate_says_what_it_saw_in_a_sentence_that_survived()
     {
         // An unauthenticated gh and a repository that is genuinely public both fail this gate, and
