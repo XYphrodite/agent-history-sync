@@ -401,6 +401,34 @@ public sealed class CliServiceTests
     }
 
     [Fact]
+    public async Task Doctor_still_reports_on_a_machine_that_never_joined()
+    {
+        // Its environment checks - git, gh, Codex, disk - are exactly what someone needs before
+        // the first join, so a missing configuration must not end the command.
+        var log = new List<string>();
+        var service = new DefaultCliServices(new FakeGateway(log), new NeverJoinedLocalRepository(),
+            new FakeRuntime(log), new RepositoryCrypto());
+
+        var report = await service.RunDoctorAsync(CancellationToken.None);
+
+        Assert.NotNull(report);
+    }
+
+    private sealed class NeverJoinedLocalRepository : ICliLocalRepository
+    {
+        public Task SaveKeyAsync(string repositoryId, ReadOnlyMemory<byte> key, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task<byte[]?> LoadKeyAsync(string repositoryId, CancellationToken cancellationToken) =>
+            Task.FromResult<byte[]?>(null);
+        public Task SaveConfigurationAsync(CliLocalConfiguration configuration, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task<CliLocalConfiguration> LoadConfigurationAsync(CancellationToken cancellationToken) =>
+            throw new CliNotJoinedException();
+        public Task SaveInitialStateAsync(string repositoryId, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+    }
+
+    [Fact]
     public async Task A_local_repository_without_a_configuration_says_the_machine_never_joined()
     {
         // The file is absent because join never ran here, and the caller can act on that.
