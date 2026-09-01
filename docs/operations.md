@@ -143,7 +143,9 @@ The command writes `%LOCALAPPDATA%\CodexHistorySync\titles.json`. Editing that f
 $env:AGENT_SYNC_TITLE_MODEL = "gpt-oss:20b"; agent-sync --sessions
 ```
 
-A model of this size takes tens of seconds to answer, and the screen stays usable while it does: the request is cancelled by any keystroke. An endpoint that is down costs a message and nothing else.
+Reasoning is turned off in the request. A thinking model spends most of its wall clock and most of its token budget on it, and a budget spent thinking comes back as an empty answer - measured on one real session, 9.8 seconds against 38.5 with reasoning on, same model, and a sharper title. A model without a thinking mode ignores the flag.
+
+Naming a session takes a handful of seconds, and the screen stays usable while it does: the request is cancelled by any keystroke. An endpoint that is down costs a message and nothing else, and `agent-sync titles test` prints the reason it came back empty.
 
 Copying between agents stays in `--manage`: it needs the destination prompt that screen already has.
 
