@@ -197,8 +197,15 @@ public sealed class CliServiceTests
             {
                 observedFixture = fixture;
                 var text = await File.ReadAllTextAsync(fixture, cancellationToken);
+                // Codex lists a thread only when the file looks like one of its own. Measured
+                // against Codex 0.146 and 0.151: a rollout-<timestamp>-<uuid> name and a user
+                // message after the metadata are both required, and either one missing is a
+                // fixture that no Codex lists - a gate that fails whatever it is asked about.
+                Assert.StartsWith("rollout-", Path.GetFileName(fixture), StringComparison.Ordinal);
+                Assert.True(Guid.TryParse(Path.GetFileNameWithoutExtension(fixture)[^36..], out _),
+                    $"{fixture} does not end in a thread id.");
                 Assert.Contains("session_meta", text);
-                Assert.Contains("compatibility-fixture", text);
+                Assert.Contains("\"type\":\"user_message\"", text);
                 return new CompatibilityResult(true, "test", "compatible");
             });
 

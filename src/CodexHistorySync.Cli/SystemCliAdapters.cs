@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -815,9 +816,19 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         try
         {
             Directory.CreateDirectory(fixtureRoot);
-            var fixture = Path.Combine(fixtureRoot, "compatibility-fixture.jsonl");
+            // Codex lists a thread only when the file looks like one of its own: named
+            // rollout-<timestamp>-<uuid>.jsonl, and carrying a user message after the metadata.
+            // A lone session_meta under a name of our choosing is listed by no Codex we have
+            // measured - 0.146 and 0.151 both refuse it - so the gate was failing on its own
+            // fixture rather than on the machine it was asked about.
+            var threadId = Guid.NewGuid().ToString();
+            var stamp = DateTime.UtcNow;
+            var fixture = Path.Combine(fixtureRoot,
+                $"rollout-{stamp:yyyy-MM-dd}T{stamp:HH-mm-ss}-{threadId}.jsonl");
+            var written = stamp.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
             await File.WriteAllTextAsync(fixture,
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"compatibility-fixture\"}}\n",
+                $"{{\"timestamp\":\"{written}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{threadId}\",\"session_id\":\"{threadId}\",\"timestamp\":\"{written}\"}}}}\n" +
+                $"{{\"timestamp\":\"{written}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"agent-sync compatibility fixture\"}}}}\n",
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var result = await compatibilityProbe(fixture, cancellationToken).ConfigureAwait(false);
             if (result.IsCompatible)
