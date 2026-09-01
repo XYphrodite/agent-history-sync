@@ -710,6 +710,9 @@ public sealed class FileCliLocalRepository : ICliLocalRepository
 
     public async Task<CliLocalConfiguration> LoadConfigurationAsync(CancellationToken cancellationToken)
     {
+        // A machine that never joined has no configuration, which is a step not taken rather than
+        // a failure to read one. Said plainly here, it does not surface as a missing-path error.
+        if (!File.Exists(configurationPath)) throw new CliNotJoinedException();
         RejectReparsePoints(configurationPath);
         await using var input = new FileStream(configurationPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var configuration = await JsonSerializer.DeserializeAsync<CliLocalConfiguration>(input, JsonOptions, cancellationToken).ConfigureAwait(false)

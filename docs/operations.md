@@ -309,6 +309,20 @@ then `codex.exe` on `PATH`. VSCodium does not use the Microsoft Marketplace by d
 
 If Codex is not installed, `join` prints a warning and continues so Grok sessions and on-disk Codex JSONL can still be imported. When Codex *is* present but the disposable reindex probe fails, `join` hard-fails with `Gate failed: codex-compatibility` and a `diagnostic:` line. Install the OpenAI Codex IDE extension (VS Code / Cursor / Windsurf) or put `codex.exe` on `PATH` / set `CODEX_EXE` so reindex can be verified. Use `doctor --compatibility-session <jsonl> --codex-exe <path>` to re-test the probe alone.
 
+### A machine that never joined
+
+Every command except `init`, `join`, `update`, and `titles` needs a local configuration, and a
+machine that never ran `join` has none. That is a step not taken rather than a failure, and it says
+so:
+
+```
+This machine is not joined to a repository yet.
+Run: agent-sync join <remote-url>
+```
+
+No failure report is written for it. Note that the configuration lives under the Windows account
+that ran `join`: signing in as a different user on the same machine is a machine that never joined.
+
 ### When a command only prints an exception type
 
 `Operation failed: <Type>.` is deliberately all the console says: the message of an exception can

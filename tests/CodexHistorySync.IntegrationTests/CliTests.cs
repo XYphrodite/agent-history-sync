@@ -687,6 +687,23 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task A_machine_that_never_joined_is_told_to_join_rather_than_shown_a_failure()
+    {
+        // Syncing before joining is a step not taken, not a defect, so it earns no failure report
+        // and no exception type - it earns the command that fixes it.
+        var local = Path.Combine(Path.GetTempPath(), $"agent-sync-unjoined-{Guid.NewGuid():N}");
+        var fixture = new Fixture(local);
+        fixture.Services.Failure = new CliNotJoinedException();
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("agent-sync join", fixture.Console.AllText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Operation failed", fixture.Console.AllText, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(local, "CodexHistorySync", "logs")));
+    }
+
+    [Fact]
     public async Task An_operational_failure_leaves_a_report_behind_to_diagnose_it_from()
     {
         // The console gets a type name and nothing else, which on its own does not say which of
