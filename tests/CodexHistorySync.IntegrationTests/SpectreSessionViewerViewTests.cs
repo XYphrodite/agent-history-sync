@@ -211,6 +211,46 @@ public sealed class SpectreSessionViewerViewTests
         return new SessionCatalogSnapshot([], [], sessions) { ConfiguredAgents = ManagedAgents.All };
     }
 
+    [Fact]
+    public void Render_shows_the_description_on_the_frame_it_first_exists()
+    {
+        // Naming a session and then having to press a key to see the description would read as
+        // the naming not having worked.
+        var console = Console(out var output, 160, 30);
+        var view = new SpectreSessionViewerView(console, new FakeInput());
+
+        view.Render(LoadedWithDescription("what this session actually did"));
+
+        Assert.Contains("what this session actually did", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Render_marks_a_description_made_from_an_older_conversation()
+    {
+        var console = Console(out var output, 160, 30);
+        var view = new SpectreSessionViewerView(console, new FakeInput());
+
+        view.Render(LoadedWithDescription("named before the session grew", stale: true));
+
+        Assert.Contains("(stale)", output.ToString(), StringComparison.Ordinal);
+    }
+
+    private static SessionViewerState LoadedWithDescription(string description, bool stale = false)
+    {
+        var annotation = new CodexHistorySync.Core.Annotations.SessionAnnotation(
+            "A title of our own",
+            description,
+            CodexHistorySync.Core.Annotations.SessionAnnotationSource.Generated,
+            "digest-hash",
+            "qwen3:8b",
+            DateTimeOffset.UnixEpoch);
+        var loaded = Loaded();
+        var annotated = loaded.AllSessions[0] with { Annotation = annotation };
+        return SessionViewerState
+            .Create(new SessionCatalogSnapshot([annotated], [], [], []), viewportRows: 10)
+            .WithContent(loaded.Content with { AnnotationIsStale = stale });
+    }
+
     private static SessionViewerState Loaded()
     {
         var conversation = new PortableConversation(
