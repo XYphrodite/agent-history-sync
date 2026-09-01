@@ -58,6 +58,33 @@ public sealed class OllamaSessionTitleSuggesterTests
     }
 
     [Fact]
+    public async Task SuggestAsync_LeadsWithTheRequestTheSessionOpenedWith()
+    {
+        using var handler = new StubHandler(Answer("Title", "Description"));
+        var digest = new SessionDigestResult(
+            "USER: what broke", "hash-1", "make this machine a second GPU box");
+
+        await Suggester(handler).SuggestAsync(digest, CancellationToken.None);
+
+        var messages = JsonDocument.Parse(Assert.Single(handler.Bodies)).RootElement.GetProperty("messages");
+        var prompt = messages[1].GetProperty("content").GetString()!;
+        Assert.StartsWith("The user opened with:", prompt, StringComparison.Ordinal);
+        Assert.Contains("make this machine a second GPU box", prompt, StringComparison.Ordinal);
+        Assert.Contains("USER: what broke", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SuggestAsync_SendsOnlyTheTranscriptWhenNothingOpenedTheSession()
+    {
+        using var handler = new StubHandler(Answer("Title", "Description"));
+
+        await Suggester(handler).SuggestAsync(Digest, CancellationToken.None);
+
+        var messages = JsonDocument.Parse(Assert.Single(handler.Bodies)).RootElement.GetProperty("messages");
+        Assert.StartsWith("Session transcript:", messages[1].GetProperty("content").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task SuggestAsync_CutsATitleOverTheBoundAndNormalizesItsWhitespace()
     {
         var overlong = new string('t', SessionAnnotation.MaximumTitleLength + 40);

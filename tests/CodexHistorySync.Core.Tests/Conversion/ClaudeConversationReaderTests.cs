@@ -117,6 +117,66 @@ public sealed class ClaudeConversationReaderTests
             () => new ClaudeConversationReader().ReadAsync(path, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task ReadAsync_KeepsWhatTheUserTypedBesideTheEditorContextBeforeIt()
+    {
+        // Claude Code puts editor and reminder context in its own block ahead of the text the
+        // user typed. Judging the blocks as one string drops the question along with the wrapper,
+        // which is how a session ends up looking like the assistant talking to itself.
+        await using var fixture = new TranscriptFixture();
+        var path = fixture.Write(Record(new
+        {
+            type = "user",
+            sessionId = SessionId,
+            cwd = fixture.Cwd,
+            timestamp = "2026-08-24T10:00:00+00:00",
+            message = new
+            {
+                role = "user",
+                content = new object[]
+                {
+                    new { type = "text", text = "<ide_opened_file>ROADMAP.md</ide_opened_file>" },
+                    new { type = "text", text = "what the user actually asked" }
+                }
+            }
+        }));
+
+        var conversation = await new ClaudeConversationReader().ReadAsync(path, CancellationToken.None);
+
+        Assert.Equal(
+            [new PortableTurn(ConversationRole.User, "what the user actually asked")],
+            conversation.Turns);
+    }
+
+    [Fact]
+    public async Task ReadAsync_DropsAUserTurnThatIsNothingButContext()
+    {
+        await using var fixture = new TranscriptFixture();
+        var path = fixture.Write(
+            Record(new
+            {
+                type = "user",
+                sessionId = SessionId,
+                cwd = fixture.Cwd,
+                timestamp = "2026-08-24T10:00:00+00:00",
+                message = new
+                {
+                    role = "user",
+                    content = new object[]
+                    {
+                        new { type = "text", text = "<system-reminder>remembered</system-reminder>" }
+                    }
+                }
+            }),
+            Turn("user", "the real question", timestamp: "2026-08-24T10:01:00+00:00"));
+
+        var conversation = await new ClaudeConversationReader().ReadAsync(path, CancellationToken.None);
+
+        Assert.Equal(
+            [new PortableTurn(ConversationRole.User, "the real question")],
+            conversation.Turns);
+    }
+
     private static string Record(object value) => JsonSerializer.Serialize(value);
 
     private string Turn(string role, string text, string? timestamp = null) => Record(new

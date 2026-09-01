@@ -97,7 +97,7 @@ public sealed class ClaudeConversationReader : IConversationReader
             if (ReadTimestamp(root) is { } timestamp) timestamps.Add(timestamp);
 
             var role = GetString(root, "type") == "user" ? ConversationRole.User : ConversationRole.Assistant;
-            var text = ReadMessageText(root);
+            var text = ReadMessageText(root, role);
             if (string.IsNullOrWhiteSpace(text)) continue;
             if (role == ConversationRole.User && ConversationTechnicalText.IsWrapper(text)) continue;
             turns.Add(new PortableTurn(role, text));
@@ -114,7 +114,7 @@ public sealed class ClaudeConversationReader : IConversationReader
     /// Text blocks only. Thinking, tool calls and tool results are deliberately dropped: the portable
     /// model carries plain turns, and a cross-agent copy has nowhere to put them.
     /// </summary>
-    private static string? ReadMessageText(JsonElement root)
+    private static string? ReadMessageText(JsonElement root, ConversationRole role)
     {
         if (!root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object) return null;
         if (!message.TryGetProperty("content", out var content)) return null;
@@ -129,7 +129,11 @@ public sealed class ClaudeConversationReader : IConversationReader
                 !string.Equals(type.GetString(), "text", StringComparison.Ordinal) ||
                 !block.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String)
                 continue;
-            blocks.Add(text.GetString()!);
+            var value = text.GetString()!;
+            // Editor and reminder context arrives as its own block ahead of what the user typed,
+            // so each block is judged on its own. Judging them joined drops the question too.
+            if (role == ConversationRole.User && ConversationTechnicalText.IsWrapper(value)) continue;
+            blocks.Add(value);
         }
         return blocks.Count == 0 ? null : string.Concat(blocks);
     }

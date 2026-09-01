@@ -139,24 +139,36 @@ public sealed class OllamaSessionTitleSuggester : ISessionTitleSuggester, IDispo
         messages = new object[]
         {
             new { role = "system", content = SystemPrompt() },
-            new { role = "user", content = "Session transcript:\n\n" + digest.Text }
+            new { role = "user", content = UserPrompt(digest) }
         }
     };
+
+    private static string UserPrompt(SessionDigestResult digest) =>
+        string.IsNullOrWhiteSpace(digest.OpeningRequest)
+            ? "Session transcript:\n\n" + digest.Text
+            : "The user opened with:\n" + digest.OpeningRequest + "\n\nSession transcript:\n\n" + digest.Text;
 
     private string SystemPrompt()
     {
         var language = _options.Language switch
         {
-            "ru" => "Answer in Russian.",
-            "en" => "Answer in English.",
-            _ => "Answer in the language the USER speaks in the transcript."
+            "ru" => "Write both the title and the description in Russian.",
+            "en" => "Write both the title and the description in English.",
+            _ => "Write BOTH the title and the description in the language the USER writes in."
         };
 
-        return "You name coding sessions. From the transcript return JSON. \"title\": two to five words " +
-               "naming the concrete subject of the work - a component, a file, a machine, a feature or a bug. " +
-               "Never a generic phrase, never the words session or chat, no trailing period. " +
-               "\"description\": one sentence of at most 140 characters saying what was actually done and how it " +
-               "ended. " + language + " Use only what the transcript says and invent nothing.";
+        // Leading with the thing rather than with what was done to it is what separates a name
+        // from a status line, and naming the work rather than its loudest problem is what keeps
+        // a list of forty sessions readable. Both were measured against real sessions.
+        return "You name coding sessions so they can be told apart in a list months later. You are " +
+               "given the request the session opened with and then the conversation. Return JSON. " +
+               "\"title\": two to five words naming what the session as a whole was about. Lead with the " +
+               "thing itself - the component, machine, feature or bug the work was aimed at - not with " +
+               "what was done to it: prefer \"QR unlock on the club machines\" over \"Fixing the QR unlock " +
+               "problem\". Take it from what the user asked for and what the work became, never from a " +
+               "passing detail of one turn. No trailing period, and never the words session or chat. " +
+               "\"description\": one sentence of at most 140 characters saying what was actually done and " +
+               "how it ended. " + language + " Use only what the transcript says and invent nothing.";
     }
 
     private SessionAnnotationDraft? ReadDraft(string body)
