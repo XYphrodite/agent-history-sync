@@ -118,20 +118,26 @@ Sessions arrive named by the agent that wrote them, or not named at all. Codex, 
 
 Titles and descriptions synchronize with everything else, so a session named on one machine arrives named on the others - read [the upgrade gate](#upgrade-every-machine-before-the-first-annotation-push) before the first push that carries one.
 
-Titling is off until an endpoint is configured, and there is no default endpoint. Write `%LOCALAPPDATA%\CodexHistorySync\titles.json`:
+Titling is off until an endpoint is configured, and there is no default endpoint. Turn it on with the command:
 
-```json
-{
-  "schemaVersion": 1,
-  "endpoint": "http://100.105.87.52:11434",
-  "model": "qwen3:8b",
-  "language": "auto"
-}
+```powershell
+agent-sync titles set http://100.105.87.52:11434
+agent-sync titles set http://100.105.87.52:11434 --model gpt-oss:20b --language ru
 ```
 
-`endpoint` is an Ollama-compatible host; `/api/chat` is appended to it. Only `localhost`, a loopback address, and private addresses are accepted - see [the titling boundary](security.md#session-titling-boundary) for the exact list and for what is sent. `model` defaults to `qwen3:8b`. `language` is `auto`, `ru`, or `en`; `auto` answers in whatever language the transcript is in.
+```powershell
+agent-sync titles          # what it is pointed at right now, or that it is off
+agent-sync titles test     # ask the endpoint to name a sample session
+agent-sync titles off      # turn it off again
+```
 
-`AGENT_SYNC_TITLE_ENDPOINT`, `AGENT_SYNC_TITLE_MODEL`, and `AGENT_SYNC_TITLE_LANGUAGE` override the file, which is the quickest way to try another model:
+The endpoint is an Ollama-compatible host; `/api/chat` is appended to it. Only `localhost`, a loopback address, and private addresses are accepted, and an address that is neither is refused **when it is typed** rather than stored and ignored later - see [the titling boundary](security.md#session-titling-boundary) for the exact list and for what is sent. `--model` defaults to `qwen3:8b`. `--language` is `auto`, `ru`, or `en`; `auto` answers in whatever language the transcript is in.
+
+`titles test` is the check worth running first: it sends a sample transcript the whole way and prints the title that came back with the seconds it took, so a box that is reachable but cannot start a model is told apart from one that answers.
+
+The command writes `%LOCALAPPDATA%\CodexHistorySync\titles.json`. Editing that file by hand still works and is read the same way, but the command is the supported way in: it validates the address before it stores it.
+
+`AGENT_SYNC_TITLE_ENDPOINT`, `AGENT_SYNC_TITLE_MODEL`, and `AGENT_SYNC_TITLE_LANGUAGE` override the file for one shell, which is the quickest way to try another model without changing the stored configuration. `agent-sync titles` says so when one of them is set:
 
 ```powershell
 $env:AGENT_SYNC_TITLE_MODEL = "gpt-oss:20b"; agent-sync --sessions

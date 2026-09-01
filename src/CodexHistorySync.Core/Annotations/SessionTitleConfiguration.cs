@@ -29,8 +29,7 @@ public sealed record SessionTitleConfiguration(SessionTitleOptions Options, stri
         Func<string, string?>? environment = null)
     {
         environment ??= Environment.GetEnvironmentVariable;
-        var root = localAppDataDirectory
-                   ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Root(localAppDataDirectory);
 
         string? endpoint = null;
         string? model = null;
@@ -38,7 +37,7 @@ public sealed record SessionTitleConfiguration(SessionTitleOptions Options, stri
 
         if (!string.IsNullOrWhiteSpace(root))
         {
-            var path = Path.Combine(root, "CodexHistorySync", "titles.json");
+            var path = PathFor(localAppDataDirectory);
             if (File.Exists(path))
             {
                 TitleFile? file;
@@ -79,6 +78,70 @@ public sealed record SessionTitleConfiguration(SessionTitleOptions Options, stri
                     string.IsNullOrWhiteSpace(model) ? SessionTitleOptions.DefaultModel : model.Trim(),
                     string.IsNullOrWhiteSpace(language) ? "auto" : language.Trim()),
                 null);
+    }
+
+    /// <summary>The file the command writes and <see cref="Load"/> reads.</summary>
+    public static string PathFor(string? localAppDataDirectory = null) =>
+        Path.Combine(Root(localAppDataDirectory), "CodexHistorySync", "titles.json");
+
+    /// <summary>
+    /// Writes the configuration, or refuses it and writes nothing. The endpoint is checked here
+    /// as well as on load, so a bad address is refused when it is typed rather than silently
+    /// stored and ignored later.
+    /// </summary>
+    public static SessionTitleConfiguration Save(
+        SessionTitleOptions options,
+        string? localAppDataDirectory = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (string.IsNullOrWhiteSpace(options.Endpoint))
+            throw new ArgumentException("An endpoint is required.", nameof(options));
+
+        if (RejectEndpoint(options.Endpoint) is { } rejection) return Off(rejection);
+
+        var saved = new SessionTitleOptions(
+            options.Endpoint.Trim(),
+            string.IsNullOrWhiteSpace(options.Model) ? SessionTitleOptions.DefaultModel : options.Model.Trim(),
+            string.IsNullOrWhiteSpace(options.Language) ? "auto" : options.Language.Trim().ToLowerInvariant());
+
+        var path = PathFor(localAppDataDirectory);
+        var directory = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(directory, $".titles.json.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(
+                new TitleFile(CurrentSchemaVersion, saved.Endpoint, saved.Model, saved.Language),
+                new JsonSerializerOptions(JsonOptions) { WriteIndented = true }));
+            if (File.Exists(path)) File.Replace(temporary, path, destinationBackupFileName: null);
+            else File.Move(temporary, path);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+
+        return new SessionTitleConfiguration(saved, null);
+    }
+
+    /// <summary>Turns titling off by removing the file. True when there was one to remove.</summary>
+    public static bool Disable(string? localAppDataDirectory = null)
+    {
+        var path = PathFor(localAppDataDirectory);
+        if (!File.Exists(path)) return false;
+        File.Delete(path);
+        return true;
+    }
+
+    /// <summary>Why an endpoint is not acceptable, or null when it is.</summary>
+    public static string? Reject(string? endpoint) =>
+        string.IsNullOrWhiteSpace(endpoint) ? "An endpoint is required." : RejectEndpoint(endpoint);
+
+    private static string Root(string? localAppDataDirectory)
+    {
+        var root = localAppDataDirectory
+                   ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return string.IsNullOrWhiteSpace(root) ? string.Empty : root;
     }
 
     private static SessionTitleConfiguration Off(string rejection) =>

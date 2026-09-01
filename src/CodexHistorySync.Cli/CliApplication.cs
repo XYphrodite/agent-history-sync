@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
@@ -94,14 +95,17 @@ public sealed class CliApplication
     private readonly IAgentCliOperations? agentOperations;
     private readonly ISessionManagerRunner? managerRunner;
     private readonly ISelfUpdateOperations? selfUpdate;
+    private readonly string? localAppDataDirectory;
 
     public CliApplication(
         ICliServices services,
         ICliConsole console,
         IAgentCliOperations? agentOperations = null,
         ISessionManagerRunner? managerRunner = null,
-        ISelfUpdateOperations? selfUpdate = null)
+        ISelfUpdateOperations? selfUpdate = null,
+        string? localAppDataDirectory = null)
     {
+        this.localAppDataDirectory = localAppDataDirectory;
         this.services = services ?? throw new ArgumentNullException(nameof(services));
         this.console = console ?? throw new ArgumentNullException(nameof(console));
         this.agentOperations = agentOperations;
@@ -153,6 +157,7 @@ public sealed class CliApplication
                 "resolve" => await RunResolveAsync(args, cancellationToken).ConfigureAwait(false),
                 "agent" => await RunAgentAsync(args, cancellationToken).ConfigureAwait(false),
                 "update" => await RunUpdateAsync(args, cancellationToken).ConfigureAwait(false),
+                "titles" => await RunTitlesAsync(args, cancellationToken).ConfigureAwait(false),
                 _ => Usage()
             };
         }
@@ -414,6 +419,181 @@ public sealed class CliApplication
         return 0;
     }
 
+    /// <summary>
+    /// Turns session titling on, off, and shows what it is pointed at. It is the only command
+    /// that writes titling configuration: hand-editing the file is not the supported way in.
+    /// </summary>
+    private async Task<int> RunTitlesAsync(string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length == 1) return ShowTitles();
+
+        switch (args[1])
+        {
+            case "set" when args.Length >= 3:
+                return SetTitles(args);
+            case "off" when args.Length == 2:
+                console.WriteLine(SessionTitleConfiguration.Disable(localAppDataDirectory)
+                    ? "titling=off (configuration removed)"
+                    : "titling=off (nothing was configured)");
+                return 0;
+            case "test" when args.Length == 2:
+                return await TestTitlesAsync(cancellationToken).ConfigureAwait(false);
+            default:
+                return Usage();
+        }
+    }
+
+    private int ShowTitles()
+    {
+        var configuration = SessionTitleConfiguration.Load(localAppDataDirectory);
+        if (!configuration.IsConfigured)
+        {
+            console.WriteLine("titling=off");
+            if (configuration.Rejection is { } rejection) console.WriteLine($"  reason={SafeText(rejection)}");
+            console.WriteLine("  turn it on: agent-sync titles set http://<host>:11434");
+            return 0;
+        }
+
+        console.WriteLine("titling=on");
+        console.WriteLine($"  endpoint={SafeText(configuration.Options.Endpoint)}");
+        console.WriteLine($"  model={SafeToken(configuration.Options.Model)}");
+        console.WriteLine($"  language={SafeToken(configuration.Options.Language)}");
+        WriteTitleOverrides();
+        return 0;
+    }
+
+    private int SetTitles(string[] args)
+    {
+        var endpoint = args[2];
+        string? model = null;
+        string? language = null;
+        for (var index = 3; index < args.Length; index++)
+        {
+            switch (args[index])
+            {
+                case "--model" when model is null && index + 1 < args.Length:
+                    model = args[++index];
+                    break;
+                case "--language" when language is null && index + 1 < args.Length:
+                    language = args[++index];
+                    break;
+                default:
+                    return Usage();
+            }
+        }
+
+        if (language is not null && language is not ("auto" or "ru" or "en")) return Usage();
+
+        var saved = SessionTitleConfiguration.Save(
+            new SessionTitleOptions(endpoint, model ?? SessionTitleOptions.DefaultModel, language ?? "auto"),
+            localAppDataDirectory);
+        if (!saved.IsConfigured)
+        {
+            // Refused when it is typed rather than stored and quietly ignored later.
+            console.WriteError($"Endpoint refused: {SafeText(saved.Rejection)}");
+            return 2;
+        }
+
+        console.WriteLine("titling=on");
+        console.WriteLine($"  endpoint={SafeText(saved.Options.Endpoint)}");
+        console.WriteLine($"  model={SafeToken(saved.Options.Model)}");
+        console.WriteLine($"  language={SafeToken(saved.Options.Language)}");
+        console.WriteLine($"  stored in {SafeText(SessionTitleConfiguration.PathFor(localAppDataDirectory))}");
+        WriteTitleOverrides();
+        return 0;
+    }
+
+    /// <summary>Asks the endpoint to name a sample session, which is the only honest check.</summary>
+    private async Task<int> TestTitlesAsync(CancellationToken cancellationToken)
+    {
+        var configuration = SessionTitleConfiguration.Load(localAppDataDirectory);
+        if (!configuration.IsConfigured)
+        {
+            console.WriteError(configuration.Rejection is { } rejection
+                ? $"Titling is not configured: {SafeText(rejection)}"
+                : "Titling is not configured.");
+            return 2;
+        }
+
+        const string sample = "USER: the event log service was stopped and ollama could not start a runner\n\n" +
+                              "ASSISTANT: starting the service brought it back";
+        console.WriteLine($"Asking {SafeToken(configuration.Options.Model)} at " +
+            $"{SafeText(configuration.Options.Endpoint)} to name a sample session\u2026");
+
+        using var suggester = new OllamaSessionTitleSuggester(configuration.Options);
+        var started = DateTimeOffset.UtcNow;
+        var draft = await suggester.SuggestAsync(SessionDigest.Build(SampleConversation(sample)), cancellationToken)
+            .ConfigureAwait(false);
+        var seconds = (DateTimeOffset.UtcNow - started).TotalSeconds;
+
+        if (draft is null)
+        {
+            console.WriteError($"titling=failed seconds={seconds.ToString("F1", CultureInfo.InvariantCulture)}");
+            // Which half failed matters: a host that is down and a model that will not start need
+            // different things done to them.
+            console.WriteError(
+                await EndpointAnswersAsync(configuration.Options.Endpoint!, cancellationToken).ConfigureAwait(false)
+                    ? "The host answered, but no usable title came back. The model may still be loading, " +
+                      "or its runner may have failed to start - try again, and check `ollama ps` there."
+                    : "The host did not answer at all. Check that it is running and reachable at that address.");
+            return 1;
+        }
+
+        console.WriteLine($"titling=ok seconds={seconds.ToString("F1", CultureInfo.InvariantCulture)}");
+        console.WriteLine($"  title={SafeText(draft.Title)}");
+        console.WriteLine($"  description={SafeText(draft.Description)}");
+        return 0;
+    }
+
+    /// <summary>A plain liveness question, asked only to explain a probe that came back empty.</summary>
+    private static async Task<bool> EndpointAnswersAsync(string endpoint, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var response = await client
+                .GetAsync(endpoint.TrimEnd('/') + "/api/version", cancellationToken).ConfigureAwait(false);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException
+                                             or InvalidOperationException or UriFormatException)
+        {
+            return false;
+        }
+    }
+
+    private static Core.Conversion.PortableConversation SampleConversation(string text) => new(
+        Core.Conversion.ConversationAgent.Claude,
+        "sample",
+        "sample",
+        null,
+        DateTimeOffset.UtcNow,
+        DateTimeOffset.UtcNow,
+        [new Core.Conversion.PortableTurn(Core.Conversion.ConversationRole.User, text)]);
+
+    /// <summary>An environment variable beats the file, so say so rather than let it confuse.</summary>
+    private void WriteTitleOverrides()
+    {
+        foreach (var name in new[]
+                 {
+                     SessionTitleConfiguration.EndpointVariable,
+                     SessionTitleConfiguration.ModelVariable,
+                     SessionTitleConfiguration.LanguageVariable
+                 })
+        {
+            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)))
+                console.WriteLine($"  note: {name} is set and overrides the file");
+        }
+    }
+
+    private static string SafeText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "unknown";
+        var trimmed = value.Length <= 200 ? value : value[..200];
+        return new string(trimmed.Select(character =>
+            char.IsControl(character) ? '_' : character).ToArray());
+    }
+
     private async Task<int> RunUpdateAsync(string[] args, CancellationToken cancellationToken)
     {
         if (selfUpdate is null) return Usage();
@@ -482,13 +662,21 @@ public sealed class CliApplication
 
     private int Usage()
     {
-        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update> [options] [--manage] [--sessions] [--version]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles> [options] [--manage] [--sessions] [--version]");
+        console.WriteError("  titles                       show what session titling is configured with");
+        console.WriteError("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
+        console.WriteError("  titles off                   turn session titling off");
+        console.WriteError("  titles test                  ask the endpoint to name a sample session");
         return 2;
     }
 
     private int Help()
     {
-        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update> [options] [--manage] [--sessions] [--version]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles> [options] [--manage] [--sessions] [--version]");
+        console.WriteLine("  titles                       show what session titling is configured with");
+        console.WriteLine("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
+        console.WriteLine("  titles off                   turn session titling off");
+        console.WriteLine("  titles test                  ask the endpoint to name a sample session");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         console.WriteLine("update [--check] [--version <tag>]  install the latest published release");
         console.WriteLine("--manage    copy and delete sessions across agents");
