@@ -816,19 +816,40 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         try
         {
             Directory.CreateDirectory(fixtureRoot);
-            // Codex lists a thread only when the file looks like one of its own: named
-            // rollout-<timestamp>-<uuid>.jsonl, and carrying a user message after the metadata.
-            // A lone session_meta under a name of our choosing is listed by no Codex we have
-            // measured - 0.146 and 0.151 both refuse it - so the gate was failing on its own
-            // fixture rather than on the machine it was asked about.
+            // Codex lists a thread only when the file looks like one of its own. Measured against
+            // Codex 0.146 and 0.151, which agree exactly: the name has to be
+            // rollout-<timestamp>-<uuid>.jsonl, the metadata has to carry cwd, originator and
+            // cli_version, and a user message has to follow it. Drop any one of those and no
+            // Codex lists the thread - which is what the gate was doing to every machine it was
+            // asked about, since the fixture was a lone session_meta under a name of our own.
             var threadId = Guid.NewGuid().ToString();
             var stamp = DateTime.UtcNow;
+            var written = stamp.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
             var fixture = Path.Combine(fixtureRoot,
                 $"rollout-{stamp:yyyy-MM-dd}T{stamp:HH-mm-ss}-{threadId}.jsonl");
-            var written = stamp.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
-            await File.WriteAllTextAsync(fixture,
-                $"{{\"timestamp\":\"{written}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{threadId}\",\"session_id\":\"{threadId}\",\"timestamp\":\"{written}\"}}}}\n" +
-                $"{{\"timestamp\":\"{written}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"agent-sync compatibility fixture\"}}}}\n",
+            // Serialized rather than hand-quoted: a path carries backslashes, and one of them
+            // escaped wrongly is a line Codex silently skips.
+            var meta = JsonSerializer.Serialize(new
+            {
+                timestamp = written,
+                type = "session_meta",
+                payload = new
+                {
+                    id = threadId,
+                    session_id = threadId,
+                    timestamp = written,
+                    cwd = fixtureRoot,
+                    originator = "codex_history_sync",
+                    cli_version = CliVersion.Current.ToString()
+                }
+            });
+            var message = JsonSerializer.Serialize(new
+            {
+                timestamp = written,
+                type = "event_msg",
+                payload = new { type = "user_message", message = "agent-sync compatibility fixture" }
+            });
+            await File.WriteAllTextAsync(fixture, meta + "\n" + message + "\n",
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var result = await compatibilityProbe(fixture, cancellationToken).ConfigureAwait(false);
             if (result.IsCompatible)

@@ -205,6 +205,11 @@ public sealed class CliServiceTests
                 Assert.True(Guid.TryParse(Path.GetFileNameWithoutExtension(fixture)[^36..], out _),
                     $"{fixture} does not end in a thread id.");
                 Assert.Contains("session_meta", text);
+                // cwd, originator and cli_version are each required: without any one of them no
+                // Codex we measured lists the thread.
+                Assert.Contains("cwd", text, StringComparison.Ordinal);
+                Assert.Contains("originator", text, StringComparison.Ordinal);
+                Assert.Contains("cli_version", text, StringComparison.Ordinal);
                 Assert.Contains("\"type\":\"user_message\"", text);
                 return new CompatibilityResult(true, "test", "compatible");
             });
