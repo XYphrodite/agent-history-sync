@@ -489,12 +489,27 @@ public sealed class SpectreSessionViewerView : ISessionViewerView
     /// </summary>
     private IReadOnlyList<string> DescriptionLines(SessionViewerState? state)
     {
-        if (state?.SelectedSession?.Annotation?.Description is not { } description ||
-            string.IsNullOrWhiteSpace(description))
-            return [];
+        if (state?.SelectedSession is not { Annotation: { } annotation } session) return [];
 
-        var text = (state.Content.AnnotationIsStale ? "(stale) " : string.Empty) + description.Trim();
-        return Wrap(text, Math.Max(20, ContentWidth - 2), 2);
+        // When the agent named the session, its name keeps the row and this line is the only
+        // place our own title is visible at all. When our title is already the row, repeating it
+        // here would say the same thing twice.
+        var ownTitle = string.Equals(session.Title, annotation.Title, StringComparison.Ordinal)
+            ? null
+            : annotation.Title.Trim();
+        var description = string.IsNullOrWhiteSpace(annotation.Description)
+            ? null
+            : annotation.Description.Trim();
+
+        var text = ownTitle is null
+            ? description
+            : description is null ? ownTitle : ownTitle + " - " + description;
+        if (string.IsNullOrWhiteSpace(text)) return [];
+
+        return Wrap(
+            (state.Content.AnnotationIsStale ? "(stale) " : string.Empty) + text,
+            Math.Max(20, ContentWidth - 2),
+            2);
     }
 
     private static IReadOnlyList<string> Wrap(string text, int width, int maximumLines)
