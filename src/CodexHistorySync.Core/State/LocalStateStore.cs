@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodexHistorySync.Core.IO;
 
 namespace CodexHistorySync.Core.State;
 
@@ -109,9 +110,7 @@ public sealed class LocalStateStore
 
     private static string ValidateRepositoryId(string repositoryId)
     {
-        if (string.IsNullOrWhiteSpace(repositoryId) ||
-            repositoryId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
-            repositoryId is "." or "..")
+        if (!SafeNameComponent.IsValid(repositoryId))
         {
             throw new ArgumentException("Repository ID is invalid.", nameof(repositoryId));
         }

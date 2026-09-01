@@ -8,6 +8,8 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 
 ## English
 
+> **Upgrading with more than one machine:** update **every** machine before the first `push` that carries a session annotation - a title or description of your own. `ObjectKind.SessionAnnotations` is new in the encrypted index and an older build rejects the whole index when it meets it. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-annotation-push).
+
 > **Upgrading from 0.5.x with more than one machine:** update **every** machine before the first `push` that carries a Claude Code session. An older build rejects the whole encrypted index when it meets the new object kind, which breaks `pull` there entirely — not just for Claude. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-claude-push).
 
 ### What it syncs
@@ -18,6 +20,8 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 | **Grok CLI** | `%USERPROFILE%\.grok\sessions` | Per-session package: `chat_history` + `summary` (no `terminal/` logs) |
 | **Claude Code** | `%USERPROFILE%\.claude\projects` | One transcript JSONL per session (nothing from `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
 | **Continue** | `%USERPROFILE%\.continue\sessions` | One session JSON plus its entry in the shared `sessions.json` (nothing from `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
+
+Beside the sessions themselves, `agent-sync` synchronizes the **titles and descriptions you give them** in `--sessions`: one small encrypted object per named session, kept in `%LOCALAPPDATA%\CodexHistorySync\annotations` and never written into an agent home.
 
 Each successful publish rewrites `main` to a **single orphan commit** (snapshot store, not append-only history). Large tool outputs, compaction snapshots, and images are stripped or truncated before encrypt/upload. Local agent homes on disk are **not** modified.
 

@@ -49,12 +49,17 @@ internal sealed class CodexSessionCatalogSource(CodexPaths paths, ISessionCatalo
         var rows = collected.Where(result => result is not null).Select(result => result!).Select(result =>
         {
             var metadata = result.Metadata;
+            var indexTitle = titles.GetValueOrDefault(metadata.SessionId);
+            var chosenTitle = indexTitle ?? metadata.Title;
             return new SessionCatalogCandidate(
                 metadata.SessionId,
                 result.NativePath,
-                DisplayTitle(titles.GetValueOrDefault(metadata.SessionId) ?? metadata.Title, metadata.SessionId),
+                DisplayTitle(chosenTitle, metadata.SessionId),
                 metadata.LastModifiedAt ?? LastWriteTime(result.NativePath),
-                metadata.IsReadable);
+                metadata.IsReadable,
+                NormalizeTitle(chosenTitle) is null ? ManagedTitleSource.SessionId
+                    : indexTitle is not null || metadata.TitleIsOfficial ? ManagedTitleSource.Official
+                    : ManagedTitleSource.Fallback);
         }).ToArray();
 
         var duplicates = rows.GroupBy(row => row.SessionId, StringComparer.OrdinalIgnoreCase)
@@ -149,7 +154,8 @@ internal sealed class CodexSessionCatalogSource(CodexPaths paths, ISessionCatalo
                 catch (JsonException) { readable = false; }
             }
             return IsSafeSessionId(sessionId)
-                ? new Metadata(sessionId!, string.IsNullOrWhiteSpace(title) ? preview : title, modified, readable)
+                ? new Metadata(sessionId!, string.IsNullOrWhiteSpace(title) ? preview : title, modified, readable,
+                    !string.IsNullOrWhiteSpace(title))
                 : null;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -218,6 +224,11 @@ internal sealed class CodexSessionCatalogSource(CodexPaths paths, ISessionCatalo
             if (element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(value.GetString(), out var timestamp) && (latest is null || timestamp > latest)) latest = timestamp;
     }
 
-    private sealed record Metadata(string SessionId, string? Title, DateTimeOffset? LastModifiedAt, bool IsReadable);
+    private sealed record Metadata(
+        string SessionId,
+        string? Title,
+        DateTimeOffset? LastModifiedAt,
+        bool IsReadable,
+        bool TitleIsOfficial = false);
     private sealed record CandidateResult(Metadata Metadata, string NativePath);
 }

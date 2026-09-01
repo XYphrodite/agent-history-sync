@@ -2,9 +2,11 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
@@ -82,6 +84,61 @@ public sealed class TwoDeviceSyncTests : IDisposable
         Assert.DoesNotContain("subagent only", ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task AnAnnotationReachesTheOtherDeviceAndIsNeverStoredInPlaintext()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string titleMarker = "QR unlock on the club machines";
+        const string descriptionMarker = "description never stored remotely";
+        var annotated = new SessionAnnotationKey(ManagedAgent.Claude, "40000000-0000-0000-0000-000000000004");
+        await first.Annotations.SaveAsync(annotated, new SessionAnnotation(
+            titleMarker, descriptionMarker, SessionAnnotationSource.Generated, "digest-hash", "qwen3:8b",
+            new DateTimeOffset(2026, 9, 1, 12, 0, 0, TimeSpan.Zero)), CancellationToken.None);
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        var arrived = Assert.Single(await second.Annotations.LoadAsync(CancellationToken.None));
+        Assert.Equal(annotated, arrived.Key);
+        Assert.Equal(titleMarker, arrived.Value.Title);
+        Assert.Equal(descriptionMarker, arrived.Value.Description);
+        Assert.Equal(SessionAnnotationSource.Generated, arrived.Value.Source);
+        Assert.Equal("digest-hash", arrived.Value.DigestHash);
+        // A title is conversation-shaped text; it is encrypted like everything else.
+        var remoteText = ReadAllRemoteBytesAsText(remote);
+        Assert.DoesNotContain(titleMarker, remoteText, StringComparison.Ordinal);
+        Assert.DoesNotContain(descriptionMarker, remoteText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARemovedAnnotationIsRemovedFromTheOtherDevice()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        var annotated = new SessionAnnotationKey(ManagedAgent.Codex, "codex-session");
+        await first.Annotations.SaveAsync(annotated, new SessionAnnotation(
+            "Named once", null, SessionAnnotationSource.Edited, "digest-hash", null,
+            new DateTimeOffset(2026, 9, 1, 12, 0, 0, TimeSpan.Zero)), CancellationToken.None);
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Single(await second.Annotations.LoadAsync(CancellationToken.None));
+
+        await first.Annotations.DeleteAsync(annotated, CancellationToken.None);
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Empty(await second.Annotations.LoadAsync(CancellationToken.None));
+    }
+
     private Device CreateDevice(string name, string remote, byte[] key)
     {
         var home = Path.Combine(_root, name, "codex");
@@ -93,18 +150,22 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var claudeHome = Path.Combine(_root, name, "claude");
         var claudePaths = new ClaudePaths(claudeHome, Path.Combine(claudeHome, "projects"));
         Directory.CreateDirectory(claudePaths.Projects);
-        var backups = new BackupStore("repository", local, paths, claudePaths: claudePaths);
+        var annotations = new SessionAnnotationStore(local);
+        var backups = new BackupStore("repository", local, paths, claudePaths: claudePaths,
+            annotationsDirectory: annotations.Directory);
         var engine = new SyncEngine(
             "repository", name, paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
-            new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: claudePaths),
+            new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: claudePaths,
+                annotationsDirectory: annotations.Directory),
             new ConflictStore("repository", local, paths),
             new GitStorageProvider("repository", remote, GitRemoteKind.Local, providerRoot),
             Path.Combine(local, "staging"),
             claudePaths: claudePaths,
             // A real process probe would defer every freshly written transcript (design D3).
-            claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false));
-        return new Device(paths, claudePaths, providerRoot, engine);
+            claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false),
+            annotationsDirectory: annotations.Directory);
+        return new Device(paths, claudePaths, providerRoot, engine, annotations);
     }
 
     private static async Task WriteSessionAsync(string directory, string id, string text)
@@ -154,7 +215,12 @@ public sealed class TwoDeviceSyncTests : IDisposable
         Directory.Delete(_root, recursive: true);
     }
 
-    private sealed record Device(CodexPaths Paths, ClaudePaths ClaudePaths, string ProviderRoot, SyncEngine Engine);
+    private sealed record Device(
+        CodexPaths Paths,
+        ClaudePaths ClaudePaths,
+        string ProviderRoot,
+        SyncEngine Engine,
+        SessionAnnotationStore Annotations);
     private sealed class StoppedCodexDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;

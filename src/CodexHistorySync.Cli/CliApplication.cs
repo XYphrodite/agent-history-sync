@@ -263,6 +263,7 @@ public sealed class CliApplication
             ("codex", [ObjectKind.ActiveSession, ObjectKind.ArchivedSession, ObjectKind.Attachment]),
             ("grok", [ObjectKind.GrokSession]),
             ("claude", [ObjectKind.ClaudeSession]),
+            ("annotations", [ObjectKind.SessionAnnotations]),
         };
         var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
         var accounted = groups.SelectMany(group => group.Kinds).ToHashSet();

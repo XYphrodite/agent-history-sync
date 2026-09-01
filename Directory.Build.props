@@ -5,8 +5,8 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <LangVersion>14.0</LangVersion>
     <Deterministic>true</Deterministic>
-    <Version>0.9.1</Version>
-    <InformationalVersion>0.9.1</InformationalVersion>
+    <Version>0.10.0</Version>
+    <InformationalVersion>0.10.0</InformationalVersion>
     <Authors>XYphrodite</Authors>
     <Company>XYphrodite</Company>
   </PropertyGroup>

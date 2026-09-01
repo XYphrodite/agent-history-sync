@@ -51,7 +51,10 @@ internal sealed class ContinueSessionCatalogSource(ContinuePaths paths, ISession
                 nativePath,
                 string.IsNullOrWhiteSpace(title) ? sessionId : title,
                 io.LastWriteTime(nativePath),
-                metadata.CanRead);
+                metadata.CanRead,
+                // Continue writes one name into the session file and the shared index alike, so a
+                // title here is always the official one and there is no preview to stand in.
+                string.IsNullOrWhiteSpace(title) ? ManagedTitleSource.SessionId : ManagedTitleSource.Official);
         }).ConfigureAwait(false);
 
         return collected.Where(row => row is not null).Select(row => row!).ToArray();
@@ -107,7 +110,7 @@ internal sealed class ContinueSessionCatalogSource(ContinuePaths paths, ISession
         return titles;
     }
 
-    private async Task<(string Title, bool CanRead)> ReadMetadataAsync(
+    private async Task<(string? Title, bool CanRead)> ReadMetadataAsync(
         string nativePath,
         string sessionId,
         SessionCatalogReadLimiter limiter,
@@ -125,12 +128,13 @@ internal sealed class ContinueSessionCatalogSource(ContinuePaths paths, ISession
             // what the opening of the file always shows: a JSON object naming this session.
             var canRead = read.Text.TrimStart().StartsWith('{') &&
                           read.Text.Contains("\"sessionId\"", StringComparison.Ordinal);
-            return (title ?? sessionId, canRead);
+            // The id is not a title: reporting it as one would hide that nothing named this session.
+            return (title, canRead);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                                              or DecoderFallbackException or ArgumentException)
         {
-            return (sessionId, false);
+            return (null, false);
         }
     }
 

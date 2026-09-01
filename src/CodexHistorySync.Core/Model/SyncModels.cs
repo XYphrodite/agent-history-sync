@@ -21,7 +21,16 @@ public enum ObjectKind
     /// Appended after ClaudeSession for the same reason that one was appended last, and carrying
     /// the same obligation: upgrade every machine before the first push that includes one (C3).
     /// </summary>
-    ContinueSession
+    ContinueSession,
+
+    /// <summary>
+    /// One machine's own title and description for one session, stored beside the device state
+    /// and never inside an agent home. Appended after ContinueSession for the same reason that
+    /// one was appended last, and carrying the same obligation: upgrade every machine before the
+    /// first push that includes one. It is also the first kind that is not session history, so
+    /// nothing may import it through the agent-home writer.
+    /// </summary>
+    SessionAnnotations
 }
 
 public readonly record struct LogicalObjectId(string Value);

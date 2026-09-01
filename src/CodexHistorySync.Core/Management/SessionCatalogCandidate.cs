@@ -14,4 +14,5 @@ internal sealed record SessionCatalogCandidate(
     string NativePath,
     string Title,
     DateTimeOffset LastModifiedAt,
-    bool CanRead);
+    bool CanRead,
+    ManagedTitleSource TitleSource = ManagedTitleSource.Official);

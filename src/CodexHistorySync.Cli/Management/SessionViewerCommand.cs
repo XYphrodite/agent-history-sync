@@ -17,6 +17,13 @@ public enum SessionViewerCommand
     FilterList,
     NextMatch,
     Export,
+
+    /// <summary>Ask the configured model to name the open session.</summary>
+    GenerateAnnotation,
+
+    /// <summary>Type a title and a description for the open session.</summary>
+    EditAnnotation,
+
     Delete,
     Refresh,
     Exit

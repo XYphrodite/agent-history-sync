@@ -49,7 +49,10 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
                 result.NativePath,
                 DisplayTitle(metadata.Title, result.SessionId),
                 metadata.LastModifiedAt ?? LastWriteTime(result.NativePath),
-                metadata.CanRead);
+                metadata.CanRead,
+                NormalizeTitle(metadata.Title) is null ? ManagedTitleSource.SessionId
+                    : metadata.TitleIsOfficial ? ManagedTitleSource.Official
+                    : ManagedTitleSource.Fallback);
         }).ToArray();
 
         var duplicates = rows.GroupBy(row => row.SessionId, StringComparer.OrdinalIgnoreCase)
@@ -81,6 +84,8 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
         var summaryPath = Path.Combine(directory, "summary.json");
         var chatPath = Path.Combine(directory, "chat_history.jsonl");
         var title = default(string);
+        // Only summary.json names a Grok session; chat_history.jsonl offers its first user message.
+        var officialTitle = default(string);
         var modified = default(DateTimeOffset?);
         var summaryReadable = false;
         var chatExists = false;
@@ -108,6 +113,7 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
                                 GetString(root, "session_summary"),
                                 GetString(info, "title"),
                                 GetString(root, "title"));
+                            officialTitle = title;
                             AddLatestTimestamp(info, ref modified);
                             AddLatestTimestamp(root, ref modified);
                         }
@@ -140,7 +146,8 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
             summaryReadable = false;
         }
 
-        return new Metadata(title, modified, summaryReadable && chatExists && chatReadable);
+        return new Metadata(title, modified, summaryReadable && chatExists && chatReadable,
+            officialTitle is not null);
     }
 
     private async Task<ChatMetadata> ReadChatMetadataAsync(
@@ -270,7 +277,11 @@ internal sealed class GrokSessionCatalogSource(GrokPaths paths, ISessionCatalogI
                 latest = timestamp;
     }
 
-    private sealed record Metadata(string? Title, DateTimeOffset? LastModifiedAt, bool CanRead);
+    private sealed record Metadata(
+        string? Title,
+        DateTimeOffset? LastModifiedAt,
+        bool CanRead,
+        bool TitleIsOfficial = false);
     private sealed record ChatMetadata(string? Title, DateTimeOffset? LastModifiedAt, bool IsReadable);
     private sealed record CandidateResult(string SessionId, string NativePath, Metadata Metadata);
 }

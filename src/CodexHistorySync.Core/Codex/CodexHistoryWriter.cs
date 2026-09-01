@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
@@ -30,6 +31,7 @@ public sealed class CodexHistoryWriter
     private readonly GrokPaths? _grokPaths;
     private readonly ClaudePaths? _claudePaths;
     private readonly ContinuePaths? _continuePaths;
+    private readonly string? _annotationsDirectory;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
     private readonly IAtomicFileSystem _fileSystem;
@@ -38,8 +40,9 @@ public sealed class CodexHistoryWriter
 
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
         IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null,
-        ContinuePaths? continuePaths = null)
+        ContinuePaths? continuePaths = null, string? annotationsDirectory = null)
     {
+        _annotationsDirectory = annotationsDirectory;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _backups = backups ?? throw new ArgumentNullException(nameof(backups));
         _processDetector = processDetector ?? throw new ArgumentNullException(nameof(processDetector));
@@ -52,7 +55,7 @@ public sealed class CodexHistoryWriter
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -64,7 +67,7 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
@@ -77,6 +80,9 @@ public sealed class CodexHistoryWriter
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.ContinueSession)
             return await ImportContinuePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.SessionAnnotations)
+            return await ImportAnnotationAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
 
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -110,7 +116,7 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
@@ -167,6 +173,60 @@ public sealed class CodexHistoryWriter
         catch (IOException)
         {
             return ImportApplyResult.Conflict;
+        }
+    }
+
+    /// <summary>
+    /// Imports one annotation. It is the only import that touches no agent home at all: the
+    /// destination was already pinned to the annotations directory, and the bytes are written
+    /// there as they arrived. Codex is never asked to stand still for it, because nothing an
+    /// agent reads is being changed.
+    /// </summary>
+    private async Task<ImportApplyResult> ImportAnnotationAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var bytes = buffer.ToArray();
+        if (!BackupStore.HashEquals(SessionAnnotationPackage.HashPackage(bytes), incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+
+        if (!SessionAnnotationPackage.TryReadPackage(bytes, out var key, out _))
+            throw new InvalidDataException("The incoming object is not a readable session annotation.");
+        if (!string.Equals(SessionAnnotationPackage.ToLogicalId(key), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Annotation id does not match the logical object id.");
+        // The file name is derived from the annotation, never from the incoming path.
+        if (!string.Equals(SessionAnnotationStore.FileName(key), Path.GetFileName(destination),
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Annotation destination does not match the annotation it carries.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.SessionAnnotations, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var temporary = BackupStore.SiblingTemporaryPath(destination);
+        try
+        {
+            await using (var staged = new MemoryStream(bytes, writable: false))
+            {
+                await _fileSystem.WriteTemporaryAsync(temporary, staged, ct).ConfigureAwait(false);
+            }
+
+            await _fileSystem.ReplaceAsync(temporary, destination, ct).ConfigureAwait(false);
+            var after = await ContentHashAsync(destination, ObjectKind.SessionAnnotations, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("The annotation on disk does not match the authenticated object hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
 
@@ -260,7 +320,7 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
         if (!await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
@@ -275,14 +335,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         await WaitIfRunningAsync(ct).ConfigureAwait(false);
@@ -351,6 +411,19 @@ public sealed class CodexHistoryWriter
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
                                                   or JsonException or DecoderFallbackException or ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        if (kind == ObjectKind.SessionAnnotations)
+        {
+            if (!File.Exists(destination)) return null;
+            try
+            {
+                return SessionAnnotationPackage.HashPackage(await File.ReadAllBytesAsync(destination, ct).ConfigureAwait(false));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 return null;
             }

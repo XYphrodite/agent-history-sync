@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
@@ -88,6 +89,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly ClaudeSessionScanner? _claudeScanner;
     private readonly ContinuePaths? _continuePaths;
     private readonly ContinueSessionScanner? _continueScanner;
+    private readonly string? _annotationsDirectory;
+    private readonly SessionAnnotationScanner? _annotationScanner;
     private readonly byte[] _masterKey;
     private readonly SessionScanner _scanner;
     private readonly RepositoryCrypto _crypto;
@@ -108,17 +111,19 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory,
         GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null, Action<SyncProgress>? progress = null,
         ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null,
-        ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null)
+        ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null,
+        string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
             provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner, progress,
-            claudePaths, claudeScanner, continuePaths, continueScanner) { }
+            claudePaths, claudeScanner, continuePaths, continueScanner, annotationsDirectory, annotationScanner) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
         ConflictStore conflictStore, IStorageProvider provider, string stagingDirectory, ISyncEngineHooks hooks,
         IOperationDirectoryCleaner operationCleaner, GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null,
         Action<SyncProgress>? progress = null, ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null,
-        ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null)
+        ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null,
+        string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -133,6 +138,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _claudeScanner = claudeScanner ?? (claudePaths is null ? null : new ClaudeSessionScanner());
         _continuePaths = continuePaths;
         _continueScanner = continueScanner ?? (continuePaths is null ? null : new ContinueSessionScanner());
+        _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
+        _annotationScanner = annotationScanner ?? (_annotationsDirectory is null ? null : new SessionAnnotationScanner());
         _masterKey = masterKey.ToArray();
         _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
         _crypto = crypto ?? throw new ArgumentNullException(nameof(crypto));
@@ -157,6 +164,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_grokPaths is not null && _grokScanner is not null) extraTasks.Add(_grokScanner.ScanDetailedAsync(_grokPaths, ct));
         if (_claudePaths is not null && _claudeScanner is not null) extraTasks.Add(_claudeScanner.ScanDetailedAsync(_claudePaths, ct));
         if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
+        if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
         if (extraTasks.Count == 0) return await codexTask.ConfigureAwait(false);
 
         await Task.WhenAll(extraTasks.Prepend(codexTask)).ConfigureAwait(false);
@@ -617,6 +625,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         ? currentLocal.SourcePath
                         : kind == ObjectKind.GrokSession
                             ? ResolveGrokDestination(id, plaintext)
+                            : kind == ObjectKind.SessionAnnotations
+                            ? ResolveAnnotationDestination(id, plaintext)
                             : kind == ObjectKind.ClaudeSession
                             ? ResolveClaudeDestination(id, plaintext)
                             : kind == ObjectKind.ContinueSession
@@ -819,6 +829,21 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         }
         else ValidateHistoryPayload(metadata.Kind, plaintext, metadata.ObjectId, ct);
         return plaintext;
+    }
+
+    /// <summary>
+    /// Where one annotation belongs on this machine. The path is built from the annotation and
+    /// the configured directory, never from anything the incoming object carries.
+    /// </summary>
+    private string ResolveAnnotationDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_annotationsDirectory is null)
+            throw new InvalidOperationException("An annotations directory is not configured.");
+        if (!SessionAnnotationPackage.TryReadPackage(plaintext, out var key, out _))
+            throw new InvalidDataException("The conflict payload is not a readable session annotation.");
+        if (!string.Equals(SessionAnnotationPackage.ToLogicalId(key), id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Annotation payload id does not match the logical object id.");
+        return SessionAnnotationPackage.DestinationPath(_annotationsDirectory, key);
     }
 
     private string ResolveClaudeDestination(LogicalObjectId id, byte[] plaintext)
@@ -1181,6 +1206,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             else if (existing is not null)
                 path = existing.SourcePath;
         }
+        else if (version.Kind == ObjectKind.SessionAnnotations)
+        {
+            path = ResolveAnnotationDestination(action.ObjectId, plaintext);
+            // A kind change is impossible here: an annotation id can name nothing else.
+            if (existing is not null && existing.Kind == ObjectKind.SessionAnnotations) path = existing.SourcePath;
+        }
         else if (version.Kind == ObjectKind.ClaudeSession)
         {
             if (_claudePaths is null) throw new InvalidOperationException("Claude paths are not configured.");
@@ -1230,6 +1261,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 ObjectKind.GrokSession => ".grokpkg",
                 ObjectKind.ClaudeSession => ".claudepkg",
                 ObjectKind.ContinueSession => ".continuepkg",
+                ObjectKind.SessionAnnotations => ".annotation.json",
                 _ => ".jsonl"
             });
         await using (var output = new FileStream(stagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920,
@@ -1273,6 +1305,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             var continuePackage = ContinueSessionPackage.Parse(bytes);
             if (!string.Equals(ContinueSessionPackage.ToLogicalId(continuePackage.SessionId), expectedId.Value, StringComparison.Ordinal))
                 throw new InvalidDataException("Continue session package id does not match its logical object ID.");
+            return;
+        }
+
+        if (kind == ObjectKind.SessionAnnotations)
+        {
+            if (!SessionAnnotationPackage.TryReadPackage(bytes, out var annotationKey, out _))
+                throw new InvalidDataException("The object is not a readable session annotation.");
+            if (!string.Equals(SessionAnnotationPackage.ToLogicalId(annotationKey), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Session annotation id does not match its logical object ID.");
             return;
         }
 
@@ -1347,6 +1388,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 : null;
             plaintext = ContinueSessionPackage.BuildFromFile(sourcePath, index);
         }
+        else if (kind == ObjectKind.SessionAnnotations)
+            // Already canonical on disk: the bytes the store wrote are the bytes that travel.
+            plaintext = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
         else if (kind == ObjectKind.ClaudeSession) plaintext = ClaudeSessionPackage.BuildFromFile(sourcePath);
         else if (kind == ObjectKind.GrokSession)
         {

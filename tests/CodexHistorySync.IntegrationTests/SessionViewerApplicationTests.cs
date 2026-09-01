@@ -1,4 +1,5 @@
 using CodexHistorySync.Cli.Management;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Management;
 
@@ -184,18 +185,210 @@ public sealed class SessionViewerApplicationTests
         Assert.Empty(view.RenderedStates);
     }
 
+    [Fact]
+    public async Task Naming_a_session_stores_what_the_model_answered()
+    {
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit);
+        var annotations = new RecordingAnnotations();
+        var suggester = new ScriptedSuggester
+        {
+            Draft = new SessionAnnotationDraft("Event log stopped", "It came back once the service did.", "qwen3:8b")
+        };
+
+        await Run(view, new RecordingReader(), annotations: annotations, suggester: suggester);
+
+        var saved = Assert.Single(annotations.Saved);
+        Assert.Equal(new SessionAnnotationKey(ManagedAgent.Codex, "newest"), saved.Key);
+        Assert.Equal("Event log stopped", saved.Value.Title);
+        Assert.Equal("It came back once the service did.", saved.Value.Description);
+        Assert.Equal(SessionAnnotationSource.Generated, saved.Value.Source);
+        Assert.Equal("qwen3:8b", saved.Value.Model);
+        Assert.Equal(SessionDigest.Build(RecordingReader.Conversation("newest")).Hash, saved.Value.DigestHash);
+    }
+
+    [Fact]
+    public async Task Naming_sends_the_digest_of_the_open_session()
+    {
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit);
+        var suggester = new ScriptedSuggester { Draft = new SessionAnnotationDraft("T", "D", "m") };
+
+        await Run(view, new RecordingReader(), annotations: new RecordingAnnotations(), suggester: suggester);
+
+        Assert.Equal(1, suggester.Calls);
+        Assert.Contains("question for newest", suggester.LastDigest!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Naming_says_so_when_titling_is_not_configured()
+    {
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit);
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), annotations: annotations,
+            rejection: "'8.8.8.8' is a public address.");
+
+        Assert.Empty(annotations.Saved);
+        var message = Assert.Single(view.Messages, entry => entry.IsError);
+        Assert.Contains("not configured", message.Message, StringComparison.Ordinal);
+        Assert.Contains("8.8.8.8", message.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Naming_reports_an_endpoint_that_answered_nothing()
+    {
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit);
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), annotations: annotations,
+            suggester: new ScriptedSuggester { Draft = null });
+
+        Assert.Empty(annotations.Saved);
+        Assert.Contains(view.Messages, entry => entry.IsError);
+    }
+
+    [Fact]
+    public async Task Naming_asks_before_it_replaces_a_title_that_was_typed_by_hand()
+    {
+        var catalog = new MutableCatalog(SnapshotAnnotated(new SessionAnnotation(
+            "Typed by hand", "Mine.", SessionAnnotationSource.Edited, "hash", null, DateTimeOffset.UnixEpoch)));
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit);
+        view.AnnotationOverwrites.Enqueue(false);
+        var annotations = new RecordingAnnotations();
+        var suggester = new ScriptedSuggester { Draft = new SessionAnnotationDraft("T", "D", "m") };
+
+        await Run(view, new RecordingReader(), catalog: catalog, annotations: annotations, suggester: suggester);
+
+        Assert.Empty(annotations.Saved);
+        Assert.Equal(0, suggester.Calls);
+    }
+
+    [Fact]
+    public async Task Naming_replaces_a_generated_title_without_asking()
+    {
+        var catalog = new MutableCatalog(SnapshotAnnotated(new SessionAnnotation(
+            "Named by the model", "Its own.", SessionAnnotationSource.Generated, "hash", "m", DateTimeOffset.UnixEpoch)));
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit);
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), catalog: catalog, annotations: annotations,
+            suggester: new ScriptedSuggester { Draft = new SessionAnnotationDraft("Newer", "D", "m") });
+
+        Assert.Equal("Newer", Assert.Single(annotations.Saved).Value.Title);
+        Assert.Empty(view.AnnotationOverwrites);
+    }
+
+    [Fact]
+    public async Task Naming_is_abandoned_when_a_keystroke_is_already_waiting()
+    {
+        // The screen stays the user's: a model that thinks for half a minute never holds a key.
+        var view = new ScriptedView(SessionViewerCommand.GenerateAnnotation, SessionViewerCommand.Exit)
+        {
+            PendingInputTurns = 100
+        };
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), annotations: annotations, suggester: new ScriptedSuggester
+        {
+            Draft = new SessionAnnotationDraft("Too late", "D", "m"),
+            DelayMilliseconds = 30_000
+        });
+
+        Assert.Empty(annotations.Saved);
+    }
+
+    [Fact]
+    public async Task Editing_stores_what_was_typed()
+    {
+        var view = new ScriptedView(SessionViewerCommand.EditAnnotation, SessionViewerCommand.Exit);
+        view.AnnotationEdits.Enqueue(new SessionAnnotationEdit("Typed title", "Typed description"));
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), annotations: annotations);
+
+        var saved = Assert.Single(annotations.Saved);
+        Assert.Equal("Typed title", saved.Value.Title);
+        Assert.Equal("Typed description", saved.Value.Description);
+        Assert.Equal(SessionAnnotationSource.Edited, saved.Value.Source);
+    }
+
+    [Fact]
+    public async Task Editing_needs_no_endpoint()
+    {
+        // Typing a title is not asking a model: it works on a machine with no titling configured.
+        var view = new ScriptedView(SessionViewerCommand.EditAnnotation, SessionViewerCommand.Exit);
+        view.AnnotationEdits.Enqueue(new SessionAnnotationEdit("Typed", null));
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), annotations: annotations, rejection: "no endpoint");
+
+        Assert.Single(annotations.Saved);
+    }
+
+    [Fact]
+    public async Task Abandoning_an_edit_stores_nothing()
+    {
+        var view = new ScriptedView(SessionViewerCommand.EditAnnotation, SessionViewerCommand.Exit);
+        view.AnnotationEdits.Enqueue(null);
+        var annotations = new RecordingAnnotations();
+
+        await Run(view, new RecordingReader(), annotations: annotations);
+
+        Assert.Empty(annotations.Saved);
+    }
+
+    [Fact]
+    public async Task An_annotation_made_from_an_older_conversation_is_reported_as_stale()
+    {
+        var catalog = new MutableCatalog(SnapshotAnnotated(new SessionAnnotation(
+            "Named before the session grew", "d", SessionAnnotationSource.Generated,
+            "a-hash-from-earlier", "m", DateTimeOffset.UnixEpoch)));
+        var view = new ScriptedView(SessionViewerCommand.Exit);
+
+        await Run(view, new RecordingReader(), catalog: catalog);
+
+        Assert.True(view.RenderedStates.Last().Content.AnnotationIsStale);
+    }
+
+    [Fact]
+    public async Task An_annotation_made_from_this_conversation_is_not_stale()
+    {
+        var catalog = new MutableCatalog(SnapshotAnnotated(new SessionAnnotation(
+            "Named just now", "d", SessionAnnotationSource.Generated,
+            SessionDigest.Build(RecordingReader.Conversation("newest")).Hash, "m", DateTimeOffset.UnixEpoch)));
+        var view = new ScriptedView(SessionViewerCommand.Exit);
+
+        await Run(view, new RecordingReader(), catalog: catalog);
+
+        Assert.False(view.RenderedStates.Last().Content.AnnotationIsStale);
+    }
+
     private static Task Run(
         ScriptedView view,
         RecordingReader reader,
         RecordingExporter? exporter = null,
         MutableCatalog? catalog = null,
-        RecordingOperations? operations = null)
+        RecordingOperations? operations = null,
+        RecordingAnnotations? annotations = null,
+        ISessionTitleSuggester? suggester = null,
+        string? rejection = null)
     {
         catalog ??= new MutableCatalog(Snapshot());
         return new SessionViewerApplication(
             catalog, reader, exporter ?? new RecordingExporter(),
-            operations ?? new RecordingOperations(catalog), view).RunAsync(CancellationToken.None);
+            operations ?? new RecordingOperations(catalog), view,
+            annotations, suggester, rejection).RunAsync(CancellationToken.None);
     }
+
+    private static SessionCatalogSnapshot SnapshotAnnotated(SessionAnnotation annotation) => new(
+        [
+            Session(ManagedAgent.Codex, "newest", 30) with
+            {
+                TitleSource = ManagedTitleSource.Fallback, Annotation = annotation
+            },
+            Session(ManagedAgent.Codex, "middle", 20)
+        ],
+        [Session(ManagedAgent.Grok, "oldest", 10)],
+        []) { ConfiguredAgents = ManagedAgents.All };
 
     private static SessionCatalogSnapshot Snapshot(bool activeNewest = false) => new(
         [Session(ManagedAgent.Codex, "newest", 30, activeNewest), Session(ManagedAgent.Codex, "middle", 20)],
@@ -240,6 +433,18 @@ public sealed class SessionViewerApplicationTests
         public bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken) =>
             DeleteConfirmations.Dequeue();
 
+        public Queue<SessionAnnotationEdit?> AnnotationEdits { get; } = new();
+
+        public Queue<bool> AnnotationOverwrites { get; } = new();
+
+        public SessionAnnotationEdit? ReadAnnotation(
+            ManagedSession session,
+            SessionAnnotation? current,
+            CancellationToken cancellationToken) => AnnotationEdits.Dequeue();
+
+        public bool ConfirmAnnotationOverwrite(ManagedSession session, CancellationToken cancellationToken) =>
+            AnnotationOverwrites.Dequeue();
+
         public void ShowMessage(string message, bool isError) => Messages.Add((message, isError));
     }
 
@@ -252,13 +457,65 @@ public sealed class SessionViewerApplicationTests
         {
             Read.Add(session);
             if (FailFor == session.SessionId) throw new InvalidDataException("broken");
-            return Task.FromResult(new PortableConversation(
-                ConversationAgent.Codex, session.SessionId, "title " + session.SessionId, @"C:\Repos\Demo",
-                DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch,
-                [
-                    new PortableTurn(ConversationRole.User, "question for " + session.SessionId),
-                    new PortableTurn(ConversationRole.Assistant, "answer for " + session.SessionId)
-                ]));
+            return Task.FromResult(Conversation(session.SessionId));
+        }
+
+        public static PortableConversation Conversation(string sessionId) => new(
+            ConversationAgent.Codex, sessionId, "title " + sessionId, @"C:\Repos\Demo",
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch,
+            [
+                new PortableTurn(ConversationRole.User, "question for " + sessionId),
+                new PortableTurn(ConversationRole.Assistant, "answer for " + sessionId)
+            ]);
+    }
+
+    private sealed class RecordingAnnotations : ISessionAnnotationStore
+    {
+        public Dictionary<SessionAnnotationKey, SessionAnnotation> Saved { get; } = [];
+
+        public Task<IReadOnlyDictionary<SessionAnnotationKey, SessionAnnotation>> LoadAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<SessionAnnotationKey, SessionAnnotation>>(Saved);
+
+        public Task SaveAsync(
+            SessionAnnotationKey key,
+            SessionAnnotation annotation,
+            CancellationToken cancellationToken)
+        {
+            Saved[key] = annotation;
+            return Task.CompletedTask;
+        }
+
+        public List<SessionAnnotationKey> Deleted { get; } = [];
+
+        public Task DeleteAsync(SessionAnnotationKey key, CancellationToken cancellationToken)
+        {
+            Deleted.Add(key);
+            Saved.Remove(key);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ScriptedSuggester : ISessionTitleSuggester
+    {
+        public bool IsConfigured => true;
+
+        public SessionAnnotationDraft? Draft { get; init; }
+
+        public int DelayMilliseconds { get; init; }
+
+        public int Calls { get; private set; }
+
+        public string? LastDigest { get; private set; }
+
+        public async Task<SessionAnnotationDraft?> SuggestAsync(
+            SessionDigestResult digest,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            LastDigest = digest.Text;
+            if (DelayMilliseconds > 0) await Task.Delay(DelayMilliseconds, cancellationToken);
+            return Draft;
         }
     }
 

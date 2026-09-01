@@ -5,6 +5,7 @@ using System.Security;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Cli.Management;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Continue;
@@ -109,6 +110,12 @@ public static class CliComposition
         var continuePaths = ContinuePaths.TryResolve();
         var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
         var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
+        // Only the viewer wears this machine's own titles; --manage stays exactly as it was.
+        var annotationStore = new SessionAnnotationStore();
+        var annotated = new AnnotatedSessionCatalog(catalog, annotationStore);
+        // No endpoint configured means no suggester at all: the key says so and nothing is sent.
+        var titling = SessionTitleConfiguration.Load();
+        var suggester = titling.IsConfigured ? new OllamaSessionTitleSuggester(titling.Options) : null;
         // The viewer never copies, so no conversation writers are composed for it (design D6).
         var operations = new LocalSessionOperations(
             codexPaths,
@@ -124,7 +131,8 @@ public static class CliComposition
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionViewerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
         return new DefaultSessionViewerRunner(new SessionViewerApplication(
-            catalog, new SessionContentReader(), new SessionExporter(), operations, view));
+            annotated, new SessionContentReader(), new SessionExporter(), operations, view,
+            annotationStore, suggester, titling.Rejection));
     }
 
     private static ISessionManagerRunner CreateSessionManagerRunner()
@@ -925,12 +933,13 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var continuePaths = ContinuePaths.TryResolve(continueHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
+        var annotationsDirectory = new SessionAnnotationStore(localAppData).Directory;
         var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths,
-            claudePaths: claudePaths, continuePaths: continuePaths);
+            claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
         var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths,
-            claudePaths: claudePaths, continuePaths: continuePaths);
+            claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
             Path.Combine(localAppData, "CodexHistorySync", "repositories"),
@@ -939,7 +948,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
         var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
             configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
-            grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths);
+            grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths,
+            annotationsDirectory: annotationsDirectory);
         return new Components(paths, scanner, conflicts, engine);
     }
 

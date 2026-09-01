@@ -1,6 +1,10 @@
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Management;
 
 namespace CodexHistorySync.Cli.Management;
+
+/// <summary>A title and a description as they were typed, before anything validates them.</summary>
+public sealed record SessionAnnotationEdit(string Title, string? Description);
 
 public interface ISessionViewerView
 {
@@ -12,6 +16,18 @@ public interface ISessionViewerView
     /// <summary>Reads the list's title filter, live, the same way the find prompt reads its query.</summary>
     string ReadListFilter(SessionViewerState state, CancellationToken cancellationToken);
     bool ConfirmLocalDelete(ManagedSession session, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads a title and then a description, seeded with what is already there. Null means the
+    /// edit was abandoned, and so does an empty title.
+    /// </summary>
+    SessionAnnotationEdit? ReadAnnotation(
+        ManagedSession session,
+        SessionAnnotation? current,
+        CancellationToken cancellationToken);
+
+    /// <summary>Asked only before a title someone typed by hand would be replaced.</summary>
+    bool ConfirmAnnotationOverwrite(ManagedSession session, CancellationToken cancellationToken);
     void ShowMessage(string message, bool isError);
 
     /// <summary>Rows the content pane can show, so the state clamps scrolling to what fits.</summary>

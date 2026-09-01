@@ -2,6 +2,22 @@ namespace CodexHistorySync.Core.Management;
 
 public enum ManagedAgent { Codex, Grok, Claude, Continue }
 
+/// <summary>
+/// Where <see cref="ManagedSession.Title"/> came from. An annotation may stand in for a title the
+/// agent did not give - a first-message preview or the bare id - but never for one it did.
+/// </summary>
+public enum ManagedTitleSource
+{
+    /// <summary>The agent named the session itself.</summary>
+    Official,
+
+    /// <summary>Nothing named it, so its first meaningful user message stands in.</summary>
+    Fallback,
+
+    /// <summary>Nothing named it and nothing could stand in, so the row shows the id.</summary>
+    SessionId
+}
+
 public sealed record ManagedSession(
     ManagedAgent Agent,
     string SessionId,
@@ -9,7 +25,10 @@ public sealed record ManagedSession(
     string Title,
     DateTimeOffset LastModifiedAt,
     bool IsActive,
-    bool CanRead);
+    bool CanRead,
+    ManagedTitleSource TitleSource = ManagedTitleSource.Official,
+    // This machine's own title and description, when it has one for this session.
+    Annotations.SessionAnnotation? Annotation = null);
 
 public sealed record SessionCatalogSnapshot(
     IReadOnlyList<ManagedSession> Codex,
