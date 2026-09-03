@@ -198,10 +198,22 @@ public static class SessionJsonlNormalizer
         }
     }
 
+    /// <summary>
+    /// Truncation has to be a fixed point. The normalized form is what travels, and an imported
+    /// copy is normalized again the moment the scanner reads it back - so a marker appended past
+    /// the limit made the second pass cut the marker itself and rewrite the count. Every imported
+    /// session then hashed differently from the object it came from, and stayed in conflict for
+    /// good. The result therefore has to fit inside the limit, marker included.
+    /// </summary>
     private static string Truncate(string text)
     {
-        var keep = Math.Min(MaximumRetainedStringChars, text.Length);
-        return text[..keep] + $"[...truncated {text.Length - keep} chars]";
+        // The count is measured against the limit rather than against what is kept: that makes the
+        // marker's own width knowable before the budget is spent, so the result is exactly the
+        // limit every time. It understates the drop by the marker's length, which is the price of
+        // a stable canonical form and is invisible at this scale.
+        var marker = $"[...truncated {text.Length - MaximumRetainedStringChars} chars]";
+        var keep = Math.Max(0, MaximumRetainedStringChars - marker.Length);
+        return text[..keep] + marker;
     }
 
     private static bool IsImageBlock(JsonObject obj)
