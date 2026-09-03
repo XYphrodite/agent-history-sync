@@ -1373,12 +1373,16 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             throw new InvalidDataException("Session JSONL ID does not match its logical object ID.");
     }
 
-    private async Task<IndexEntry> StageEncryptedObjectAsync(LogicalObjectId id, ObjectKind kind, ContentHash hash,
-        bool deleted, string? sourcePath, string directory, CancellationToken ct)
+    /// <summary>
+    /// The bytes that represent one local object — the plaintext that travels, and the only thing
+    /// a scanner hash may be compared against. No kind is the raw file: Codex is the normalized
+    /// JSONL, and the other agents are packages assembled from more than the one file on disk.
+    /// Every caller that hashes or encrypts a local object goes through here, because a second
+    /// way of reading the same object is a second answer to "did it change".
+    /// </summary>
+    private async Task<byte[]> BuildPlaintextAsync(ObjectKind kind, string sourcePath, CancellationToken ct)
     {
-        byte[] plaintext;
-        if (sourcePath is null) plaintext = Array.Empty<byte>();
-        else if (kind == ObjectKind.ContinueSession)
+        if (kind == ObjectKind.ContinueSession)
         {
             if (_continuePaths is null) throw new InvalidOperationException("Continue paths are not configured.");
             // The entry belongs to the package, so the shared index is read here rather than at
@@ -1386,23 +1390,32 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             var index = File.Exists(_continuePaths.IndexFilePath)
                 ? await File.ReadAllTextAsync(_continuePaths.IndexFilePath, ct).ConfigureAwait(false)
                 : null;
-            plaintext = ContinueSessionPackage.BuildFromFile(sourcePath, index);
+            return ContinueSessionPackage.BuildFromFile(sourcePath, index);
         }
-        else if (kind == ObjectKind.SessionAnnotations)
+
+        if (kind == ObjectKind.SessionAnnotations)
             // Already canonical on disk: the bytes the store wrote are the bytes that travel.
-            plaintext = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
-        else if (kind == ObjectKind.ClaudeSession) plaintext = ClaudeSessionPackage.BuildFromFile(sourcePath);
-        else if (kind == ObjectKind.GrokSession)
+            return await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
+
+        if (kind == ObjectKind.ClaudeSession) return ClaudeSessionPackage.BuildFromFile(sourcePath);
+
+        if (kind == ObjectKind.GrokSession)
         {
             var sessionDirectory = Path.GetDirectoryName(sourcePath)
                 ?? throw new InvalidDataException("Grok chat_history path has no directory.");
-            plaintext = GrokSessionPackage.BuildFromDirectory(sessionDirectory);
+            return GrokSessionPackage.BuildFromDirectory(sessionDirectory);
         }
-        else
-        {
-            var raw = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
-            plaintext = SessionJsonlNormalizer.Normalize(raw);
-        }
+
+        var raw = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
+        return SessionJsonlNormalizer.Normalize(raw);
+    }
+
+    private async Task<IndexEntry> StageEncryptedObjectAsync(LogicalObjectId id, ObjectKind kind, ContentHash hash,
+        bool deleted, string? sourcePath, string directory, CancellationToken ct)
+    {
+        var plaintext = sourcePath is null
+            ? Array.Empty<byte>()
+            : await BuildPlaintextAsync(kind, sourcePath, ct).ConfigureAwait(false);
         if (!StringComparer.Ordinal.Equals(Sha256(plaintext).Hex, hash.Hex)) throw new InvalidDataException("Local object changed after stable scanning.");
         await using var input = new MemoryStream(plaintext, false);
         await using var output = new MemoryStream();
@@ -1456,7 +1469,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         AuthenticatedSnapshot remote, CancellationToken ct)
     {
         var local = locals.SingleOrDefault(item => item.Id == action.ObjectId);
-        var localBytes = local is null ? Array.Empty<byte>() : await File.ReadAllBytesAsync(local.SourcePath, ct).ConfigureAwait(false);
+        // Built the way the scanner built the hash we are about to check it against, and the way
+        // staging builds the bytes that travel. Reading the raw file here instead compared a plain
+        // SHA-256 with a package hash: it could never match, so every conflict this touched died
+        // as "changed after stable scanning" on a file nobody had changed.
+        var localBytes = local is null
+            ? Array.Empty<byte>()
+            : await BuildPlaintextAsync(local.Kind, local.SourcePath, ct).ConfigureAwait(false);
         if (action.Local is not null && !StringComparer.Ordinal.Equals(Sha256(localBytes).Hex, action.Local.PlaintextHash.Hex))
             throw new InvalidDataException("Local conflict version changed after stable scanning.");
         await using var localPlaintext = new MemoryStream(localBytes, false);

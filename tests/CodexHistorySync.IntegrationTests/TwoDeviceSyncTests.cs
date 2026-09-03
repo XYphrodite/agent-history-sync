@@ -116,6 +116,40 @@ public sealed class TwoDeviceSyncTests : IDisposable
     }
 
     [Fact]
+    public async Task TwoDevicesEditingOneClaudeSessionRecordAConflictRatherThanFailing()
+    {
+        // A conflict has to be preparable for every kind, and Claude is the case that proves it:
+        // its object hash covers an assembled package, not the transcript on disk. Comparing the
+        // raw file against that hash could never match, so preparing this conflict threw
+        // "Local conflict version changed after stable scanning" about a file nobody had touched -
+        // and because that throw landed mid-apply, it also left an unrecoverable mutation journal.
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string project = "c--Repos-Demo";
+        const string sessionId = "50000000-0000-0000-0000-000000000005";
+
+        await WriteClaudeSessionAsync(first.ClaudePaths, project, sessionId, "written on the first device");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        // The same session id, never synchronized here, with different content: local and remote
+        // both claim it and no baseline reconciles them.
+        await WriteClaudeSessionAsync(second.ClaudePaths, project, sessionId, "written on the second device");
+        var result = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, result.Conflicts);
+        // The local side of the record must be the package, the same bytes staging would have
+        // sent - storing the raw transcript here would export the wrong side on resolution.
+        var conflict = Assert.Single(await second.Conflicts.ListAsync(CancellationToken.None));
+        var expected = ClaudeSessionPackage.HashPackage(ClaudeSessionPackage.BuildFromFile(
+            Path.Combine(second.ClaudePaths.Projects, project, sessionId + ".jsonl")));
+        Assert.Equal(expected.Hex, conflict.Provenance.LocalHash.Hex);
+    }
+
+    [Fact]
     public async Task ARemovedAnnotationIsRemovedFromTheOtherDevice()
     {
         Directory.CreateDirectory(_root);
@@ -151,6 +185,7 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var claudePaths = new ClaudePaths(claudeHome, Path.Combine(claudeHome, "projects"));
         Directory.CreateDirectory(claudePaths.Projects);
         var annotations = new SessionAnnotationStore(local);
+        var conflicts = new ConflictStore("repository", local, paths);
         var backups = new BackupStore("repository", local, paths, claudePaths: claudePaths,
             annotationsDirectory: annotations.Directory);
         var engine = new SyncEngine(
@@ -158,14 +193,14 @@ public sealed class TwoDeviceSyncTests : IDisposable
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
             new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: claudePaths,
                 annotationsDirectory: annotations.Directory),
-            new ConflictStore("repository", local, paths),
+            conflicts,
             new GitStorageProvider("repository", remote, GitRemoteKind.Local, providerRoot),
             Path.Combine(local, "staging"),
             claudePaths: claudePaths,
             // A real process probe would defer every freshly written transcript (design D3).
             claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false),
             annotationsDirectory: annotations.Directory);
-        return new Device(paths, claudePaths, providerRoot, engine, annotations);
+        return new Device(paths, claudePaths, providerRoot, engine, annotations, conflicts);
     }
 
     private static async Task WriteSessionAsync(string directory, string id, string text)
@@ -220,7 +255,8 @@ public sealed class TwoDeviceSyncTests : IDisposable
         ClaudePaths ClaudePaths,
         string ProviderRoot,
         SyncEngine Engine,
-        SessionAnnotationStore Annotations);
+        SessionAnnotationStore Annotations,
+        ConflictStore Conflicts);
     private sealed class StoppedCodexDetector : ICodexProcessDetector
     {
         public bool IsRunning() => false;
