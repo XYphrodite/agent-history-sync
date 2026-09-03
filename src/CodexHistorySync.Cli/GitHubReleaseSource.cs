@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -47,7 +48,7 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
 
         using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidDataException("The release could not be read from GitHub.");
+            throw Refused("The release could not be read from GitHub", response);
 
         await using var body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var document = await JsonDocument.ParseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -70,7 +71,7 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
         using var response = await client
             .GetAsync(address, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidDataException("The release asset could not be downloaded.");
+            throw Refused("The release asset could not be downloaded", response);
 
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         await using var destination = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
@@ -83,7 +84,7 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
 
         using var response = await client.GetAsync(address, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidDataException("The release asset could not be downloaded.");
+            throw Refused("The release checksum could not be downloaded", response);
 
         var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         if (content.Length > MaximumTextAsset)
@@ -92,6 +93,74 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
     }
 
     public void Dispose() => client.Dispose();
+
+    private static InvalidDataException Refused(string subject, HttpResponseMessage response) =>
+        new(DescribeFailure(subject, response.StatusCode, response.Headers, DateTimeOffset.Now));
+
+    /// <summary>
+    /// Says why GitHub refused, because the cures are not the same. A used-up rate limit is cured
+    /// by waiting and nothing else, and the wait is short and knowable; a missing release is cured
+    /// by publishing one; a rename or a repository turned private needs a new build. Reporting all
+    /// of them as "the release could not be read from GitHub" sent the reader looking at the
+    /// release, which was published and intact, while the answer sat in the response headers.
+    /// </summary>
+    internal static string DescribeFailure(string subject, HttpStatusCode status,
+        HttpResponseHeaders headers, DateTimeOffset now)
+    {
+        if (IsRateLimited(status, headers))
+        {
+            if (ResetsAt(headers, now) is not { } reset)
+                return $"{subject}: GitHub's rate limit for unauthenticated requests is used up. " +
+                    "It refills within the hour; try again then.";
+
+            // The remaining wait is what the operator acts on. The clock time is there because a
+            // wait measured in minutes is worth checking against, and it is shown in local time
+            // because that is the clock the person reading it is looking at.
+            var wait = reset - now;
+            var again = wait <= TimeSpan.FromMinutes(1)
+                ? "under a minute from now"
+                : $"{(int)Math.Ceiling(wait.TotalMinutes)} minutes from now";
+            return $"{subject}: GitHub's rate limit for unauthenticated requests is used up. " +
+                $"It resets at {reset.ToLocalTime():HH:mm} local time, {again}; try again then. " +
+                "The limit is 60 requests an hour and counts every machine sharing this address.";
+        }
+
+        return status switch
+        {
+            HttpStatusCode.NotFound =>
+                $"{subject}: GitHub has nothing published at that address. Either no release " +
+                "carries that version, or the repository has been renamed or made private.",
+            HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized =>
+                $"{subject}: GitHub refused the request ({(int)status} {status}).",
+            _ => $"{subject}: GitHub answered {(int)status} {status}.",
+        };
+    }
+
+    private static bool IsRateLimited(HttpStatusCode status, HttpResponseHeaders headers)
+    {
+        // A secondary limit answers 429 and carries no budget headers at all, so the status is
+        // enough on its own there. The primary limit answers 403, which GitHub also uses for
+        // refusals that waiting will never fix, so that one is only a rate limit when the budget
+        // it reports is actually spent.
+        if (status == HttpStatusCode.TooManyRequests) return true;
+        return status == HttpStatusCode.Forbidden &&
+            headers.TryGetValues("X-RateLimit-Remaining", out var remaining) &&
+            int.TryParse(remaining.FirstOrDefault(), out var left) && left == 0;
+    }
+
+    private static DateTimeOffset? ResetsAt(HttpResponseHeaders headers, DateTimeOffset now)
+    {
+        if (headers.TryGetValues("X-RateLimit-Reset", out var reset) &&
+            long.TryParse(reset.FirstOrDefault(), out var seconds) &&
+            seconds is > 0 and < 253_402_300_800)
+            return DateTimeOffset.FromUnixTimeSeconds(seconds);
+        return headers.RetryAfter switch
+        {
+            { Delta: { } delta } => now + delta,
+            { Date: { } date } => date,
+            _ => null,
+        };
+    }
 
     private static Uri AssetUrl(JsonElement release, string name)
     {
