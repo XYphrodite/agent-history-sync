@@ -57,7 +57,7 @@ public static class GrokChatNormalizer
                 content is not null &&
                 content.Length > MaximumContentChars)
             {
-                obj["content"] = content[..MaximumContentChars] + $"[...truncated {content.Length - MaximumContentChars} chars]";
+                obj["content"] = Truncate(content);
             }
 
             var encoded = Utf8.GetBytes(obj.ToJsonString(CompactJson));
@@ -67,5 +67,21 @@ public static class GrokChatNormalizer
         }
 
         return wrote ? output.ToArray() : Array.Empty<byte>();
+    }
+
+    /// <summary>
+    /// Truncation has to be a fixed point, for the same reason it does in
+    /// <see cref="CodexHistorySync.Core.Codex.SessionJsonlNormalizer"/>. Here the round trip is
+    /// tighter still: <c>GrokSessionPackage.Materialize</c> writes the normalized chat to disk and
+    /// the import reads it straight back through <c>BuildFromDirectory</c>, which normalizes it
+    /// again. With the marker appended past the limit that second pass cut the marker and rewrote
+    /// the count, so the read-back could never match the hash the object was authenticated
+    /// against, and the session was reported as a conflict instead of arriving at all.
+    /// </summary>
+    private static string Truncate(string content)
+    {
+        var marker = $"[...truncated {content.Length - MaximumContentChars} chars]";
+        var keep = Math.Max(0, MaximumContentChars - marker.Length);
+        return content[..keep] + marker;
     }
 }

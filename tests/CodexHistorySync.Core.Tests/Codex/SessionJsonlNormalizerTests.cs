@@ -90,4 +90,21 @@ public sealed class SessionJsonlNormalizerTests
         Assert.DoesNotContain("/9j/", text, StringComparison.Ordinal);
         Assert.DoesNotContain("input_image", text, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Normalize_IsAFixedPointForAlreadyNormalizedContent()
+    {
+        // The scanner normalizes what the importer wrote, so a second pass has to be a no-op.
+        // It was not: the marker sat past the limit, the next pass cut the marker, and the count
+        // changed - which is how 137 of 141 imported sessions became permanent conflicts.
+        var source = Utf8.GetBytes(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"," +
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"" + new string('x', 20_000) + "\"}]}}\n");
+
+        var once = SessionJsonlNormalizer.Normalize(source);
+        var twice = SessionJsonlNormalizer.Normalize(once);
+
+        Assert.Equal(once, twice);
+        Assert.DoesNotContain("truncated 26 chars", Utf8.GetString(twice), StringComparison.Ordinal);
+    }
 }
