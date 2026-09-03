@@ -684,6 +684,13 @@ public sealed class CliTests
         Assert.DoesNotContain("credential", fixture.Console.AllText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(Passphrase, fixture.Console.AllText);
         Assert.DoesNotContain(PromptMarker, fixture.Console.AllText);
+        // The report keeps the raw exception, so it must land under the fixture's own root. Run
+        // with the machine's %LOCALAPPDATA%, this very message overwrote the developer's report.
+        var machineReport = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CodexHistorySync", "logs", "last-failure.log");
+        Assert.DoesNotContain(machineReport, fixture.Console.AllText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(fixture.LocalAppData, fixture.Console.AllText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1084,8 +1091,20 @@ public sealed class CliTests
         public FakeConsole Console { get; } = new();
         public CliApplication Application { get; }
 
-        public Fixture(string? localAppDataDirectory = null) =>
-            Application = new CliApplication(Services, Console, localAppDataDirectory: localAppDataDirectory);
+        /// <summary>
+        /// Where this fixture's application data lives. Never the machine's own: a fixture that
+        /// inherited the real %LOCALAPPDATA% wrote its fake passphrase and credential-bearing
+        /// remote into the developer's last-failure.log, replacing the report of whatever had
+        /// actually failed there. A test writes under its own root or it writes nowhere.
+        /// </summary>
+        public string LocalAppData { get; }
+
+        public Fixture(string? localAppDataDirectory = null)
+        {
+            LocalAppData = localAppDataDirectory ??
+                Path.Combine(AppContext.BaseDirectory, "cli-localappdata", Guid.NewGuid().ToString("N"));
+            Application = new CliApplication(Services, Console, localAppDataDirectory: LocalAppData);
+        }
     }
 
     private sealed class FakeConsole : ICliConsole
