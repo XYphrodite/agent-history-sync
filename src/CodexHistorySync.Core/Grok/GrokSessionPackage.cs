@@ -59,6 +59,15 @@ public static class GrokSessionPackage
             throw new InvalidDataException("Grok session directory name is not a UUID.");
 
         var chat = GrokChatNormalizer.Normalize(File.ReadAllBytes(chatPath));
+        // Refuse to build what this same type will not parse. A chat that normalizes to nothing -
+        // an empty file, or a session closed before the first turn, whose only records are the
+        // system and tool lines the normalizer drops - produced a well-formed package with an
+        // empty chatHistory. Parse rejects that, but only on the machine pulling it, and the
+        // rejection came out of staging as an unhandled InvalidDataException that took the whole
+        // synchronization down. One such session on one machine stopped every other machine from
+        // synchronizing anything at all, until somebody deleted the directory by hand.
+        if (chat.Length == 0)
+            throw new InvalidDataException("Grok session holds no synchronizable chat history.");
         var package = new PackageDto(SchemaVersion, sessionId.ToLowerInvariant(), cwd, Utf8.GetString(chat), summaryText);
         return JsonSerializer.SerializeToUtf8Bytes(package, JsonOptions);
     }

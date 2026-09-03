@@ -115,8 +115,12 @@ public sealed class GrokSessionScanner
             var second = ReadObservation(candidate.ChatPath);
             if (candidate.First != second) return null;
 
+            // A session with nothing left to synchronize throws out of BuildFromDirectory and is
+            // dropped by the catch below, the way the Codex scanner drops one whose normalized
+            // form is empty. The guard that used to stand here tested the length of the serialized
+            // package, which carries the schema version and the id and is therefore never empty,
+            // so it never fired.
             var package = GrokSessionPackage.BuildFromDirectory(candidate.SessionDirectory);
-            if (package.Length == 0) return null;
             var hash = GrokSessionPackage.HashPackage(package);
             var sessionId = Path.GetFileName(Path.TrimEndingDirectorySeparator(candidate.SessionDirectory));
             var logicalId = new LogicalObjectId(GrokSessionPackage.ToLogicalId(sessionId));
