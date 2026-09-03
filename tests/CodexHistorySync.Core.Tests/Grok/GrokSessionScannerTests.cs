@@ -32,6 +32,29 @@ public sealed class GrokSessionScannerTests
         Assert.False(result.IsAbsenceConfirmed(ObjectKind.GrokSession));
     }
 
+    [Fact]
+    public async Task ASessionWithNothingLeftToSynchronizeIsNotScanned()
+    {
+        // The normalizer drops system and tool records, so a session closed before the first turn
+        // normalizes to nothing. The package built from it was still well formed - schema version,
+        // id, cwd, and an empty chatHistory - so it uploaded cleanly and then failed Parse on
+        // every machine that pulled it, out of staging, taking the whole synchronization with it.
+        // One such session withheld the entire repository from every other machine.
+        await using var fixture = new GrokHomeFixture();
+        var live = await fixture.WriteSessionAsync("10000000-0000-0000-0000-000000000001");
+        var emptied = await fixture.WriteSessionAsync("20000000-0000-0000-0000-000000000002");
+        await File.WriteAllTextAsync(emptied, "{\"type\":\"system\",\"content\":\"you are grok\"}\n");
+        var blank = await fixture.WriteSessionAsync("30000000-0000-0000-0000-000000000003");
+        await File.WriteAllTextAsync(blank, string.Empty);
+        var scanner = new GrokSessionScanner(_ => Task.CompletedTask);
+
+        var result = await scanner.ScanDetailedAsync(fixture.Paths, CancellationToken.None);
+
+        Assert.Contains(result.Objects, item => item.SourcePath == Path.GetFullPath(live));
+        Assert.DoesNotContain(result.Objects, item => item.SourcePath == Path.GetFullPath(emptied));
+        Assert.DoesNotContain(result.Objects, item => item.SourcePath == Path.GetFullPath(blank));
+    }
+
     private sealed class GrokHomeFixture : IAsyncDisposable
     {
         private readonly string root = Path.Combine(
