@@ -2,8 +2,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
@@ -1178,6 +1180,46 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task Restart_RecoversAnInterruptedMutationThatTouchedAnAnnotation()
+    {
+        // Recovery runs before anything else, so a journal it refuses to read does not fail one
+        // command - it blocks every command on the machine, permanently. The kind list in
+        // ValidateJournal has to admit everything PrepareAsync is willing to write, and
+        // annotations and Continue sessions were added to the writer without being added there.
+        var key = RandomNumberGenerator.GetBytes(32);
+        var annotations = new SessionAnnotationStore(Path.Combine(_root, "restart-annotation", "local"));
+        var device = CreateDevice("restart-annotation", key, new MemoryProvider(),
+            annotationsDirectory: annotations.Directory);
+        var annotated = new SessionAnnotationKey(ManagedAgent.Codex, "annotated-session");
+        await annotations.SaveAsync(annotated, new SessionAnnotation("Named once", null,
+            SessionAnnotationSource.Edited, "digest-hash", null,
+            new DateTimeOffset(2026, 9, 1, 12, 0, 0, TimeSpan.Zero)), CancellationToken.None);
+        var path = Path.Combine(annotations.Directory, SessionAnnotationStore.FileName(annotated));
+        var before = await File.ReadAllTextAsync(path);
+        var beforeHash = SessionAnnotationPackage.HashPackage(Encoding.UTF8.GetBytes(before));
+        var changed = before.Replace("Named once", "Renamed", StringComparison.Ordinal);
+        var afterHash = SessionAnnotationPackage.HashPackage(Encoding.UTF8.GetBytes(changed));
+        var target = new LocalObject(new LogicalObjectId(SessionAnnotationPackage.ToLogicalId(annotated)),
+            ObjectKind.SessionAnnotations, path, beforeHash, before.Length, DateTimeOffset.UtcNow);
+        var operationDirectory = Path.Combine(device.StagingRoot, "interrupted-annotation");
+        Directory.CreateDirectory(operationDirectory);
+        var interrupted = await HistoryMutationBatch.PrepareAsync(device.Writer, operationDirectory,
+            "interrupted-annotation",
+            [new HistoryMutationPlan(target, ExpectedHistoryState.Present(beforeHash), ExpectedHistoryState.Present(afterHash))],
+            CancellationToken.None);
+        await interrupted.BeginApplyAsync(target.Id, CancellationToken.None);
+        await File.WriteAllTextAsync(path, changed, new UTF8Encoding(false));
+        var restarted = CreateDevice("restart-annotation", key, new OfflineProvider(),
+            annotationsDirectory: annotations.Directory);
+
+        // The offline provider is what must stop this run - reaching it proves recovery finished.
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(path));
+        Assert.False(Directory.Exists(operationDirectory));
+    }
+
+    [Fact]
     public async Task Restart_DoesNotRollbackMutationWhoseBaselineWasAlreadySaved()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -1509,7 +1551,7 @@ public sealed class SyncFailureTests : IDisposable
         IAtomicFileSystem? fileSystem = null, IStateFileReplacer? stateReplacer = null, ISyncEngineHooks? hooks = null,
         IOperationDirectoryCleaner? cleaner = null, Action<SyncProgress>? progress = null,
         GrokPaths? grokPaths = null, SessionScanner? scanner = null, GrokSessionScanner? grokScanner = null,
-        ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null)
+        ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null, string? annotationsDirectory = null)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -1517,17 +1559,19 @@ public sealed class SyncFailureTests : IDisposable
         Directory.CreateDirectory(paths.Sessions);
         var local = Path.Combine(_root, name, "local");
         var state = stateReplacer is null ? new LocalStateStore(local) : new LocalStateStore(local, stateReplacer);
-        var backups = new BackupStore("repository", local, paths, fileSystem, claudePaths: claudePaths);
+        var backups = new BackupStore("repository", local, paths, fileSystem, claudePaths: claudePaths,
+            annotationsDirectory: annotationsDirectory);
         var writer = new CodexHistoryWriter(paths, backups, detector ?? new StoppedDetector(), fileSystem,
-            grokPaths: grokPaths, claudePaths: claudePaths);
+            grokPaths: grokPaths, claudePaths: claudePaths, annotationsDirectory: annotationsDirectory);
         var conflicts = new ConflictStore("repository", local, paths);
         var engine = hooks is null && cleaner is null
             ? new SyncEngine("repository", name, paths, key, scanner ?? new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
                 writer, conflicts, provider, Path.Combine(local, "staging"), grokPaths, grokScanner, progress,
-                claudePaths, claudeScanner)
+                claudePaths, claudeScanner, annotationsDirectory: annotationsDirectory)
             : new SyncEngine("repository", name, paths, key, scanner ?? new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), state,
                 writer, conflicts, provider, Path.Combine(local, "staging"), hooks ?? NoopTestSyncEngineHooks.Instance,
-                cleaner ?? new OperationDirectoryCleaner(), grokPaths, grokScanner, progress, claudePaths, claudeScanner);
+                cleaner ?? new OperationDirectoryCleaner(), grokPaths, grokScanner, progress, claudePaths, claudeScanner,
+                annotationsDirectory: annotationsDirectory);
         return new(paths, state, conflicts, writer, Path.Combine(local, "staging"), engine);
     }
 

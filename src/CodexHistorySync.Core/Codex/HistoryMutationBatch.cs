@@ -159,8 +159,15 @@ internal sealed class HistoryMutationBatch
             if (string.IsNullOrWhiteSpace(entry.Id) || Path.IsPathRooted(entry.Id) || entry.Id.Contains('/') ||
                 entry.Id.Contains('\\') || entry.Id is "." or "..")
                 throw new InvalidDataException("The local mutation journal contains an invalid or duplicate object ID.");
+            // Every kind PrepareAsync is willing to journal has to be readable back, or an
+            // interrupted batch becomes unrecoverable and blocks every later command: recovery
+            // runs before the scan. Continue sessions and annotations were added to the writer
+            // without being added here, and six such entries out of 1073 bricked a node.
+            // The list must stay exactly the kinds EnsureSessionDestination can place: Attachment,
+            // Tombstone and RepositoryIndex have no history destination, so admitting them here
+            // would only trade this error for an ArgumentException one line further down.
             if (entry.Kind is not (ObjectKind.ActiveSession or ObjectKind.ArchivedSession or ObjectKind.GrokSession
-                    or ObjectKind.ClaudeSession) ||
+                    or ObjectKind.ClaudeSession or ObjectKind.ContinueSession or ObjectKind.SessionAnnotations) ||
                 !Enum.IsDefined(entry.Status))
                 throw new InvalidDataException("The local mutation journal contains invalid object metadata.");
             ValidateState(entry.BeforeExists, entry.BeforeHash);
