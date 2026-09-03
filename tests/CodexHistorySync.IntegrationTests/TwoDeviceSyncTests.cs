@@ -173,7 +173,91 @@ public sealed class TwoDeviceSyncTests : IDisposable
         Assert.Empty(await second.Annotations.LoadAsync(CancellationToken.None));
     }
 
-    private Device CreateDevice(string name, string remote, byte[] key)
+    [Fact]
+    public async Task ASessionWhoseAgentHasNoHomeIsDeferredWhileTheRestOfTheRepositoryArrives()
+    {
+        // A machine that never installed Claude Code still has to receive its Codex history.
+        // Staging a Claude session there threw "Claude paths are not configured." out of the
+        // whole run, so one foreign session withheld the entire repository from the node - all
+        // 1073 sessions of it, and the only workaround was to create the directory by hand.
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key, withClaudeHome: false);
+        const string project = "c--Repos-Demo";
+        const string sessionId = "60000000-0000-0000-0000-000000000006";
+
+        await WriteSessionAsync(first.Paths.Sessions, "session-a", "codex text");
+        await WriteClaudeSessionAsync(first.ClaudePaths, project, sessionId, "claude text");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        var result = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, result.SkippedNoAgentHome);
+        Assert.Equal(1, result.Downloaded);
+        Assert.Equal(0, result.Conflicts);
+        Assert.True(File.Exists(Path.Combine(second.Paths.Sessions, "session-a.jsonl")),
+            "a Claude session this machine cannot place withheld the Codex session as well");
+        Assert.False(Directory.Exists(second.ClaudePaths.Projects),
+            "a Claude home was invented on a machine that has none");
+
+        // The deferral must stay out of the baseline. Installing Claude Code later can only bring
+        // the session down if the next run still plans the download it skipped.
+        var again = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, again.SkippedNoAgentHome);
+        Assert.Equal(0, again.Downloaded);
+    }
+
+    [Fact]
+    public async Task LosingAnAgentHomeDoesNotEraseThatAgentsSessionsFromTheRepository()
+    {
+        // An absence can only be read as a deletion when the scan actually looked. A machine with
+        // no home for an agent never scans that kind at all, so every one of its sessions in the
+        // baseline reads as locally deleted, and one run publishes tombstones that erase them on
+        // every other machine.
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string project = "c--Repos-Demo";
+        const string sessionId = "70000000-0000-0000-0000-000000000007";
+        var original = Path.Combine(first.ClaudePaths.Projects, project, sessionId + ".jsonl");
+
+        await WriteClaudeSessionAsync(first.ClaudePaths, project, sessionId, "written before the uninstall");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.True(File.Exists(Path.Combine(second.ClaudePaths.Projects, project, sessionId + ".jsonl")),
+            "the session never reached the second device, so the test proves nothing");
+
+        // Claude Code is uninstalled on the second machine: ClaudePaths.TryResolve finds no home
+        // and returns null, so the engine is built without it. The device state is untouched and
+        // still lists the session.
+        second.Engine.Dispose();
+        Directory.Delete(second.ClaudePaths.Home, recursive: true);
+        var uninstalled = CreateDevice("second", remote, key, withClaudeHome: false);
+        var run = await uninstalled.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        // A tombstone publication counts as an upload. This machine wrote nothing and deleted
+        // nothing, so it has nothing to publish.
+        Assert.Equal(0, run.Uploaded);
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.True(File.Exists(original),
+            "a machine that lost its Claude home published a tombstone and erased the session everywhere");
+    }
+
+    /// <param name="withClaudeHome">
+    /// False models a machine where Claude Code was never installed: the resolver finds no
+    /// <c>projects</c> directory, so the engine is handed no Claude paths at all. The device
+    /// still carries the paths it would have had, so a test can assert nothing was written there.
+    /// </param>
+    private Device CreateDevice(string name, string remote, byte[] key, bool withClaudeHome = true)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -183,22 +267,25 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var providerRoot = Path.Combine(_root, name, "provider");
         var claudeHome = Path.Combine(_root, name, "claude");
         var claudePaths = new ClaudePaths(claudeHome, Path.Combine(claudeHome, "projects"));
-        Directory.CreateDirectory(claudePaths.Projects);
+        var configuredClaudePaths = withClaudeHome ? claudePaths : null;
+        if (withClaudeHome) Directory.CreateDirectory(claudePaths.Projects);
         var annotations = new SessionAnnotationStore(local);
         var conflicts = new ConflictStore("repository", local, paths);
-        var backups = new BackupStore("repository", local, paths, claudePaths: claudePaths,
+        var backups = new BackupStore("repository", local, paths, claudePaths: configuredClaudePaths,
             annotationsDirectory: annotations.Directory);
         var engine = new SyncEngine(
             "repository", name, paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
-            new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: claudePaths,
+            new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: configuredClaudePaths,
                 annotationsDirectory: annotations.Directory),
             conflicts,
             new GitStorageProvider("repository", remote, GitRemoteKind.Local, providerRoot),
             Path.Combine(local, "staging"),
-            claudePaths: claudePaths,
+            claudePaths: configuredClaudePaths,
             // A real process probe would defer every freshly written transcript (design D3).
-            claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false),
+            claudeScanner: withClaudeHome
+                ? new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false)
+                : null,
             annotationsDirectory: annotations.Directory);
         return new Device(paths, claudePaths, providerRoot, engine, annotations, conflicts);
     }

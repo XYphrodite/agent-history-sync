@@ -274,7 +274,15 @@ public sealed class CliApplication
     private async Task<int> RunSyncAsync(SyncMode mode, CancellationToken cancellationToken)
     {
         var result = await Services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
-        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized}");
+        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized} skipped-no-agent-home={result.SkippedNoAgentHome}");
+        // The counter alone reads as a statistic; this says what it means and what ends it. The
+        // run itself succeeded, so nothing else on the line tells the operator that part of the
+        // repository is still on the remote.
+        if (result.SkippedNoAgentHome > 0)
+            console.WriteLine($"warning: {result.SkippedNoAgentHome} remote " +
+                (result.SkippedNoAgentHome == 1 ? "session was" : "sessions were") +
+                " not downloaded: this machine has no home for the owning agent. " +
+                "Install that agent, or create its history directory, and synchronize again.");
         WriteLocalBreakdown(result.LocalByKind, result.LocalIgnored);
         return result.Conflicts == 0 ? 0 : 4;
     }
