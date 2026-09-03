@@ -49,7 +49,7 @@ All three commands call the same `SyncEngine` used by automation. Each command d
 After the counter line, each run prints what the scan actually holds — a `local=` total with its size, then one line per agent that owns sessions on this machine:
 
 ```
-revision=8a50fd1b uploaded=12 downloaded=0 deleted=0 conflicts=0 skipped-oversized=0
+revision=8a50fd1b uploaded=12 downloaded=0 deleted=0 conflicts=0 skipped-oversized=0 skipped-no-agent-home=0
 local=1046 size=1.9 GiB
   codex=1002 size=1.6 GiB (active=1001 archived=1 attachments=0)
   grok=39 size=366 MiB
@@ -57,6 +57,16 @@ local=1046 size=1.9 GiB
 ```
 
 The numbers come from the same scan the plan was built on, so they describe exactly what the run compared. An agent with no local sessions is omitted entirely: a machine without Grok must not read as one whose Grok sessions all vanished. Sizes are plaintext bytes on disk, not the encrypted payload the remote stores.
+
+### Sessions belonging to an agent this machine does not have
+
+A repository shared between machines carries sessions from every agent any of them runs. A machine that has never installed one of those agents has nowhere to put its sessions: there is no `%USERPROFILE%\.grok\sessions` to write into, and inventing one would create a history directory for a program that is not there.
+
+Those downloads are deferred rather than failed. They are counted in `skipped-no-agent-home=N`, named by agent in the progress line while the run is staging, and summarized in a `warning:` line afterwards. Everything else in the run — every other agent's sessions, every upload — proceeds normally, and a deferred session is deliberately kept out of the synchronization baseline so the next run plans it again. Install the agent (or create its history directory) and the very next `agent-sync sync` brings those sessions down.
+
+The same machine also never reports that agent's sessions as deleted. A kind nobody scanned is recorded as uncertain, exactly like a kind whose scan failed, because an absence is only a deletion when somebody looked. Without that, uninstalling an agent on one machine published tombstones for every session of that agent it had ever synchronized, and the next pull erased them on all the others.
+
+Before this was so, a single session from an agent the machine lacked aborted the whole synchronization with `Claude paths are not configured.`, and no part of the repository arrived.
 
 ### Subagent threads are not synchronized
 

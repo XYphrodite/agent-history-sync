@@ -24,6 +24,18 @@ public sealed record SyncProgress(SyncProgressPhase Phase, string Message);
 /// <summary>How many local objects of one kind were scanned, and how many bytes they occupy.</summary>
 public readonly record struct SessionKindTotals(int Count, long Bytes);
 
+/// <summary>
+/// Raised when an object cannot be placed because the agent that owns it has no home on this
+/// machine. It is its own type so the engine can defer that one object: a machine without Grok
+/// installed must still be able to synchronize its Codex history, and treating this as a plain
+/// failure meant one foreign session stopped the entire repository from arriving.
+/// </summary>
+public sealed class AgentHomeUnavailableException(ObjectKind kind, string message)
+    : InvalidOperationException(message)
+{
+    public ObjectKind Kind { get; } = kind;
+}
+
 public sealed record SyncResult(
     string RemoteRevision,
     int Uploaded,
@@ -45,6 +57,13 @@ public sealed record SyncResult(
     /// above cannot read as everything this machine holds.
     /// </summary>
     public int LocalIgnored { get; init; }
+
+    /// <summary>
+    /// Remote sessions left where they are because this machine has no home for their agent.
+    /// They are deferred rather than downloaded, and counted here so a run that quietly skipped
+    /// part of the repository still says so.
+    /// </summary>
+    public int SkippedNoAgentHome { get; init; }
 }
 public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges,
     IReadOnlySet<string> ConflictIdentities)
@@ -165,7 +184,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_claudePaths is not null && _claudeScanner is not null) extraTasks.Add(_claudeScanner.ScanDetailedAsync(_claudePaths, ct));
         if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
         if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
-        if (extraTasks.Count == 0) return await codexTask.ConfigureAwait(false);
+        var unscanned = UnscannedKinds();
+        if (extraTasks.Count == 0)
+        {
+            var only = await codexTask.ConfigureAwait(false);
+            if (unscanned.Count == 0) return only;
+            var codexUncertain = new HashSet<ObjectKind>(only.UncertainKinds);
+            foreach (var kind in unscanned) codexUncertain.Add(kind);
+            return new SessionScanResult(only.Objects, codexUncertain, only.DuplicateIds) { IgnoredIds = only.IgnoredIds };
+        }
 
         await Task.WhenAll(extraTasks.Prepend(codexTask)).ConfigureAwait(false);
         var merged = await codexTask.ConfigureAwait(false);
@@ -173,6 +200,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         var byId = objects.ToDictionary(item => item.Id);
         var duplicates = new HashSet<LogicalObjectId>(merged.DuplicateIds);
         var uncertain = new HashSet<ObjectKind>(merged.UncertainKinds);
+        foreach (var kind in unscanned) uncertain.Add(kind);
         var ignored = new HashSet<LogicalObjectId>(merged.IgnoredIds);
         foreach (var task in extraTasks)
         {
@@ -195,6 +223,24 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             }
         }
         return new SessionScanResult(objects, uncertain, duplicates) { IgnoredIds = ignored };
+    }
+
+    /// <summary>
+    /// Kinds this machine has no scanner for, and therefore cannot say anything about. They are
+    /// reported uncertain because an absence is only a deletion when somebody looked: a machine
+    /// with no home for an agent reads every one of that agent's sessions in its baseline as
+    /// locally deleted, and a single run then publishes tombstones that erase them from the
+    /// repository and from every other machine that pulls it. The scan already draws this
+    /// distinction for a kind whose scan failed; a kind never scanned at all is the same case.
+    /// </summary>
+    private HashSet<ObjectKind> UnscannedKinds()
+    {
+        var unscanned = new HashSet<ObjectKind>();
+        if (_grokPaths is null || _grokScanner is null) unscanned.Add(ObjectKind.GrokSession);
+        if (_claudePaths is null || _claudeScanner is null) unscanned.Add(ObjectKind.ClaudeSession);
+        if (_continuePaths is null || _continueScanner is null) unscanned.Add(ObjectKind.ContinueSession);
+        if (_annotationsDirectory is null || _annotationScanner is null) unscanned.Add(ObjectKind.SessionAnnotations);
+        return unscanned;
     }
 
     private static IReadOnlyDictionary<ObjectKind, SessionKindTotals> SummarizeByKind(SessionScanResult scan) =>
@@ -252,13 +298,37 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     var attemptDownloaded = 0;
                     var attemptDeleted = 0;
                     var skippedOversized = 0;
+                    var skippedNoAgentHome = 0;
+                    var missingAgentHomes = new SortedSet<ObjectKind>();
                     var stagedImports = new Dictionary<LogicalObjectId, StagedImport>();
                     var pendingConflicts = new List<PendingConflict>();
                     var actionable = plan.Actions.Count(action => IsApplicablePreviewChange(action.Kind, mode));
                     Report(SyncProgressPhase.StagingChanges,
                         actionable == 0 ? "no changes detected; finalizing" : $"validating and staging {actionable} changes");
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
-                        stagedImports.Add(action.ObjectId, await StageDownloadAsync(action, locals, remote, directory, ct).ConfigureAwait(false));
+                    {
+                        try
+                        {
+                            stagedImports.Add(action.ObjectId, await StageDownloadAsync(action, locals, remote, directory, ct).ConfigureAwait(false));
+                        }
+                        catch (AgentHomeUnavailableException exception)
+                        {
+                            // This machine has no home for that agent, so the object stays where it
+                            // is. Deferring rather than failing keeps one foreign session from
+                            // withholding the entire repository from a machine that wants the rest.
+                            deferred.Add(action.ObjectId);
+                            missingAgentHomes.Add(exception.Kind);
+                            skippedNoAgentHome++;
+                        }
+                    }
+
+                    // Named once for the whole run rather than once per object: a machine that has
+                    // never installed an agent is missing every session that agent owns, and on the
+                    // repository this was found in that is hundreds of lines saying the same thing.
+                    if (skippedNoAgentHome != 0)
+                        Report(SyncProgressPhase.StagingChanges,
+                            $"deferring {skippedNoAgentHome} remote sessions with no home on this machine " +
+                            $"({string.Join(", ", missingAgentHomes)})");
 
                     foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Conflict))
                     {
@@ -273,7 +343,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             case SyncActionKind.Accept:
                                 if ((action.Remote ?? action.Local) is { } accepted) successful[action.ObjectId] = accepted;
                                 break;
-                            case SyncActionKind.Download when mode != SyncMode.Push:
+                            // A download deferred for want of an agent home was never staged, so it
+                            // must not enter the baseline: the next run has to plan it again.
+                            case SyncActionKind.Download when mode != SyncMode.Push && !deferred.Contains(action.ObjectId):
                                 successful[action.ObjectId] = action.Remote!;
                                 break;
                             case SyncActionKind.ApplyTombstone when mode != SyncMode.Push:
@@ -365,9 +437,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     var mutationPlans = new List<HistoryMutationPlan>();
                     foreach (var action in plan.Actions)
                     {
-                        if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
+                        if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push &&
+                            stagedImports.TryGetValue(action.ObjectId, out var staged))
                         {
-                            var staged = stagedImports[action.ObjectId];
                             if (staged.RelocateFrom is not null)
                                 mutationPlans.Add(new HistoryMutationPlan(staged.RelocateFrom,
                                     ExpectedHistoryState.Present(staged.RelocateFrom.Hash),
@@ -392,9 +464,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             Report(SyncProgressPhase.ApplyingLocalChanges, "applying authenticated remote changes locally");
                         foreach (var action in plan.Actions)
                         {
-                            if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push)
+                            if (action.Kind == SyncActionKind.Download && mode != SyncMode.Push &&
+                                stagedImports.TryGetValue(action.ObjectId, out var staged))
                             {
-                                var staged = stagedImports[action.ObjectId];
                                 if (staged.RelocateFrom is not null)
                                 {
                                     await mutationBatch!.BeginApplyAsync(staged.RelocateFrom, ct).ConfigureAwait(false);
@@ -483,7 +555,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                 await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized)
                             {
                                 LocalByKind = SummarizeByKind(scan),
-                                LocalIgnored = scan.IgnoredIds.Count
+                                LocalIgnored = scan.IgnoredIds.Count,
+                                SkippedNoAgentHome = skippedNoAgentHome
                             };
                         Report(SyncProgressPhase.SavingState, "saving synchronization state");
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
@@ -494,7 +567,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             await CountUnresolvedConflictsAsync(ct).ConfigureAwait(false), raced, skippedOversized)
                         {
                             LocalByKind = SummarizeByKind(scan),
-                            LocalIgnored = scan.IgnoredIds.Count
+                            LocalIgnored = scan.IgnoredIds.Count,
+                            SkippedNoAgentHome = skippedNoAgentHome
                         };
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
@@ -1198,7 +1272,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         string path;
         if (version.Kind == ObjectKind.ContinueSession)
         {
-            if (_continuePaths is null) throw new InvalidOperationException("Continue paths are not configured.");
+            if (_continuePaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "Continue paths are not configured.");
             var package = ContinueSessionPackage.Parse(plaintext);
             path = _continuePaths.SessionFilePath(package.SessionId);
             if (existing is not null && existing.Kind != ObjectKind.ContinueSession)
@@ -1214,7 +1289,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         }
         else if (version.Kind == ObjectKind.ClaudeSession)
         {
-            if (_claudePaths is null) throw new InvalidOperationException("Claude paths are not configured.");
+            if (_claudePaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "Claude paths are not configured.");
             var package = ClaudeSessionPackage.Parse(plaintext);
             path = _claudePaths.SessionFilePath(package.Project, package.SessionId);
             if (existing is not null && existing.Kind != ObjectKind.ClaudeSession)
@@ -1224,7 +1300,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         }
         else if (version.Kind == ObjectKind.GrokSession)
         {
-            if (_grokPaths is null) throw new InvalidOperationException("Grok paths are not configured.");
+            if (_grokPaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "Grok paths are not configured.");
             var package = GrokSessionPackage.Parse(plaintext);
             path = GrokSessionPackage.ChatHistoryPath(_grokPaths.SessionDirectory(package.Cwd, package.SessionId));
             if (existing is not null && existing.Kind != ObjectKind.GrokSession)
