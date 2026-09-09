@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CodexHistorySync.Core.Update;
+using Spectre.Console;
 
 namespace CodexHistorySync.Cli;
 
@@ -31,7 +32,8 @@ internal sealed class DefaultSelfUpdateOperations : ISelfUpdateOperations
 
         using var source = new GitHubReleaseSource();
         var service = new SelfUpdateService(path, CliVersion.Current, source, probe: ProbeAsync);
-        return await service.UpdateAsync(request, cancellationToken).ConfigureAwait(false);
+        var display = new SelfUpdateProgressDisplay(AnsiConsole.Console);
+        return await display.RunAsync(service, request, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<bool> ProbeAsync(string executablePath, CancellationToken cancellationToken)

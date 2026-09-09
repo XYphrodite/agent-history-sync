@@ -21,9 +21,10 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
 
     private readonly HttpClient client;
 
-    public GitHubReleaseSource()
+    public GitHubReleaseSource(HttpMessageHandler? handler = null)
     {
-        client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        client = handler is null ? new HttpClient() : new HttpClient(handler);
+        client.Timeout = TimeSpan.FromMinutes(10);
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("agent-history-sync-update", "1.0"));
     }
 
@@ -59,11 +60,20 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
         if (!ReleaseVersion.TryParse(resolvedTag, out var version))
             throw new InvalidDataException("The published release tag is not a supported version.");
 
-        return new ReleaseDescriptor(resolvedTag, version,
-            AssetUrl(root, ExecutableAsset), AssetUrl(root, ChecksumAsset));
+        var executable = Asset(root, ExecutableAsset);
+        return new ReleaseDescriptor(
+            resolvedTag,
+            version,
+            executable.Url,
+            Asset(root, ChecksumAsset).Url,
+            executable.Size);
     }
 
-    public async Task DownloadAsync(Uri address, string destinationPath, CancellationToken cancellationToken)
+    public async Task DownloadAsync(
+        Uri address,
+        string destinationPath,
+        CancellationToken cancellationToken,
+        Action<long, long?>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(address);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -75,7 +85,13 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
 
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         await using var destination = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+        await DownloadProgress.CopyAsync(
+                source,
+                destination,
+                response.Content.Headers.ContentLength,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<string> ReadTextAsync(Uri address, CancellationToken cancellationToken)
@@ -162,7 +178,7 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
         };
     }
 
-    private static Uri AssetUrl(JsonElement release, string name)
+    private static (Uri Url, long Size) Asset(JsonElement release, string name)
     {
         if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
             throw new InvalidDataException("The release carries no assets.");
@@ -182,7 +198,14 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
                 !(address.Host is "github.com" || address.Host.EndsWith(".githubusercontent.com", StringComparison.Ordinal)))
                 throw new InvalidDataException("The release asset address is not a GitHub download URL.");
 
-            return address;
+            long size = 0;
+            if (asset.TryGetProperty("size", out var sizeElement) &&
+                sizeElement.ValueKind == JsonValueKind.Number &&
+                sizeElement.TryGetInt64(out var bytes) &&
+                bytes > 0)
+                size = bytes;
+
+            return (address, size);
         }
 
         throw new InvalidDataException("The release does not carry the expected assets.");

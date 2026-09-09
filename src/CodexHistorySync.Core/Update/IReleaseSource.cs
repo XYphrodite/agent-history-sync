@@ -5,7 +5,12 @@ namespace CodexHistorySync.Core.Update;
 /// checksum asset is not optional, because the only thing standing between a downloaded blob
 /// and the executable this machine runs next is that hash.
 /// </summary>
-public sealed record ReleaseDescriptor(string Tag, ReleaseVersion Version, Uri ExecutableUrl, Uri ChecksumUrl);
+public sealed record ReleaseDescriptor(
+    string Tag,
+    ReleaseVersion Version,
+    Uri ExecutableUrl,
+    Uri ChecksumUrl,
+    long SizeBytes = 0);
 
 /// <summary>
 /// Where releases come from. Kept behind an interface so the update logic — version
@@ -17,7 +22,11 @@ public interface IReleaseSource
     Task<ReleaseDescriptor> ResolveAsync(string? tag, CancellationToken cancellationToken);
 
     /// <summary>Downloads an asset to <paramref name="destinationPath"/>, which must not exist.</summary>
-    Task DownloadAsync(Uri address, string destinationPath, CancellationToken cancellationToken);
+    Task DownloadAsync(
+        Uri address,
+        string destinationPath,
+        CancellationToken cancellationToken,
+        Action<long, long?>? progress = null);
 
     /// <summary>Reads a small text asset, such as the checksum file.</summary>
     Task<string> ReadTextAsync(Uri address, CancellationToken cancellationToken);
