@@ -66,7 +66,15 @@ internal sealed class GitHubReleaseSource : IReleaseSource, IDisposable
             version,
             executable.Url,
             Asset(root, ChecksumAsset).Url,
-            executable.Size);
+            executable.Size)
+        {
+            Notes = root.TryGetProperty("body", out var notes) && notes.ValueKind == JsonValueKind.String
+                ? notes.GetString()
+                : null,
+            // Build the link from our fixed repository and validated tag, not an arbitrary
+            // html_url in a network response. The original tag preserves its spelling.
+            ReleasePageUrl = new Uri($"https://github.com/{Repository}/releases/tag/{Uri.EscapeDataString(resolvedTag)}")
+        };
     }
 
     public async Task DownloadAsync(

@@ -76,6 +76,8 @@ agent-sync update --version v0.7.0   # pin a tag, including an older one
 
 In a terminal, `update` shows a release-check spinner, then download progress with percentage, transferred bytes, speed and estimated time remaining. Checksum verification and installation have their own status messages. Redirected output prints one line per phase; a download with no known size uses an indeterminate bar.
 
+Before downloading, `update` shows the selected release's notes (up to 600 characters / 12 lines) and a link to the full GitHub release. `update --check` shows the same notes without downloading; already-current checks stay quiet about notes unless you pin a tag. Notes remain in the output after progress finishes, including when output is redirected. This is the selected release's description, not an aggregate changelog of skipped versions.
+
 `update` replaces the running `agent-sync.exe` in place. The download must match the release's SHA-256 asset, be a Windows executable, and answer `--help` before it is installed and again afterwards; any failure leaves the previous binary in place. The source repository is fixed in code and cannot be redirected. Close `--manage` and `--sessions` first, and note that a build older than 0.8.0 has no `update` command — install it once with `scripts/install.ps1`. See [operations](docs/operations.md#updating).
 
 ### Initialize and join
@@ -222,6 +224,8 @@ agent-sync update --version v0.7.0   # закрепить тег, в том чи
 ```
 
 В терминале `update` показывает спиннер проверки релиза, затем полосу загрузки с процентами, объёмом, скоростью и оставшимся временем. Проверка контрольной суммы и установка отображаются отдельными этапами. При перенаправлении вывода печатается одна строка на этап; если размер файла неизвестен, полоса загрузки работает без процентов.
+
+Перед загрузкой `update` показывает описание выбранного релиза (до 600 символов / 12 строк) и ссылку на полный релиз GitHub. `update --check` показывает то же описание без загрузки; если обновлений нет, описание не повторяется, кроме случая с явно заданным тегом. Описание остаётся в выводе после завершения прогресса, в том числе при перенаправлении в файл. Это описание выбранного релиза, а не сводка всех пропущенных версий.
 
 `update` заменяет запущенный `agent-sync.exe` на месте. Скачанный файл обязан совпасть с SHA-256 из релиза, быть Windows-исполняемым и ответить на `--help` до установки и ещё раз после; любая осечка оставляет прежний бинарь на месте. Репозиторий-источник зашит в коде и не переопределяется. Сначала закройте `--manage` и `--sessions`; сборка старше 0.8.0 команды `update` не знает — её ставят один раз через `scripts/install.ps1`. Подробности — в [operations](docs/operations.md#updating).
 

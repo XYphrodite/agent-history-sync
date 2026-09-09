@@ -80,6 +80,8 @@ public sealed class SelfUpdateService
         if (request.Tag is null && release.Version <= installedVersion)
             return Report(SelfUpdateStatus.AlreadyCurrent, release, removed);
 
+        progress?.Invoke(new(SelfUpdatePhase.ReleaseAvailable, release));
+
         if (request.CheckOnly)
             return Report(SelfUpdateStatus.UpdateAvailable, release, removed);
 

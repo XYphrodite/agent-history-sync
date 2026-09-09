@@ -10,6 +10,9 @@ namespace CodexHistorySync.IntegrationTests;
 
 public sealed class SelfUpdateProgressDisplayTests
 {
+    private const string Notes = "- Added local MCP session search.";
+    private const string ReleaseUrl = "https://github.com/XYphrodite/agent-history-sync/releases/tag/v0.12.0";
+
     [Fact]
     public async Task RedirectedUpdateWritesEachPhaseOnceAndInstallsTheStreamedAsset()
     {
@@ -21,6 +24,9 @@ public sealed class SelfUpdateProgressDisplayTests
         Assert.Equal(new[]
         {
             "Checking GitHub...",
+            "Release notes (0.12.0):",
+            Notes,
+            "Full release notes: " + ReleaseUrl,
             "Downloading v0.12.0 (agent-sync.exe)...",
             "Verifying checksum and executable...",
             "Installing and checking the new version..."
@@ -73,7 +79,92 @@ public sealed class SelfUpdateProgressDisplayTests
         Assert.Equal(SelfUpdateStatus.UpdateAvailable, result.Status);
         Assert.Equal(0, fixture.Handler.AssetRequests);
         Assert.DoesNotContain("Downloading", fixture.Output.ToString());
+        Assert.Contains(Notes, fixture.Output.ToString());
+        Assert.Contains(ReleaseUrl, fixture.Output.ToString());
         Assert.Equal("installed", File.ReadAllText(fixture.Installed));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task NotesAreShownBeforeDownloadingAndAreNotRepeatedForEveryChunk(bool interactive)
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.BeforeDownload = () =>
+        {
+            Assert.Contains(Notes, fixture.Output.ToString());
+            Assert.Contains(ReleaseUrl, fixture.Output.ToString());
+            Assert.Equal("installed", File.ReadAllText(fixture.Installed));
+        };
+
+        await fixture.RunAsync(interactive);
+
+        Assert.Equal(1, fixture.Handler.AssetRequests);
+        Assert.Equal(1, fixture.Output.ToString().Split(Notes).Length - 1);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task AlreadyCurrentDoesNotShowNotesOrDownload(bool interactive, bool checkOnly)
+    {
+        using var fixture = new Fixture();
+        fixture.InstalledVersion = new ReleaseVersion(0, 12, 0);
+
+        var result = await fixture.RunAsync(interactive, checkOnly);
+
+        Assert.Equal(SelfUpdateStatus.AlreadyCurrent, result.Status);
+        Assert.DoesNotContain("Release notes", fixture.Output.ToString());
+        Assert.Equal(0, fixture.Handler.AssetRequests);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PinningTheInstalledVersionStillShowsItsNotes(bool interactive)
+    {
+        using var fixture = new Fixture();
+        fixture.InstalledVersion = new ReleaseVersion(0, 12, 0);
+
+        var result = await fixture.RunAsync(interactive, checkOnly: true, tag: "v0.12.0");
+
+        Assert.Equal(SelfUpdateStatus.UpdateAvailable, result.Status);
+        Assert.Contains(Notes, fixture.Output.ToString());
+        Assert.Contains(ReleaseUrl, fixture.Output.ToString());
+        Assert.Equal(0, fixture.Handler.AssetRequests);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task EmptyNotesStillShowTheReleaseLink(bool interactive)
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.NotesBody = null;
+
+        await fixture.RunAsync(interactive, checkOnly: true);
+
+        Assert.Contains("No release notes provided.", fixture.Output.ToString());
+        Assert.Contains(ReleaseUrl, fixture.Output.ToString());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReleaseNotesAreLiteralTextRatherThanConsoleMarkup(bool interactive)
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.NotesBody = "[red]literal[/] Привет 👋\u001b[31m\u0007\u202e";
+
+        await fixture.RunAsync(interactive, checkOnly: true);
+
+        Assert.Contains("[red]literal[/] Привет", fixture.Output.ToString());
+        // Culture-aware comparisons can ignore control characters; these must be byte-like checks.
+        Assert.DoesNotContain("\u001b[31m", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("\u0007", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("\u202e", fixture.Output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -99,6 +190,7 @@ public sealed class SelfUpdateProgressDisplayTests
         public ReleaseHandler Handler { get; } = new();
         public IAnsiConsole? Console { get; private set; }
         public int Width { get; set; } = 160;
+        public ReleaseVersion InstalledVersion { get; set; } = new(0, 11, 1);
 
         public Fixture()
         {
@@ -106,7 +198,7 @@ public sealed class SelfUpdateProgressDisplayTests
             File.WriteAllText(Installed, "installed");
         }
 
-        public async Task<SelfUpdateReport> RunAsync(bool interactive, bool checkOnly = false)
+        public async Task<SelfUpdateReport> RunAsync(bool interactive, bool checkOnly = false, string? tag = null)
         {
             Console = AnsiConsole.Create(new AnsiConsoleSettings
             {
@@ -116,14 +208,14 @@ public sealed class SelfUpdateProgressDisplayTests
                 Out = new ConsoleOutput(Output, interactive, Width)
             });
             using var source = new GitHubReleaseSource(Handler);
-            var service = new SelfUpdateService(Installed, new ReleaseVersion(0, 11, 1), source,
+            var service = new SelfUpdateService(Installed, InstalledVersion, source,
                 probe: async (_, ct) =>
                 {
                     if (Handler.Slow) await Task.Delay(250, ct);
                     return true;
                 });
             return await new SelfUpdateProgressDisplay(Console).RunAsync(service,
-                new SelfUpdateRequest(CheckOnly: checkOnly), CancellationToken.None);
+                new SelfUpdateRequest(CheckOnly: checkOnly, Tag: tag), CancellationToken.None);
         }
 
         public void Dispose()
@@ -151,6 +243,8 @@ public sealed class SelfUpdateProgressDisplayTests
         public bool BadChecksum { get; set; }
         public bool Slow { get; set; }
         public int AssetRequests { get; private set; }
+        public string? NotesBody { get; set; } = Notes;
+        public Action? BeforeDownload { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -162,6 +256,7 @@ public sealed class SelfUpdateProgressDisplayTests
                 content = new StringContent(JsonSerializer.Serialize(new
                 {
                     tag_name = "v0.12.0",
+                    body = NotesBody,
                     assets = new[]
                     {
                         new { name = "agent-sync.exe", browser_download_url = AssetUrl, size = DeclaredSize ? Payload.Length : 0 },
@@ -177,6 +272,7 @@ public sealed class SelfUpdateProgressDisplayTests
             else
             {
                 AssetRequests++;
+                BeforeDownload?.Invoke();
                 content = new StreamContent(new DownloadStream(Payload, Slow, HeaderSize));
             }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
