@@ -45,6 +45,7 @@ public sealed class SessionSearchIndex : ISessionSearchIndex, IDisposable
     public SessionSearchIndex(string? localAppDataDirectory = null)
     {
         var root = localAppDataDirectory
+            ?? Environment.GetEnvironmentVariable("LOCALAPPDATA")
             ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(root))
             throw new InvalidOperationException("Local application data directory is unavailable.");
@@ -112,9 +113,7 @@ public sealed class SessionSearchIndex : ISessionSearchIndex, IDisposable
                 }
 
                 var digest = SessionDigest.Build(conversation, MaximumBodyCharacters);
-                if (stored is not null && string.Equals(stored.DigestHash, digest.Hash, StringComparison.Ordinal))
-                    continue;
-
+                // Even an unchanged body needs its new title/timestamp persisted.
                 await UpsertAsync(connection, session, digest, cancellationToken).ConfigureAwait(false);
             }
 

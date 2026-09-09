@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using CodexHistorySync.Cli.Search;
+using CodexHistorySync.Cli.Mcp;
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Model;
@@ -113,6 +114,7 @@ public sealed class CliApplication
     private readonly ISessionManagerRunner? managerRunner;
     private readonly ISelfUpdateOperations? selfUpdate;
     private readonly ISessionSearchCommand? searchCommand;
+    private readonly ISessionMcpCommand? mcpCommand;
     private readonly string? localAppDataDirectory;
 
     public CliApplication(
@@ -159,11 +161,30 @@ public sealed class CliApplication
         this.searchCommand = searchCommand ?? throw new ArgumentNullException(nameof(searchCommand));
     }
 
+    internal CliApplication(ICliConsole console, ISessionMcpCommand mcpCommand)
+    {
+        this.console = console ?? throw new ArgumentNullException(nameof(console));
+        this.mcpCommand = mcpCommand ?? throw new ArgumentNullException(nameof(mcpCommand));
+    }
+
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(args);
         try
         {
+            if (args is ["mcp", ..])
+            {
+                if (args is ["mcp", "--help"] or ["mcp", "-h"])
+                {
+                    console.WriteLine("Usage: agent-sync mcp");
+                    console.WriteLine("Serve search_sessions and get_session over MCP stdio. Configure your MCP client to launch this command.");
+                    return 0;
+                }
+                if (args.Length != 1 || mcpCommand is null) return Usage();
+                await mcpCommand.RunAsync(cancellationToken).ConfigureAwait(false);
+                return 0;
+            }
+
             // Both screens are composed the same way and differ only in which runner arrived.
             if (args is ["--manage"] or ["--sessions"])
             {
@@ -723,7 +744,7 @@ public sealed class CliApplication
 
     private int Usage()
     {
-        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search> [options] [--manage] [--sessions] [--version]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search|mcp> [options] [--manage] [--sessions] [--version]");
         console.WriteError("  titles                       show what session titling is configured with");
         console.WriteError("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
         console.WriteError("  titles off                   turn session titling off");
@@ -733,12 +754,13 @@ public sealed class CliApplication
 
     private int Help()
     {
-        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search> [options] [--manage] [--sessions] [--version]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search|mcp> [options] [--manage] [--sessions] [--version]");
         console.WriteLine("  titles                       show what session titling is configured with");
         console.WriteLine("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
         console.WriteLine("  titles off                   turn session titling off");
         console.WriteLine("  titles test                  ask the endpoint to name a sample session");
         console.WriteLine("  search <query>               find sessions by title or conversation text");
+        console.WriteLine("  mcp                          serve local session search and reading over MCP stdio");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         console.WriteLine("update [--check] [--version <tag>]  install the latest published release");
         console.WriteLine("--manage    copy and delete sessions across agents");
