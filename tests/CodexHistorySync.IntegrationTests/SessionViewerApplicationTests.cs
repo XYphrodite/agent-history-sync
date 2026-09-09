@@ -2,6 +2,7 @@ using CodexHistorySync.Cli.Management;
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Search;
 
 namespace CodexHistorySync.IntegrationTests;
 
@@ -350,6 +351,41 @@ public sealed class SessionViewerApplicationTests
     }
 
     [Fact]
+    public async Task A_warm_corpus_index_lets_the_list_filter_match_body_text()
+    {
+        var index = new FakeSearchIndex
+        {
+            Ready = true,
+            Hits =
+            [
+                new SessionSearchHit(ManagedAgent.Codex, "middle", "middle", "unique-body-phrase", 0)
+            ]
+        };
+        var view = new ScriptedView(SessionViewerCommand.FilterList, SessionViewerCommand.Exit);
+        view.ListFilters.Enqueue("unique-body-phrase");
+
+        await Run(view, new RecordingReader(), searchIndex: index);
+
+        var filtered = view.RenderedStates.Last();
+        Assert.Equal(["middle"], filtered.Sessions.Select(session => session.SessionId));
+        Assert.True(index.Searched);
+    }
+
+    [Fact]
+    public async Task A_cold_corpus_index_leaves_the_list_filter_as_title_only()
+    {
+        var index = new FakeSearchIndex { Ready = false };
+        var view = new ScriptedView(SessionViewerCommand.FilterList, SessionViewerCommand.Exit);
+        view.ListFilters.Enqueue("unique-body-phrase");
+
+        await Run(view, new RecordingReader(), searchIndex: index);
+
+        var filtered = view.RenderedStates.Last();
+        Assert.Empty(filtered.Sessions);
+        Assert.False(index.Searched);
+    }
+
+    [Fact]
     public async Task An_annotation_made_from_this_conversation_is_not_stale()
     {
         var catalog = new MutableCatalog(SnapshotAnnotated(new SessionAnnotation(
@@ -370,13 +406,14 @@ public sealed class SessionViewerApplicationTests
         RecordingOperations? operations = null,
         RecordingAnnotations? annotations = null,
         ISessionTitleSuggester? suggester = null,
-        string? rejection = null)
+        string? rejection = null,
+        ISessionSearchIndex? searchIndex = null)
     {
         catalog ??= new MutableCatalog(Snapshot());
         return new SessionViewerApplication(
             catalog, reader, exporter ?? new RecordingExporter(),
             operations ?? new RecordingOperations(catalog), view,
-            annotations, suggester, rejection).RunAsync(CancellationToken.None);
+            annotations, suggester, rejection, searchIndex).RunAsync(CancellationToken.None);
     }
 
     private static SessionCatalogSnapshot SnapshotAnnotated(SessionAnnotation annotation) => new(
@@ -446,6 +483,30 @@ public sealed class SessionViewerApplicationTests
             AnnotationOverwrites.Dequeue();
 
         public void ShowMessage(string message, bool isError) => Messages.Add((message, isError));
+    }
+
+    private sealed class FakeSearchIndex : ISessionSearchIndex
+    {
+        private readonly TaskCompletionSource never = new();
+
+        public bool Ready { get; set; }
+        public bool Searched { get; private set; }
+        public IReadOnlyList<SessionSearchHit> Hits { get; set; } = [];
+
+        public Task EnsureCurrentAsync(
+            SessionCatalogSnapshot snapshot,
+            ISessionContentReader reader,
+            CancellationToken cancellationToken) =>
+            Ready ? Task.CompletedTask : never.Task;
+
+        public Task<IReadOnlyList<SessionSearchHit>> SearchAsync(
+            string query,
+            int limit,
+            CancellationToken cancellationToken)
+        {
+            Searched = true;
+            return Task.FromResult(Hits);
+        }
     }
 
     private sealed class RecordingReader : ISessionContentReader

@@ -30,7 +30,15 @@ public enum ObjectKind
     /// first push that includes one. It is also the first kind that is not session history, so
     /// nothing may import it through the agent-home writer.
     /// </summary>
-    SessionAnnotations
+    SessionAnnotations,
+
+    /// <summary>
+    /// One Claude Code memory file under ~/.claude/projects/&lt;segment&gt;/memory.
+    /// Appended last on purpose: the value is persisted as an integer in the encrypted index and
+    /// an undefined value fails the whole index, so existing members must keep their numbers and
+    /// every machine must be upgraded before the first push carrying this kind.
+    /// </summary>
+    ClaudeMemory
 }
 
 public readonly record struct LogicalObjectId(string Value);

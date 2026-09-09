@@ -252,6 +252,82 @@ public sealed class TwoDeviceSyncTests : IDisposable
             "a machine that lost its Claude home published a tombstone and erased the session everywhere");
     }
 
+    [Fact]
+    public async Task ClaudeMemory_SynchronizesAsItsOwnObject()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string project = "c--Repos-Demo";
+        var source = await WriteClaudeMemoryAsync(first.ClaudePaths, project, "tailnet-machines",
+            "# Tailnet\n\nssh home reaches the Xeon.\n");
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        var result = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, result.Downloaded);
+        var destination = Path.Combine(second.ClaudePaths.Projects, project, "memory", "tailnet-machines.md");
+        Assert.True(File.Exists(destination));
+        Assert.Equal(await File.ReadAllTextAsync(source), await File.ReadAllTextAsync(destination));
+        Assert.DoesNotContain("Tailnet", ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AForeignMemoryFileDoesNotAbortTheRestOfTheRepository()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key, withClaudeHome: false);
+        const string project = "c--Repos-Demo";
+
+        await WriteSessionAsync(first.Paths.Sessions, "session-a", "codex text");
+        await WriteClaudeMemoryAsync(first.ClaudePaths, project, "tailnet-machines", "# machines\n");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        var result = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, result.SkippedNoAgentHome);
+        Assert.Equal(1, result.Downloaded);
+        Assert.True(File.Exists(Path.Combine(second.Paths.Sessions, "session-a.jsonl")));
+        Assert.False(Directory.Exists(Path.Combine(second.ClaudePaths.Projects, project, "memory")));
+    }
+
+    [Fact]
+    public async Task LosingAnAgentHomeDoesNotEraseClaudeMemoryFromTheRepository()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string project = "c--Repos-Demo";
+        var original = await WriteClaudeMemoryAsync(first.ClaudePaths, project, "tailnet-machines",
+            "written before the uninstall\n");
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.True(File.Exists(Path.Combine(second.ClaudePaths.Projects, project, "memory", "tailnet-machines.md")));
+
+        second.Engine.Dispose();
+        Directory.Delete(second.ClaudePaths.Home, recursive: true);
+        var uninstalled = CreateDevice("second", remote, key, withClaudeHome: false);
+        var run = await uninstalled.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(0, run.Uploaded);
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.True(File.Exists(original),
+            "a machine that lost its Claude home published a tombstone and erased the memory everywhere");
+    }
+
     /// <param name="withClaudeHome">
     /// False models a machine where Claude Code was never installed: the resolver finds no
     /// <c>projects</c> directory, so the engine is handed no Claude paths at all. The device
@@ -303,6 +379,15 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var content = $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"thread_source\":\"subagent\"}}}}\n" +
             $"{{\"type\":\"message\",\"payload\":{{\"text\":\"{text}\"}}}}\n";
         await File.WriteAllTextAsync(Path.Combine(directory, id + ".jsonl"), content, new UTF8Encoding(false));
+    }
+
+    private static async Task<string> WriteClaudeMemoryAsync(ClaudePaths paths, string project, string name, string body)
+    {
+        var directory = Path.Combine(paths.Projects, project, "memory");
+        Directory.CreateDirectory(directory);
+        var file = Path.Combine(directory, name + ".md");
+        await File.WriteAllTextAsync(file, body, new UTF8Encoding(false));
+        return file;
     }
 
     private static async Task<string> WriteClaudeSessionAsync(ClaudePaths paths, string project, string sessionId, string text)

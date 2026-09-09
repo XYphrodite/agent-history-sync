@@ -167,7 +167,8 @@ internal sealed class HistoryMutationBatch
             // Tombstone and RepositoryIndex have no history destination, so admitting them here
             // would only trade this error for an ArgumentException one line further down.
             if (entry.Kind is not (ObjectKind.ActiveSession or ObjectKind.ArchivedSession or ObjectKind.GrokSession
-                    or ObjectKind.ClaudeSession or ObjectKind.ContinueSession or ObjectKind.SessionAnnotations) ||
+                    or ObjectKind.ClaudeSession or ObjectKind.ClaudeMemory or ObjectKind.ContinueSession
+                    or ObjectKind.SessionAnnotations) ||
                 !Enum.IsDefined(entry.Status))
                 throw new InvalidDataException("The local mutation journal contains invalid object metadata.");
             ValidateState(entry.BeforeExists, entry.BeforeHash);

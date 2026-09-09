@@ -58,4 +58,16 @@ public sealed record ClaudePaths(string Home, string Projects)
         PathSafety.ValidateFileComponent(sessionId, nameof(sessionId));
         return Path.GetFullPath(Path.Combine(Projects, projectSegment, sessionId + ".jsonl"));
     }
+
+    /// <summary>
+    /// Destination for one memory file. The project segment is carried through from the source
+    /// machine verbatim, the same way a session is (design D1): it must never be reconstructed
+    /// from a cwd.
+    /// </summary>
+    public string MemoryFilePath(string projectSegment, string name)
+    {
+        PathSafety.ValidateFileComponent(projectSegment, nameof(projectSegment));
+        PathSafety.ValidateFileComponent(name, nameof(name));
+        return Path.GetFullPath(Path.Combine(Projects, projectSegment, "memory", name + ".md"));
+    }
 }

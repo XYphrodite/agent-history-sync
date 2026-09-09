@@ -6,6 +6,7 @@ using System.Security;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Cli.Management;
+using CodexHistorySync.Cli.Search;
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
@@ -14,6 +15,7 @@ using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Search;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
@@ -32,7 +34,8 @@ public static class CliComposition
         Func<ICliConsole, CliApplication> createSynchronizedApplication,
         Func<ISessionManagerRunner> createSessionManagerRunner,
         Func<ISessionManagerRunner>? createSessionViewerRunner = null,
-        Func<ISelfUpdateOperations>? createSelfUpdateOperations = null)
+        Func<ISelfUpdateOperations>? createSelfUpdateOperations = null,
+        Func<ISessionSearchCommand>? createSearchCommand = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(console);
@@ -46,6 +49,8 @@ public static class CliComposition
                 new CliApplication(console, createSessionViewerRunner()),
             ["update", ..] when createSelfUpdateOperations is not null =>
                 new CliApplication(console, createSelfUpdateOperations()),
+            ["search", ..] when createSearchCommand is not null =>
+                new CliApplication(console, createSearchCommand()),
             _ => createSynchronizedApplication(console)
         };
     }
@@ -55,7 +60,8 @@ public static class CliComposition
         ArgumentNullException.ThrowIfNull(args);
         var console = new SystemCliConsole();
         return CreateForArguments(args, console, CreateSynchronizedApplication, CreateSessionManagerRunner,
-            CreateSessionViewerRunner, static () => new DefaultSelfUpdateOperations());
+            CreateSessionViewerRunner, static () => new DefaultSelfUpdateOperations(),
+            () => CreateSearchCommand(console));
     }
 
     public static CliApplication CreateDefault() => CreateSynchronizedApplication(new SystemCliConsole());
@@ -131,9 +137,25 @@ public static class CliComposition
             null);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionViewerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
+        var searchIndex = new SessionSearchIndex();
+        var contentReader = new SessionContentReader();
         return new DefaultSessionViewerRunner(new SessionViewerApplication(
-            annotated, new SessionContentReader(), new SessionExporter(), operations, view,
-            annotationStore, suggester, titling.Rejection));
+            annotated, contentReader, new SessionExporter(), operations, view,
+            annotationStore, suggester, titling.Rejection, searchIndex));
+    }
+
+    private static ISessionSearchCommand CreateSearchCommand(ICliConsole console)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
+        var codexPaths = TryResolveCodexPaths();
+        var grokPaths = GrokPaths.TryResolve();
+        var claudePaths = ClaudePaths.TryResolve();
+        var continuePaths = ContinuePaths.TryResolve();
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
+        var annotationStore = new SessionAnnotationStore();
+        var annotated = new AnnotatedSessionCatalog(catalog, annotationStore);
+        return new SessionSearchCommand(annotated, new SessionSearchIndex(), new SessionContentReader(), console);
     }
 
     private static ISessionManagerRunner CreateSessionManagerRunner()
@@ -901,7 +923,9 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         {
             ClaudeHome = ClaudePaths.TryResolve(claudeHome)?.Projects,
             ClaudeSessions = preview.LocalByKind.TryGetValue(ObjectKind.ClaudeSession, out var claudeCount) ? claudeCount : 0,
-            ClaudeUncertain = preview.UncertainKinds.Contains(ObjectKind.ClaudeSession),
+            ClaudeMemory = preview.LocalByKind.TryGetValue(ObjectKind.ClaudeMemory, out var claudeMemoryCount) ? claudeMemoryCount : 0,
+            ClaudeUncertain = preview.UncertainKinds.Contains(ObjectKind.ClaudeSession)
+                || preview.UncertainKinds.Contains(ObjectKind.ClaudeMemory),
             ContinueHome = ContinuePaths.TryResolve(continueHome)?.Sessions,
             ContinueSessions = preview.LocalByKind.TryGetValue(ObjectKind.ContinueSession, out var continueCount) ? continueCount : 0,
             ContinueUncertain = preview.UncertainKinds.Contains(ObjectKind.ContinueSession)

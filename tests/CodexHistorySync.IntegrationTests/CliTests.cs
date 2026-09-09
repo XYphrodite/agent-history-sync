@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CodexHistorySync.Cli;
+using CodexHistorySync.Cli.Search;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
@@ -78,6 +79,69 @@ public sealed class CliTests
 
         Assert.Equal(0, exitCode);
         Assert.Equal(1, manager.RunCount);
+    }
+
+    [Fact]
+    public async Task Search_without_a_query_is_a_usage_error()
+    {
+        var fixture = new Fixture();
+
+        var exitCode = await fixture.Application.RunAsync(["search"], CancellationToken.None);
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("search", fixture.Console.ErrorText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Search_prints_hits_and_does_not_touch_sync_services()
+    {
+        var fixture = new Fixture();
+        var search = new FakeSearchCommand(fixture.Console);
+        search.Hits.Add("codex abc-id Unique phrase");
+        var application = new CliApplication(
+            fixture.Services, fixture.Console, searchCommand: search);
+
+        var exitCode = await application.RunAsync(["search", "Unique", "phrase"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("Unique phrase", search.LastQuery);
+        Assert.Contains("Unique phrase", fixture.Console.OutputText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Search_with_no_hits_returns_one()
+    {
+        var fixture = new Fixture();
+        var search = new FakeSearchCommand();
+        var application = new CliApplication(fixture.Services, fixture.Console, searchCommand: search);
+
+        var exitCode = await application.RunAsync(["search", "nothing-matches-this"], CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Empty(fixture.Console.OutputText);
+        Assert.Empty(fixture.Services.Calls);
+    }
+
+    [Fact]
+    public async Task Search_composition_does_not_construct_sync_or_remote_services()
+    {
+        var console = new FakeConsole();
+        var search = new FakeSearchCommand(console);
+        search.Hits.Add("hit");
+        var application = CliComposition.CreateForArguments(
+            ["search", "needle"],
+            console,
+            _ => throw new InvalidOperationException("Git/GitHub construction must not run."),
+            () => throw new InvalidOperationException("The session manager must not be constructed."),
+            createSearchCommand: () => search);
+
+        var exitCode = await application.RunAsync(["search", "needle"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("needle", search.LastQuery);
+        Assert.Contains("hit", console.OutputText);
     }
 
     [Fact]
@@ -608,6 +672,25 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Sync_splits_claude_memory_out_of_the_session_count()
+    {
+        var fixture = new Fixture();
+        fixture.Services.SyncResult = new SyncResult("revision-7", 0, 0, 0, 0, false)
+        {
+            LocalByKind = new Dictionary<ObjectKind, SessionKindTotals>
+            {
+                [ObjectKind.ClaudeSession] = new(5, 5L * 1024 * 1024),
+                [ObjectKind.ClaudeMemory] = new(20, 80L * 1024),
+            }
+        };
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("claude=25 size=5.1 MiB (sessions=5 memory=20)", fixture.Console.OutputText);
+    }
+
+    [Fact]
     public async Task Sync_omits_the_breakdown_for_an_agent_with_no_local_sessions()
     {
         // A machine without Grok must not read as one whose Grok sessions all vanished.
@@ -1126,6 +1209,20 @@ public sealed class CliTests
             cancellationToken.ThrowIfCancellationRequested();
             SecretReadCount++;
             return Task.FromResult(Secrets.Dequeue());
+        }
+    }
+
+    private sealed class FakeSearchCommand(ICliConsole? console = null) : ISessionSearchCommand
+    {
+        public List<string> Hits { get; } = [];
+        public string? LastQuery { get; private set; }
+
+        public Task<int> SearchAsync(string query, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastQuery = query;
+            foreach (var hit in Hits) console?.WriteLine(hit);
+            return Task.FromResult(Hits.Count == 0 ? 1 : 0);
         }
     }
 

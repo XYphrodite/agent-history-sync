@@ -106,6 +106,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly GrokSessionScanner? _grokScanner;
     private readonly ClaudePaths? _claudePaths;
     private readonly ClaudeSessionScanner? _claudeScanner;
+    private readonly ClaudeMemoryScanner? _claudeMemoryScanner;
     private readonly ContinuePaths? _continuePaths;
     private readonly ContinueSessionScanner? _continueScanner;
     private readonly string? _annotationsDirectory;
@@ -155,6 +156,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _grokScanner = grokScanner ?? (grokPaths is null ? null : new GrokSessionScanner());
         _claudePaths = claudePaths;
         _claudeScanner = claudeScanner ?? (claudePaths is null ? null : new ClaudeSessionScanner());
+        _claudeMemoryScanner = claudePaths is null ? null : new ClaudeMemoryScanner();
         _continuePaths = continuePaths;
         _continueScanner = continueScanner ?? (continuePaths is null ? null : new ContinueSessionScanner());
         _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
@@ -179,9 +181,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private async Task<SessionScanResult> ScanLocalAsync(CancellationToken ct)
     {
         var codexTask = _scanner.ScanDetailedAsync(_paths, ct);
-        var extraTasks = new List<Task<SessionScanResult>>(3);
+        var extraTasks = new List<Task<SessionScanResult>>(5);
         if (_grokPaths is not null && _grokScanner is not null) extraTasks.Add(_grokScanner.ScanDetailedAsync(_grokPaths, ct));
         if (_claudePaths is not null && _claudeScanner is not null) extraTasks.Add(_claudeScanner.ScanDetailedAsync(_claudePaths, ct));
+        if (_claudePaths is not null && _claudeMemoryScanner is not null) extraTasks.Add(_claudeMemoryScanner.ScanDetailedAsync(_claudePaths, ct));
         if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
         if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
         var unscanned = UnscannedKinds();
@@ -238,6 +241,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         var unscanned = new HashSet<ObjectKind>();
         if (_grokPaths is null || _grokScanner is null) unscanned.Add(ObjectKind.GrokSession);
         if (_claudePaths is null || _claudeScanner is null) unscanned.Add(ObjectKind.ClaudeSession);
+        if (_claudePaths is null || _claudeMemoryScanner is null) unscanned.Add(ObjectKind.ClaudeMemory);
         if (_continuePaths is null || _continueScanner is null) unscanned.Add(ObjectKind.ContinueSession);
         if (_annotationsDirectory is null || _annotationScanner is null) unscanned.Add(ObjectKind.SessionAnnotations);
         return unscanned;
@@ -703,6 +707,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             ? ResolveAnnotationDestination(id, plaintext)
                             : kind == ObjectKind.ClaudeSession
                             ? ResolveClaudeDestination(id, plaintext)
+                            : kind == ObjectKind.ClaudeMemory
+                            ? ResolveClaudeMemoryDestination(id, plaintext)
                             : kind == ObjectKind.ContinueSession
                             ? ResolveContinueDestination(id, plaintext)
                             : Path.Combine(kind switch
@@ -927,6 +933,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (!string.Equals(ClaudeSessionPackage.ToLogicalId(package.SessionId), id.Value, StringComparison.Ordinal))
             throw new InvalidDataException("Claude conflict payload id does not match the logical object id.");
         return _claudePaths.SessionFilePath(package.Project, package.SessionId);
+    }
+
+    private string ResolveClaudeMemoryDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_claudePaths is null) throw new InvalidOperationException("Claude paths are not configured.");
+        var package = ClaudeMemoryPackage.Parse(plaintext, id.Value);
+        if (!string.Equals(ClaudeMemoryPackage.ToLogicalId(package.Project, package.Name), id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Claude memory payload id does not match the logical object id.");
+        return _claudePaths.MemoryFilePath(package.Project, package.Name);
     }
 
     private string ResolveContinueDestination(LogicalObjectId id, byte[] plaintext)
@@ -1298,6 +1313,17 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             else if (existing is not null)
                 path = existing.SourcePath;
         }
+        else if (version.Kind == ObjectKind.ClaudeMemory)
+        {
+            if (_claudePaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "Claude paths are not configured.");
+            var package = ClaudeMemoryPackage.Parse(plaintext, action.ObjectId.Value);
+            path = _claudePaths.MemoryFilePath(package.Project, package.Name);
+            if (existing is not null && existing.Kind != ObjectKind.ClaudeMemory)
+                relocateFrom = existing;
+            else if (existing is not null)
+                path = existing.SourcePath;
+        }
         else if (version.Kind == ObjectKind.GrokSession)
         {
             if (_grokPaths is null)
@@ -1337,6 +1363,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             {
                 ObjectKind.GrokSession => ".grokpkg",
                 ObjectKind.ClaudeSession => ".claudepkg",
+                ObjectKind.ClaudeMemory => ".clmempkg",
                 ObjectKind.ContinueSession => ".continuepkg",
                 ObjectKind.SessionAnnotations => ".annotation.json",
                 _ => ".jsonl"
@@ -1399,6 +1426,14 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             var claudePackage = ClaudeSessionPackage.Parse(bytes);
             if (!string.Equals(ClaudeSessionPackage.ToLogicalId(claudePackage.SessionId), expectedId.Value, StringComparison.Ordinal))
                 throw new InvalidDataException("Claude session package id does not match its logical object ID.");
+            return;
+        }
+
+        if (kind == ObjectKind.ClaudeMemory)
+        {
+            var memoryPackage = ClaudeMemoryPackage.Parse(bytes, expectedId.Value);
+            if (!string.Equals(ClaudeMemoryPackage.ToLogicalId(memoryPackage.Project, memoryPackage.Name), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Claude memory package id does not match its logical object ID.");
             return;
         }
 
@@ -1475,6 +1510,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             return await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);
 
         if (kind == ObjectKind.ClaudeSession) return ClaudeSessionPackage.BuildFromFile(sourcePath);
+
+        if (kind == ObjectKind.ClaudeMemory) return ClaudeMemoryPackage.BuildFromFile(sourcePath);
 
         if (kind == ObjectKind.GrokSession)
         {

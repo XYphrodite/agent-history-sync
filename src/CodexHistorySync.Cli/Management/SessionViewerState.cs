@@ -19,6 +19,9 @@ public sealed class SessionViewerState
 {
     public const int DefaultViewportRows = 20;
 
+    private static readonly IReadOnlySet<(ManagedAgent Agent, string SessionId)> NoExtra =
+        new HashSet<(ManagedAgent Agent, string SessionId)>();
+
     private SessionViewerState(
         IReadOnlyList<ManagedSession> allSessions,
         string listFilter,
@@ -29,11 +32,13 @@ public sealed class SessionViewerState
         SessionContentState content,
         int contentOffset,
         string searchQuery,
-        int matchIndex)
+        int matchIndex,
+        IReadOnlySet<(ManagedAgent Agent, string SessionId)>? extraMatches = null)
     {
         AllSessions = allSessions;
         ListFilter = listFilter ?? string.Empty;
-        Sessions = Filter(allSessions, ListFilter);
+        ExtraMatches = extraMatches ?? NoExtra;
+        Sessions = Filter(allSessions, ListFilter, ExtraMatches);
         ViewportRows = Math.Max(1, viewportRows);
         SelectedIndex = ClampSelection(selectedIndex, Sessions.Count);
         ListOffset = ClampViewport(listOffset, SelectedIndex, ViewportRows, Sessions.Count);
@@ -60,6 +65,11 @@ public sealed class SessionViewerState
 
     /// <summary>Title filter for the list. Empty means every session is shown.</summary>
     public string ListFilter { get; }
+
+    /// <summary>
+    /// Sessions the corpus index added to the filtered list, even when their title does not match.
+    /// </summary>
+    public IReadOnlySet<(ManagedAgent Agent, string SessionId)> ExtraMatches { get; }
 
     public int SelectedIndex { get; }
     public int ListOffset { get; }
@@ -101,13 +111,13 @@ public sealed class SessionViewerState
         ArgumentNullException.ThrowIfNull(content);
         var focus = content.Status == SessionContentStatus.Loaded ? Focus : SessionViewerFocus.List;
         return new SessionViewerState(AllSessions, ListFilter, SelectedIndex, ListOffset, focus, ViewportRows,
-            content, 0, SearchQuery, 0);
+            content, 0, SearchQuery, 0, ExtraMatches);
     }
 
     public SessionViewerState WithSearchQuery(string? query)
     {
         var state = new SessionViewerState(AllSessions, ListFilter, SelectedIndex, ListOffset, Focus, ViewportRows,
-            Content, ContentOffset, query ?? string.Empty, 0);
+            Content, ContentOffset, query ?? string.Empty, 0, ExtraMatches);
         return state.Matches.Count == 0 ? state : state.ScrollTo(state.Matches[0]);
     }
 
@@ -116,17 +126,21 @@ public sealed class SessionViewerState
     /// survives the filter, so typing and then clearing the query lands back where it started
     /// rather than at the top of a list of forty.
     /// </summary>
-    public SessionViewerState WithListFilter(string? query)
+    public SessionViewerState WithListFilter(
+        string? query,
+        IReadOnlySet<(ManagedAgent Agent, string SessionId)>? extraMatches = null)
     {
         var selected = SelectedSession;
-        var filtered = Filter(AllSessions, query ?? string.Empty);
+        var extra = extraMatches ?? NoExtra;
+        var filtered = Filter(AllSessions, query ?? string.Empty, extra);
         var index = selected is null ? 0 : IndexOf(filtered, selected);
         return new SessionViewerState(AllSessions, query ?? string.Empty, Math.Max(0, index), ListOffset, Focus,
-            ViewportRows, Content, ContentOffset, SearchQuery, MatchIndex);
+            ViewportRows, Content, ContentOffset, SearchQuery, MatchIndex, extra);
     }
 
     public SessionViewerState SetViewportRows(int rows) =>
-        new(AllSessions, ListFilter, SelectedIndex, ListOffset, Focus, rows, Content, ContentOffset, SearchQuery, MatchIndex);
+        new(AllSessions, ListFilter, SelectedIndex, ListOffset, Focus, rows, Content, ContentOffset, SearchQuery,
+            MatchIndex, ExtraMatches);
 
     /// <summary>Keeps the selected session by identity when it survives the rescan.</summary>
     public SessionViewerState ReplaceSnapshot(SessionCatalogSnapshot snapshot)
@@ -134,34 +148,36 @@ public sealed class SessionViewerState
         ArgumentNullException.ThrowIfNull(snapshot);
         var all = Flatten(snapshot);
         var selected = SelectedSession;
-        var index = selected is null ? SelectedIndex : IndexOf(Filter(all, ListFilter), selected);
+        var filtered = Filter(all, ListFilter, ExtraMatches);
+        var index = selected is null ? SelectedIndex : IndexOf(filtered, selected);
         var survived = index >= 0;
         return new SessionViewerState(
             all,
             ListFilter,
-            survived ? index : Math.Min(SelectedIndex, Math.Max(0, Filter(all, ListFilter).Count - 1)),
+            survived ? index : Math.Min(SelectedIndex, Math.Max(0, filtered.Count - 1)),
             ListOffset,
             survived ? Focus : SessionViewerFocus.List,
             ViewportRows,
             survived ? Content : new SessionContentState(SessionContentStatus.Empty),
             survived ? ContentOffset : 0,
             SearchQuery,
-            survived ? MatchIndex : 0);
+            survived ? MatchIndex : 0,
+            ExtraMatches);
     }
 
     private SessionViewerState Move(int delta) => Focus == SessionViewerFocus.List
         ? new SessionViewerState(AllSessions, ListFilter, SelectedIndex + delta, ListOffset, Focus, ViewportRows,
-            Content, ContentOffset, SearchQuery, MatchIndex)
+            Content, ContentOffset, SearchQuery, MatchIndex, ExtraMatches)
         : ScrollBy(delta);
 
     private SessionViewerState JumpToStart() => Focus == SessionViewerFocus.List
         ? new SessionViewerState(AllSessions, ListFilter, 0, 0, Focus, ViewportRows, Content, ContentOffset,
-            SearchQuery, MatchIndex)
+            SearchQuery, MatchIndex, ExtraMatches)
         : ScrollTo(0);
 
     private SessionViewerState JumpToEnd() => Focus == SessionViewerFocus.List
         ? new SessionViewerState(AllSessions, ListFilter, Sessions.Count - 1, ListOffset, Focus, ViewportRows,
-            Content, ContentOffset, SearchQuery, MatchIndex)
+            Content, ContentOffset, SearchQuery, MatchIndex, ExtraMatches)
         : ScrollTo(MaximumContentOffset);
 
     private SessionViewerState ScrollBy(int delta) => ScrollTo(ContentOffset + delta);
@@ -171,7 +187,7 @@ public sealed class SessionViewerState
 
     private SessionViewerState ScrollTo(int line) =>
         new(AllSessions, ListFilter, SelectedIndex, ListOffset, Focus, ViewportRows, Content,
-            Math.Clamp(line, 0, MaximumContentOffset), SearchQuery, MatchIndex);
+            Math.Clamp(line, 0, MaximumContentOffset), SearchQuery, MatchIndex, ExtraMatches);
 
     /// <summary>Steps to the next match and wraps, so repeated presses tour every hit.</summary>
     private SessionViewerState StepMatch()
@@ -179,17 +195,22 @@ public sealed class SessionViewerState
         if (Matches.Count == 0) return this;
         var next = (MatchIndex + 1) % Matches.Count;
         return new SessionViewerState(AllSessions, ListFilter, SelectedIndex, ListOffset, Focus, ViewportRows,
-            Content, Matches[next], SearchQuery, next);
+            Content, Matches[next], SearchQuery, next, ExtraMatches);
     }
 
     private SessionViewerState With(SessionViewerFocus focus) =>
         new(AllSessions, ListFilter, SelectedIndex, ListOffset, focus, ViewportRows, Content, ContentOffset,
-            SearchQuery, MatchIndex);
+            SearchQuery, MatchIndex, ExtraMatches);
 
-    private static IReadOnlyList<ManagedSession> Filter(IReadOnlyList<ManagedSession> sessions, string query) =>
+    private static IReadOnlyList<ManagedSession> Filter(
+        IReadOnlyList<ManagedSession> sessions,
+        string query,
+        IReadOnlySet<(ManagedAgent Agent, string SessionId)> extra) =>
         query.Length == 0
             ? sessions
-            : sessions.Where(session => session.Title.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+            : sessions.Where(session =>
+                session.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                extra.Contains((session.Agent, session.SessionId))).ToArray();
 
     private static int IndexOf(IReadOnlyList<ManagedSession> sessions, ManagedSession session)
     {

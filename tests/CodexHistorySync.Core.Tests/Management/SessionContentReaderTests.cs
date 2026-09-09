@@ -9,10 +9,11 @@ public sealed class SessionContentReaderTests
     [InlineData(ManagedAgent.Codex, "codex")]
     [InlineData(ManagedAgent.Grok, "grok")]
     [InlineData(ManagedAgent.Claude, "claude")]
+    [InlineData(ManagedAgent.Continue, "continue")]
     public async Task ReadAsync_UsesTheReaderThatOwnsTheAgent(ManagedAgent agent, string expected)
     {
         var reader = new SessionContentReader(
-            new StubReader("codex"), new StubReader("grok"), new StubReader("claude"));
+            new StubReader("codex"), new StubReader("grok"), new StubReader("claude"), new StubReader("continue"));
 
         var conversation = await reader.ReadAsync(Session(agent), CancellationToken.None);
 
@@ -102,6 +103,37 @@ public sealed class SessionContentReaderTests
             Assert.Equal(ConversationAgent.Claude, conversation.SourceAgent);
             Assert.Equal("Real Claude title", conversation.Title);
             Assert.Equal([new PortableTurn(ConversationRole.User, "real question")], conversation.Turns);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public async Task DefaultConstructor_WiresContinueToItsOwnRealReader()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "chs-content-continue-" + Guid.NewGuid().ToString("N"));
+        var sessionId = "9490954d-d7dd-4cbe-984c-6172d60bf3dc";
+        var sessions = Path.Combine(root, "sessions");
+        Directory.CreateDirectory(sessions);
+        var path = Path.Combine(sessions, sessionId + ".json");
+        await File.WriteAllTextAsync(path,
+            """
+            {"sessionId":"9490954d-d7dd-4cbe-984c-6172d60bf3dc","title":"hi","workspaceDirectory":"","history":[{"message":{"role":"user","content":[{"type":"text","text":"real continue question"}]}}]}
+            """,
+            new System.Text.UTF8Encoding(false));
+
+        try
+        {
+            var session = new ManagedSession(
+                ManagedAgent.Continue, sessionId, path, "ignored", DateTimeOffset.UnixEpoch, false, true);
+
+            var conversation = await new SessionContentReader().ReadAsync(session, CancellationToken.None);
+
+            Assert.Equal(ConversationAgent.Continue, conversation.SourceAgent);
+            Assert.Equal("hi", conversation.Title);
+            Assert.Equal([new PortableTurn(ConversationRole.User, "real continue question")], conversation.Turns);
         }
         finally
         {

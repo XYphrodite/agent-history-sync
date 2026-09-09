@@ -319,6 +319,33 @@ internal static class PathSafety
             return canonical;
         }
 
+        if (kind == ObjectKind.ClaudeMemory)
+        {
+            if (claudePaths is null)
+                throw new ArgumentException("Claude paths are required for Claude memory destinations.", parameterName);
+            // projects/<project>/memory/<name>.md exactly: the memory directory sits inside the
+            // project folder, which is one level under the projects root. Anything deeper is not
+            // Claude's layout, and the session transcripts one level up are a different kind.
+            if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetExtension(canonical), ".md"))
+                throw new ArgumentException("Claude memory destinations must use the .md extension.", parameterName);
+            var memoryDirectory = Path.GetDirectoryName(canonical);
+            if (memoryDirectory is null ||
+                !StringComparer.OrdinalIgnoreCase.Equals(Path.GetFileName(memoryDirectory), "memory"))
+                throw new ArgumentException("Claude memory destinations must sit in a memory directory.", parameterName);
+            var projectDirectory = Path.GetDirectoryName(memoryDirectory);
+            if (projectDirectory is null ||
+                !StringComparer.OrdinalIgnoreCase.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(projectDirectory) ?? string.Empty),
+                    Path.TrimEndingDirectorySeparator(claudePaths.Projects)))
+                throw new ArgumentException("The destination is outside the synchronized Claude projects directory.", parameterName);
+            try { ValidateFileComponent(Path.GetFileNameWithoutExtension(canonical), parameterName); }
+            catch (ArgumentException exception)
+            {
+                throw new ArgumentException("Claude memory destinations must be named <name>.md.", parameterName, exception);
+            }
+            return canonical;
+        }
+
         if (kind == ObjectKind.ClaudeSession)
         {
             if (claudePaths is null)
@@ -353,7 +380,7 @@ internal static class PathSafety
         {
             ObjectKind.ActiveSession => paths.Sessions,
             ObjectKind.ArchivedSession => paths.ArchivedSessions,
-            _ => throw new ArgumentException("Only active, archived, Grok, and Claude sessions can be written as history.", parameterName)
+            _ => throw new ArgumentException("Only synchronized history objects can be written as history.", parameterName)
         };
         if (!CodexPaths.IsPathWithin(canonical, root) || StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(root)))
             throw new ArgumentException("The destination is outside its synchronized Codex directory.", parameterName);

@@ -1,6 +1,7 @@
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Search;
 
 namespace CodexHistorySync.Cli.Management;
 
@@ -12,7 +13,8 @@ public sealed class SessionViewerApplication(
     ISessionViewerView view,
     ISessionAnnotationStore? annotations = null,
     ISessionTitleSuggester? suggester = null,
-    string? titlingRejection = null)
+    string? titlingRejection = null,
+    ISessionSearchIndex? searchIndex = null)
 {
     private const string DeleteSyncWarning = "Local deletion may be restored by sync.";
 
@@ -34,6 +36,7 @@ public sealed class SessionViewerApplication(
     /// </summary>
     private const int CacheCapacity = 3;
     private readonly LinkedList<(string Key, PortableConversation Conversation)> cache = new();
+    private Task indexTask = Task.CompletedTask;
 
     public Task RunAsync(CancellationToken cancellationToken) =>
         view.RunDisplayAsync(RunLoopAsync, cancellationToken);
@@ -43,7 +46,9 @@ public sealed class SessionViewerApplication(
         SessionViewerState state;
         try
         {
-            state = SessionViewerState.Create(await catalog.ScanAsync(cancellationToken), view.ContentRows);
+            var snapshot = await catalog.ScanAsync(cancellationToken);
+            state = SessionViewerState.Create(snapshot, view.ContentRows);
+            indexTask = StartIndexing(snapshot, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -88,7 +93,7 @@ public sealed class SessionViewerApplication(
                     state = state.WithSearchQuery(view.ReadSearchQuery(state, cancellationToken));
                     break;
                 case SessionViewerCommand.FilterList:
-                    state = state.WithListFilter(view.ReadListFilter(state, cancellationToken));
+                    state = await ApplyListFilterAsync(state, cancellationToken).ConfigureAwait(false);
                     break;
                 case SessionViewerCommand.Export:
                     await ExportAsync(state, cancellationToken).ConfigureAwait(false);
@@ -411,11 +416,62 @@ public sealed class SessionViewerApplication(
         }
     }
 
+    private async Task<SessionViewerState> ApplyListFilterAsync(
+        SessionViewerState state,
+        CancellationToken cancellationToken)
+    {
+        var query = view.ReadListFilter(state, cancellationToken);
+        IReadOnlySet<(ManagedAgent Agent, string SessionId)>? extra = null;
+        if (searchIndex is not null && query.Length > 0 && indexTask.IsCompletedSuccessfully)
+        {
+            try
+            {
+                var hits = await searchIndex.SearchAsync(query, SessionSearchIndex.MaximumSearchLimit, cancellationToken)
+                    .ConfigureAwait(false);
+                extra = hits.Select(hit => (hit.Agent, hit.SessionId)).ToHashSet();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                extra = null;
+            }
+        }
+
+        return state.WithListFilter(query, extra);
+    }
+
+    private Task StartIndexing(SessionCatalogSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (searchIndex is null) return Task.CompletedTask;
+        return IndexInBackgroundAsync(snapshot, cancellationToken);
+    }
+
+    private async Task IndexInBackgroundAsync(SessionCatalogSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await searchIndex!.EnsureCurrentAsync(snapshot, contentReader, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // A failed index leaves title-only filtering working; the next refresh tries again.
+        }
+    }
+
     private async Task<SessionViewerState> RefreshAsync(SessionViewerState state, CancellationToken cancellationToken)
     {
         try
         {
-            return state.ReplaceSnapshot(await catalog.ScanAsync(cancellationToken));
+            var snapshot = await catalog.ScanAsync(cancellationToken);
+            indexTask = StartIndexing(snapshot, cancellationToken);
+            return state.ReplaceSnapshot(snapshot);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

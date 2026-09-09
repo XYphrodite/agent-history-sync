@@ -78,6 +78,9 @@ public sealed class CodexHistoryWriter
         if (incoming.Kind == ObjectKind.ClaudeSession)
             return await ImportClaudePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.ClaudeMemory)
+            return await ImportClaudeMemoryPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.ContinueSession)
             return await ImportContinuePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
@@ -264,6 +267,42 @@ public sealed class CodexHistoryWriter
         }
     }
 
+    private async Task<ImportApplyResult> ImportClaudeMemoryPackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_claudePaths is null) throw new InvalidOperationException("Claude paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = ClaudeMemoryPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        var package = ClaudeMemoryPackage.Parse(packageBytes, incoming.Id.Value);
+        if (!string.Equals(ClaudeMemoryPackage.ToLogicalId(package.Project, package.Name), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Claude memory package id does not match the logical object id.");
+        if (!string.Equals(_claudePaths.MemoryFilePath(package.Project, package.Name), destination, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Claude memory destination does not match the file it carries.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.ClaudeMemory, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+
+        try
+        {
+            EnsureCodexInactive();
+            ClaudeMemoryPackage.Materialize(package, _claudePaths);
+            var after = await ContentHashAsync(destination, ObjectKind.ClaudeMemory, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Claude memory materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
     /// <summary>
     /// Imports a Continue session. Unlike the other three agents this touches a file the import
     /// does not own — the shared session index — so the index is backed up alongside the session,
@@ -424,6 +463,20 @@ public sealed class CodexHistoryWriter
                 return SessionAnnotationPackage.HashPackage(await File.ReadAllBytesAsync(destination, ct).ConfigureAwait(false));
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
+
+        if (kind == ObjectKind.ClaudeMemory)
+        {
+            if (!File.Exists(destination)) return null;
+            try
+            {
+                return ClaudeMemoryPackage.HashPackage(ClaudeMemoryPackage.BuildFromFile(destination));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
+                                                  or JsonException or DecoderFallbackException or ArgumentException)
             {
                 return null;
             }
