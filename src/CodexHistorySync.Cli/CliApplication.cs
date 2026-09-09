@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using CodexHistorySync.Cli.Search;
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Model;
@@ -27,6 +28,8 @@ public sealed record CliStatusReport(int Local, int Remote, int Pending, int Con
     public bool ContinueUncertain { get; init; }
 
     public int ClaudeSessions { get; init; }
+
+    public int ClaudeMemory { get; init; }
 
     /// <summary>True when the Claude scan could not confirm what it did not find.</summary>
     public bool ClaudeUncertain { get; init; }
@@ -109,6 +112,7 @@ public sealed class CliApplication
     private readonly IAgentCliOperations? agentOperations;
     private readonly ISessionManagerRunner? managerRunner;
     private readonly ISelfUpdateOperations? selfUpdate;
+    private readonly ISessionSearchCommand? searchCommand;
     private readonly string? localAppDataDirectory;
 
     public CliApplication(
@@ -117,7 +121,8 @@ public sealed class CliApplication
         IAgentCliOperations? agentOperations = null,
         ISessionManagerRunner? managerRunner = null,
         ISelfUpdateOperations? selfUpdate = null,
-        string? localAppDataDirectory = null)
+        string? localAppDataDirectory = null,
+        ISessionSearchCommand? searchCommand = null)
     {
         this.localAppDataDirectory = localAppDataDirectory;
         this.services = services ?? throw new ArgumentNullException(nameof(services));
@@ -125,6 +130,7 @@ public sealed class CliApplication
         this.agentOperations = agentOperations;
         this.managerRunner = managerRunner;
         this.selfUpdate = selfUpdate;
+        this.searchCommand = searchCommand;
     }
 
     internal CliApplication(ICliConsole console, ISessionManagerRunner managerRunner)
@@ -143,6 +149,16 @@ public sealed class CliApplication
         this.selfUpdate = selfUpdate ?? throw new ArgumentNullException(nameof(selfUpdate));
     }
 
+    /// <summary>
+    /// Search-only application. Corpus search is local catalog work and must not construct Git
+    /// or the sync engine, the same way <c>--sessions</c> does not.
+    /// </summary>
+    internal CliApplication(ICliConsole console, ISessionSearchCommand searchCommand)
+    {
+        this.console = console ?? throw new ArgumentNullException(nameof(console));
+        this.searchCommand = searchCommand ?? throw new ArgumentNullException(nameof(searchCommand));
+    }
+
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -154,6 +170,14 @@ public sealed class CliApplication
                 if (managerRunner is null) return Usage();
                 await managerRunner.RunAsync(cancellationToken).ConfigureAwait(false);
                 return 0;
+            }
+
+            if (args is ["search", ..])
+            {
+                if (searchCommand is null || args.Length < 2) return Usage();
+                var query = string.Join(' ', args.Skip(1));
+                if (string.IsNullOrWhiteSpace(query)) return Usage();
+                return await searchCommand.SearchAsync(query, cancellationToken).ConfigureAwait(false);
             }
 
             return args.Length == 0 ? Usage() : args[0] switch
@@ -300,7 +324,7 @@ public sealed class CliApplication
         {
             ("codex", [ObjectKind.ActiveSession, ObjectKind.ArchivedSession, ObjectKind.Attachment]),
             ("grok", [ObjectKind.GrokSession]),
-            ("claude", [ObjectKind.ClaudeSession]),
+            ("claude", [ObjectKind.ClaudeSession, ObjectKind.ClaudeMemory]),
             ("annotations", [ObjectKind.SessionAnnotations]),
         };
         var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
@@ -315,7 +339,9 @@ public sealed class CliApplication
             if (totals.Count == 0) continue;
             var detail = name == "codex"
                 ? $" (active={Sum(byKind, [kinds[0]]).Count} archived={Sum(byKind, [kinds[1]]).Count} attachments={Sum(byKind, [kinds[2]]).Count})"
-                : string.Empty;
+                : name == "claude" && Sum(byKind, [ObjectKind.ClaudeMemory]).Count > 0
+                    ? $" (sessions={Sum(byKind, [ObjectKind.ClaudeSession]).Count} memory={Sum(byKind, [ObjectKind.ClaudeMemory]).Count})"
+                    : string.Empty;
             console.WriteLine($"  {name}={totals.Count} size={FormatSize(totals.Bytes)}{detail}");
         }
         if (other.Count > 0) console.WriteLine($"  other={other.Count} size={FormatSize(other.Bytes)}");
@@ -356,7 +382,8 @@ public sealed class CliApplication
         console.WriteLine($"local={result.Local} remote={result.Remote} pending={result.Pending} conflicts={result.Conflicts} " +
             $"remote-revision={SafeToken(result.RemoteRevision)} last-successful-revision={SafeToken(result.LastSuccessfulRevision)}");
         console.WriteLine($"claude-home={(result.ClaudeHome is null ? "none" : SafeToken(result.ClaudeHome))} " +
-            $"claude-sessions={result.ClaudeSessions} claude-uncertain={(result.ClaudeUncertain ? "yes" : "no")}");
+            $"claude-sessions={result.ClaudeSessions} claude-memory={result.ClaudeMemory} " +
+            $"claude-uncertain={(result.ClaudeUncertain ? "yes" : "no")}");
         console.WriteLine($"continue-home={(result.ContinueHome is null ? "none" : SafeToken(result.ContinueHome))} " +
             $"continue-sessions={result.ContinueSessions} continue-uncertain={(result.ContinueUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
@@ -696,7 +723,7 @@ public sealed class CliApplication
 
     private int Usage()
     {
-        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles> [options] [--manage] [--sessions] [--version]");
+        console.WriteError("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search> [options] [--manage] [--sessions] [--version]");
         console.WriteError("  titles                       show what session titling is configured with");
         console.WriteError("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
         console.WriteError("  titles off                   turn session titling off");
@@ -706,11 +733,12 @@ public sealed class CliApplication
 
     private int Help()
     {
-        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles> [options] [--manage] [--sessions] [--version]");
+        console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search> [options] [--manage] [--sessions] [--version]");
         console.WriteLine("  titles                       show what session titling is configured with");
         console.WriteLine("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
         console.WriteLine("  titles off                   turn session titling off");
         console.WriteLine("  titles test                  ask the endpoint to name a sample session");
+        console.WriteLine("  search <query>               find sessions by title or conversation text");
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         console.WriteLine("update [--check] [--version <tag>]  install the latest published release");
         console.WriteLine("--manage    copy and delete sessions across agents");

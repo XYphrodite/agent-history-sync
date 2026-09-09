@@ -9,27 +9,34 @@ public interface ISessionContentReader
 
 /// <summary>
 /// Reads a catalog row's conversation through its own agent's reader, so the viewer has one
-/// call for three native formats. Read-only: nothing here touches an agent home.
+/// call for every native format. Read-only: nothing here touches an agent home.
 /// </summary>
 public sealed class SessionContentReader : ISessionContentReader
 {
     private readonly IConversationReader codexReader;
     private readonly IConversationReader grokReader;
     private readonly IConversationReader claudeReader;
+    private readonly IConversationReader continueReader;
 
     public SessionContentReader()
-        : this(new CodexConversationReader(), new GrokConversationReader(), new ClaudeConversationReader())
+        : this(
+            new CodexConversationReader(),
+            new GrokConversationReader(),
+            new ClaudeConversationReader(),
+            new ContinueConversationReader())
     {
     }
 
     internal SessionContentReader(
         IConversationReader codexReader,
         IConversationReader grokReader,
-        IConversationReader claudeReader)
+        IConversationReader claudeReader,
+        IConversationReader? continueReader = null)
     {
         this.codexReader = codexReader ?? throw new ArgumentNullException(nameof(codexReader));
         this.grokReader = grokReader ?? throw new ArgumentNullException(nameof(grokReader));
         this.claudeReader = claudeReader ?? throw new ArgumentNullException(nameof(claudeReader));
+        this.continueReader = continueReader ?? new ContinueConversationReader();
     }
 
     public Task<PortableConversation> ReadAsync(ManagedSession session, CancellationToken cancellationToken)
@@ -50,6 +57,7 @@ public sealed class SessionContentReader : ISessionContentReader
         ManagedAgent.Codex => codexReader,
         ManagedAgent.Grok => grokReader,
         ManagedAgent.Claude => claudeReader,
+        ManagedAgent.Continue => continueReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 }

@@ -1220,6 +1220,36 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task Restart_RecoversAnInterruptedMutationThatTouchedClaudeMemory()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var claude = CreateClaudeHome("restart-memory");
+        var device = CreateDevice("restart-memory", key, new MemoryProvider(), claudePaths: claude);
+        const string project = "c--Repos-Demo";
+        const string name = "tailnet-machines";
+        var path = await WriteClaudeMemoryFileAsync(claude, project, name, "before\n");
+        var before = await File.ReadAllTextAsync(path);
+        var beforeHash = ClaudeMemoryPackage.HashPackage(ClaudeMemoryPackage.BuildFromFile(path));
+        var afterHash = ClaudeMemoryPackage.HashPackage(ClaudeMemoryPackage.Build(project, name, "after\n"));
+        var target = new LocalObject(new LogicalObjectId(ClaudeMemoryPackage.ToLogicalId(project, name)),
+            ObjectKind.ClaudeMemory, path, beforeHash, before.Length, DateTimeOffset.UtcNow);
+        var operationDirectory = Path.Combine(device.StagingRoot, "interrupted-memory");
+        Directory.CreateDirectory(operationDirectory);
+        var interrupted = await HistoryMutationBatch.PrepareAsync(device.Writer, operationDirectory,
+            "interrupted-memory",
+            [new HistoryMutationPlan(target, ExpectedHistoryState.Present(beforeHash), ExpectedHistoryState.Present(afterHash))],
+            CancellationToken.None);
+        await interrupted.BeginApplyAsync(target.Id, CancellationToken.None);
+        await File.WriteAllTextAsync(path, "after\n", new UTF8Encoding(false));
+        var restarted = CreateDevice("restart-memory", key, new OfflineProvider(), claudePaths: claude);
+
+        await Assert.ThrowsAsync<IOException>(() => restarted.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None));
+
+        Assert.Equal(before, await File.ReadAllTextAsync(path));
+        Assert.False(Directory.Exists(operationDirectory));
+    }
+
+    [Fact]
     public async Task Restart_DoesNotRollbackMutationWhoseBaselineWasAlreadySaved()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -1537,6 +1567,15 @@ public sealed class SyncFailureTests : IDisposable
     private static string ClaudeRecord(string sessionId, string cwd) =>
         $"{{\"type\":\"user\",\"cwd\":\"{JsonEncodedText.Encode(cwd)}\",\"sessionId\":\"{sessionId}\"," +
         $"\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"question\"}}]}}}}\n";
+
+    private static async Task<string> WriteClaudeMemoryFileAsync(ClaudePaths paths, string project, string name, string body)
+    {
+        var directory = Path.Combine(paths.Projects, project, "memory");
+        Directory.CreateDirectory(directory);
+        var file = Path.Combine(directory, name + ".md");
+        await File.WriteAllTextAsync(file, body, new UTF8Encoding(false));
+        return file;
+    }
 
     private static async Task<string> WriteClaudeSessionAsync(ClaudePaths paths, string project, string sessionId, string cwd)
     {

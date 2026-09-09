@@ -269,6 +269,29 @@ public sealed class SessionViewerStateTests
         Assert.Equal(["two", "three"], state.Sessions.Select(session => session.SessionId));
     }
 
+    [Fact]
+    public void ListFilterUnionsTitleMatchesWithCorpusHits()
+    {
+        var state = SessionViewerState.Create(ThreeSessions());
+
+        var filtered = state.WithListFilter(
+            "no-title-has-this",
+            extraMatches: new HashSet<(ManagedAgent, string)> { (ManagedAgent.Codex, "two") });
+
+        Assert.Equal(["two"], filtered.Sessions.Select(session => session.SessionId));
+    }
+
+    [Fact]
+    public void ListFilterWithoutCorpusHitsStaysTitleOnly()
+    {
+        var state = SessionViewerState.Create(ThreeSessions());
+
+        var filtered = state.WithListFilter("no-title-has-this");
+
+        Assert.Empty(filtered.Sessions);
+        Assert.Null(filtered.SelectedSession);
+    }
+
     private static SessionCatalogSnapshot ThreeSessions() => Snapshot(
         codex:
         [

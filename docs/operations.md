@@ -104,7 +104,7 @@ One list holds every session from every installed agent, newest first, with an `
 | Up / Down | Move the selection, or scroll the text once it has focus |
 | Left / Right | Move focus between the list and the text |
 | PgUp / PgDn / Home / End | Scroll the text |
-| `/` | Follows the focus: with the list focused it filters sessions by title, with the text focused it searches inside the open session; `N` steps to the next match and wraps |
+| `/` | Follows the focus: with the list focused it filters sessions by title and, once the local catalog is warm, by conversation text; with the text focused it searches inside the open session; `N` steps to the next match and wraps |
 | `E` | Export the open session to `%USERPROFILE%\Documents\agent-sync\<agent>-<id>.md` |
 | `T` | Name the open session with the configured local model, when one is configured |
 | `A` | Type a title and a description for the open session |
@@ -112,7 +112,15 @@ One list holds every session from every installed agent, newest first, with an `
 | `R` | Rescan |
 | `Q` / `Esc` | Exit |
 
-The two things `/` can do look alike and are not. Filtering narrows the list to sessions whose **title** matches, showing `matched/total` beneath the panels; searching walks the **text** of the one session already open, showing `current/total` matches. The filter keeps the selected session when it survives the query, so typing and clearing lands back where you were rather than at the top of a list of forty. `Esc` clears whichever of the two is active before it offers to leave.
+The two things `/` can do look alike and are not. Filtering narrows the list to sessions whose **title** matches, showing `matched/total` beneath the panels; searching walks the **text** of the one session already open, showing `current/total` matches. After the local catalog has indexed this machine's sessions, the list filter also includes conversations whose portable user/assistant text matches even when the title does not. The first frame of `--sessions` does not wait for that index; a search before it is warm is title-only, the same as before. The filter keeps the selected session when it survives the query, so typing and clearing lands back where you were rather than at the top of a list of forty. `Esc` clears whichever of the two is active before it offers to leave.
+
+### Corpus search
+
+```powershell
+agent-sync search <query>
+```
+
+The same local catalog from the command line. It scans native session homes, updates `%LOCALAPPDATA%\CodexHistorySync\catalog.db` (SQLite FTS5 over portable user/assistant text), and prints matching agent, session id, title, and a snippet. It does not construct Git, GitHub, or the sync engine. Exit code 0 means hits, 1 means none, 2 is usage. Tool calls, reasoning, and native paths are not indexed and are not printed. The catalog is local to this machine; it is not the encrypted remote snapshot.
 
 Every screen carries the same header: the name, the version, and the seven-character commit the build came from. `agent-sync --version` prints the same pair.
 
@@ -237,6 +245,16 @@ Repository index contains an invalid object kind.
 ```
 
 That breaks `pull` on the old machine completely, not just for Claude objects. **Upgrade every machine that shares the repository before the first push that carries a Claude session.** Checking is cheap: `agent-sync status` prints `claude-sessions=` on an upgraded build and does not on an older one.
+
+### Claude memory files
+
+When a project has a `memory/` directory, each `*.md` file in it — including the `MEMORY.md` index — is synchronized as its own object under logical id `cm-<hex(project)>.<name>`. The traveling bytes are the markdown itself after newline normalization; the project segment lives in the id because it cannot be recovered from the body. There is no size limiter: these files are small, and a truncation that is not a fixed point is how imported sessions were left in permanent conflict.
+
+Memory files are not session history. They do not appear in `--manage` or `--sessions`. A machine without a Claude home defers them the same way it defers Claude sessions, and never publishes a tombstone for a kind it did not scan.
+
+### Upgrade every machine before the first Claude memory push
+
+`ObjectKind.ClaudeMemory` is a new integer in the encrypted index, and the rule from [the Claude gate](#upgrade-every-machine-before-the-first-claude-push) applies unchanged: a build that does not know the value rejects the **whole** index and its `pull` stops working for every agent, not just for memory files. Upgrade every machine sharing the repository before the first push that carries one. `agent-sync status` prints `claude-memory=` on a build that knows the kind and does not on an older one.
 
 ## Continue sessions
 

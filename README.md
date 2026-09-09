@@ -8,7 +8,7 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 
 ## English
 
-> **Upgrading with more than one machine:** update **every** machine before the first `push` that carries a session annotation - a title or description of your own. `ObjectKind.SessionAnnotations` is new in the encrypted index and an older build rejects the whole index when it meets it. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-annotation-push).
+> **Upgrading with more than one machine:** update **every** machine before the first `push` that carries a Claude memory file. `ObjectKind.ClaudeMemory` is new in the encrypted index and an older build rejects the whole index when it meets it. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-claude-memory-push).
 
 > **Upgrading from 0.5.x with more than one machine:** update **every** machine before the first `push` that carries a Claude Code session. An older build rejects the whole encrypted index when it meets the new object kind, which breaks `pull` there entirely — not just for Claude. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-claude-push).
 
@@ -18,7 +18,7 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 |---|---|---|
 | **Codex** | `%USERPROFILE%\.codex` | Active/archived session JSONL (size-normalized; no SQLite, auth, logs, or attachments) |
 | **Grok CLI** | `%USERPROFILE%\.grok\sessions` | Per-session package: `chat_history` + `summary` (no `terminal/` logs) |
-| **Claude Code** | `%USERPROFILE%\.claude\projects` | One transcript JSONL per session (nothing from `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
+| **Claude Code** | `%USERPROFILE%\.claude\projects` | One transcript JSONL per session, plus each markdown file under `<project>/memory/` as its own object (nothing from `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
 | **Continue** | `%USERPROFILE%\.continue\sessions` | One session JSON plus its entry in the shared `sessions.json` (nothing from `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
 
 Beside the sessions themselves, `agent-sync` synchronizes the **titles and descriptions you give them** in `--sessions`: one small encrypted object per named session, kept in `%LOCALAPPDATA%\CodexHistorySync\annotations` and never written into an agent home.
@@ -109,6 +109,7 @@ agent-sync update
 agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # or --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
+agent-sync search <query>
 ```
 
 If an active Codex or Grok process locks a session after scanning, `push`/`sync` publishes the remaining sessions and safely retries the locked session on a later run.
@@ -129,7 +130,13 @@ This opens a session manager with one panel per installed agent (Codex, Grok, Cl
 agent-sync --sessions
 ```
 
-One list of every session from every installed agent, with the selected conversation beside it. `/` filters the list by title or searches inside the open session, depending on which pane has focus; export to Markdown and delete are here too. Also local-only. See [operations](docs/operations.md#session-viewer).
+One list of every session from every installed agent, with the selected conversation beside it. `/` filters the list by title or searches inside the open session, depending on which pane has focus; once the local catalog is warm, the list filter also matches conversation text. Export to Markdown and delete are here too. Also local-only. See [operations](docs/operations.md#session-viewer).
+
+```powershell
+agent-sync search xylophone handshake
+```
+
+Same corpus search from the command line: portable user/assistant text in `%LOCALAPPDATA%\CodexHistorySync\catalog.db` (SQLite FTS5). It does not contact GitHub or the sync repository.
 
 ### Docs
 
@@ -156,7 +163,7 @@ Deleting `%LOCALAPPDATA%\CodexHistorySync` removes keys, config, conflict eviden
 |---|---|---|
 | **Codex** | `%USERPROFILE%\.codex` | JSONL активных/архивных сессий (сжатый вид; без SQLite, auth, логов, вложений) |
 | **Grok CLI** | `%USERPROFILE%\.grok\sessions` | Пакет на сессию: `chat_history` + `summary` (без логов `terminal/`) |
-| **Claude Code** | `%USERPROFILE%\.claude\projects` | По одному JSONL-транскрипту на сессию (ничего из `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
+| **Claude Code** | `%USERPROFILE%\.claude\projects` | По одному JSONL-транскрипту на сессию, плюс каждый markdown-файл из `<project>/memory/` отдельным объектом (ничего из `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
 | **Continue** | `%USERPROFILE%\.continue\sessions` | JSON сессии плюс её запись в общем `sessions.json` (ничего из `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
 
 Каждый успешный publish переписывает `main` в **один orphan-коммит** (хранилище-snapshot, не append-only история). Крупные tool-output’ы, compaction и картинки отбрасываются или обрезаются перед шифрованием. Локальные каталоги агентов **не меняются**.
@@ -243,6 +250,7 @@ agent-sync update
 agent-sync conflicts
 agent-sync resolve CONFLICT_ID --keep-local    # или --keep-remote
 agent-sync resolve CONFLICT_ID --export-both C:\Recovery\new-directory
+agent-sync search <query>
 ```
 
 Если активный процесс Codex или Grok блокирует сессию после сканирования, `push`/`sync` публикует остальные и безопасно повторит заблокированную сессию позже.
@@ -263,7 +271,13 @@ agent-sync --manage
 agent-sync --sessions
 ```
 
-Один список сессий всех установленных агентов и текст выбранной рядом. `/` фильтрует список по названию или ищет внутри открытой сессии — смотря какая панель в фокусе; есть экспорт в Markdown и удаление. Тоже только локально. Подробности — в [operations](docs/operations.md#session-viewer).
+Один список сессий всех установленных агентов и текст выбранной рядом. `/` фильтрует список по названию или ищет внутри открытой сессии — смотря какая панель в фокусе; когда локальный каталог тёплый, фильтр списка ищет и по тексту разговора. Есть экспорт в Markdown и удаление. Тоже только локально. Подробности — в [operations](docs/operations.md#session-viewer).
+
+```powershell
+agent-sync search xylophone handshake
+```
+
+Тот же поиск по корпусу из командной строки: portable-текст user/assistant в `%LOCALAPPDATA%\CodexHistorySync\catalog.db` (SQLite FTS5). GitHub и репозиторий синхронизации не трогает.
 
 ### Документация
 
