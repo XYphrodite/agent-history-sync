@@ -19,6 +19,11 @@ internal sealed class SelfUpdateProgressDisplay(IAnsiConsole console)
             {
                 if (progress.Phase == lastPhase) return;
                 lastPhase = progress.Phase;
+                if (progress.Phase == SelfUpdatePhase.ReleaseAvailable)
+                {
+                    ReleaseNotesDisplay.Write(console, progress.Release!);
+                    return;
+                }
                 console.WriteLine(Description(progress));
             });
         }
@@ -41,6 +46,15 @@ internal sealed class SelfUpdateProgressDisplay(IAnsiConsole console)
                 {
                     return await service.UpdateAsync(request, cancellationToken, progress =>
                     {
+                        if (progress.Phase == SelfUpdatePhase.ReleaseAvailable)
+                        {
+                            task?.StopTask();
+                            task = null;
+                            lastPhase = progress.Phase;
+                            // Write outside the transient progress tasks so the notes survive AutoClear.
+                            ReleaseNotesDisplay.Write(console, progress.Release!);
+                            return;
+                        }
                         if (progress.Phase != lastPhase)
                         {
                             task?.StopTask();

@@ -22,7 +22,7 @@ public sealed class SelfUpdateServiceTests
 
         await fixture.Service(source).UpdateAsync(new SelfUpdateRequest(), CancellationToken.None, progress.Add);
 
-        Assert.Equal(new[] { SelfUpdatePhase.Checking, SelfUpdatePhase.Downloading,
+        Assert.Equal(new[] { SelfUpdatePhase.Checking, SelfUpdatePhase.ReleaseAvailable, SelfUpdatePhase.Downloading,
             SelfUpdatePhase.Verifying, SelfUpdatePhase.Installing }, progress.Select(p => p.Phase).Distinct());
         var download = progress.Where(p => p.Phase == SelfUpdatePhase.Downloading).ToArray();
         Assert.Equal(0, download[0].ReceivedBytes);
@@ -43,7 +43,10 @@ public sealed class SelfUpdateServiceTests
         await fixture.Service(source).UpdateAsync(new SelfUpdateRequest(CheckOnly: checkOnly),
             CancellationToken.None, progress.Add);
 
-        Assert.Equal(SelfUpdatePhase.Checking, Assert.Single(progress).Phase);
+        Assert.Equal(checkOnly
+            ? new[] { SelfUpdatePhase.Checking, SelfUpdatePhase.ReleaseAvailable }
+            : new[] { SelfUpdatePhase.Checking }, progress.Select(p => p.Phase));
+        if (checkOnly) Assert.Equal(tag, progress[^1].Release!.Tag);
         Assert.Equal(0, source.Downloads);
     }
 

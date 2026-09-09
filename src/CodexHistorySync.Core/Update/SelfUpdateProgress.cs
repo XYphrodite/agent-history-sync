@@ -5,7 +5,8 @@ public enum SelfUpdatePhase
     Checking,
     Downloading,
     Verifying,
-    Installing
+    Installing,
+    ReleaseAvailable
 }
 
 /// <summary>Reported synchronously, in order, as an update proceeds. Byte counts describe only the download.</summary>

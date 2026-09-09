@@ -10,7 +10,11 @@ public sealed record ReleaseDescriptor(
     ReleaseVersion Version,
     Uri ExecutableUrl,
     Uri ChecksumUrl,
-    long SizeBytes = 0);
+    long SizeBytes = 0)
+{
+    public string? Notes { get; init; }
+    public Uri? ReleasePageUrl { get; init; }
+}
 
 /// <summary>
 /// Where releases come from. Kept behind an interface so the update logic — version
