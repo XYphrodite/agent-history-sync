@@ -118,6 +118,10 @@ If an active Codex or Grok process locks a session after scanning, `push`/`sync`
 
 Manual `sync`, `push`, and `pull` print elapsed phase updates while they run. Codex/Grok and per-session reads are bounded-parallel; unchanged repositories authenticate the encrypted index and exact opaque-object set without loading every remote ciphertext body.
 
+### Local MCP server
+
+`agent-sync mcp` lets an MCP client search local sessions with `search_sessions` and read paged user/assistant text with `get_session`. It uses stdio and the same local SQLite catalog as `search`; no GitHub connection or joined repository is needed. See [MCP setup and tool arguments](docs/mcp.md).
+
 ### Local session manager
 
 ```powershell
@@ -260,6 +264,10 @@ agent-sync search <query>
 Если активный процесс Codex или Grok блокирует сессию после сканирования, `push`/`sync` публикует остальные и безопасно повторит заблокированную сессию позже.
 
 Ручные `sync`, `push` и `pull` печатают фазы с затраченным временем. Чтение Codex/Grok и тел сессий идёт ограниченным параллелизмом; для неизменённого репозитория проверяются зашифрованный индекс и набор opaque-объектов, без загрузки каждого ciphertext.
+
+### Локальный MCP-сервер
+
+`agent-sync mcp` даёт MCP-клиенту два инструмента: `search_sessions` для поиска и `get_session` для постраничного чтения текста user/assistant. Сервер работает по stdio и использует тот же SQLite-каталог, что и `search`; подключение к GitHub и инициализация синхронизации не нужны. [Настройка и параметры инструментов](docs/mcp.md).
 
 ### Локальный менеджер сессий
 

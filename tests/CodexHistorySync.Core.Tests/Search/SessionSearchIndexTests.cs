@@ -64,6 +64,24 @@ public sealed class SessionSearchIndexTests : IDisposable
     }
 
     [Fact]
+    public async Task EnsureCurrentAsync_RefreshesTitleAndTimestampEvenWhenTheBodyIsUnchanged()
+    {
+        using var index = new SessionSearchIndex(root);
+        var reader = new StubReader();
+        var session = Session(ManagedAgent.Codex, "rename", "OldHeading");
+        reader.Bodies[session.SessionId] = "unchanged conversation";
+        await index.EnsureCurrentAsync(Snapshot(session), reader, CancellationToken.None);
+
+        var renamed = session with { Title = "NewHeading", LastModifiedAt = session.LastModifiedAt.AddMinutes(1) };
+        await index.EnsureCurrentAsync(Snapshot(renamed), reader, CancellationToken.None);
+        await index.EnsureCurrentAsync(Snapshot(renamed), reader, CancellationToken.None);
+
+        Assert.Empty(await index.SearchAsync("OldHeading", 10, CancellationToken.None));
+        Assert.Equal("NewHeading", Assert.Single(await index.SearchAsync("NewHeading", 10, CancellationToken.None)).Title);
+        Assert.Equal(2, reader.Reads);
+    }
+
+    [Fact]
     public async Task EnsureCurrentAsync_DeletesSessionsThatLeftTheCatalog()
     {
         using var index = new SessionSearchIndex(root);

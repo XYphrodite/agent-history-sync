@@ -6,6 +6,25 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class ReleaseSurfaceTests
 {
     [Fact]
+    public async Task Release_single_file_serves_mcp_and_reads_the_local_sqlite_catalog()
+    {
+        var executable = Path.Combine(RepositoryRoot(), "src", "CodexHistorySync.Cli", "bin", "Release",
+            "net10.0", "win-x64", "publish", "agent-sync.exe");
+        Assert.True(File.Exists(executable), $"Published executable was not found: {executable}");
+        await using var fixture = await McpProcessFixture.StartAsync(executable);
+        var initialized = await fixture.InitializeAsync();
+        Assert.Equal(DeclaredVersion(), initialized.GetProperty("serverInfo").GetProperty("version").GetString());
+        var found = SessionMcpProcessTests.Data(await fixture.CallAsync("search_sessions", new { query = "handshake" }));
+        Assert.Single(found.GetProperty("sessions").EnumerateArray());
+        var read = SessionMcpProcessTests.Data(await fixture.CallAsync("get_session", new
+        {
+            agent = "continue", session_id = McpProcessFixture.SessionId
+        }));
+        Assert.Contains(McpProcessFixture.UserText, read.GetProperty("text").GetString());
+        await fixture.FinishAsync();
+    }
+
+    [Fact]
     public async Task Release_cli_reports_the_declared_version_and_advertises_manager_mode()
     {
         var cliDirectory = Path.Combine(RepositoryRoot(), "src", "CodexHistorySync.Cli", "bin", "Release", "net10.0", "win-x64");

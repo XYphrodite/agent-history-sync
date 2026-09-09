@@ -36,6 +36,7 @@ public sealed class SessionAnnotationStore : ISessionAnnotationStore
     public SessionAnnotationStore(string? localAppDataDirectory = null)
     {
         var root = localAppDataDirectory
+            ?? Environment.GetEnvironmentVariable("LOCALAPPDATA")
             ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(root))
         {

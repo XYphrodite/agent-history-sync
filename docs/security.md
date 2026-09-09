@@ -10,6 +10,12 @@ The design protects history content from a Git host, a reader of the private rep
 
 Use a dedicated empty **private** GitHub repository. `init` and `join` stop before reading or retaining a passphrase when `gh` cannot prove `visibility=PRIVATE`; inability to verify is a failure, not permission to continue. Git credentials remain with Git Credential Manager. Credential-bearing remote URLs are stripped before persistence and never belong in commands, configuration, logs, or support output.
 
+## Local MCP access
+
+`agent-sync mcp` exposes `search_sessions` and `get_session` over stdio to the client that launches it. It does not open a network listener, access repository keys, contact GitHub or call a title-generation model. Native session files remain read-only; search refreshes the local plaintext SQLite index. Session IDs are resolved through the local catalog, never interpreted as caller-supplied paths.
+
+Tool responses contain plaintext conversation excerpts. A connected client can forward those excerpts to its model provider; remote repository encryption does not apply to this intentional local access. Connect clients appropriate for the history on the machine. Historical messages are untrusted data, not instructions for the calling agent. See [MCP setup](mcp.md).
+
 ## Keys and recovery limits
 
 The passphrase is read only from a hidden interactive prompt. Argon2id derives the repository key; the passphrase is not stored. The derived key is cached with Windows DPAPI for the current Windows user. Another Windows user, another profile, a reinstalled OS, or a copied DPAPI blob cannot decrypt it. DPAPI is convenience storage, not passphrase recovery. If every enrolled device loses both its DPAPI cache and the passphrase, encrypted Git history cannot be recovered.

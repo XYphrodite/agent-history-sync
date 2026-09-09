@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Cli.Management;
 using CodexHistorySync.Cli.Search;
+using CodexHistorySync.Cli.Mcp;
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
@@ -35,7 +36,8 @@ public static class CliComposition
         Func<ISessionManagerRunner> createSessionManagerRunner,
         Func<ISessionManagerRunner>? createSessionViewerRunner = null,
         Func<ISelfUpdateOperations>? createSelfUpdateOperations = null,
-        Func<ISessionSearchCommand>? createSearchCommand = null)
+        Func<ISessionSearchCommand>? createSearchCommand = null,
+        Func<ISessionMcpCommand>? createMcpCommand = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(console);
@@ -51,6 +53,8 @@ public static class CliComposition
                 new CliApplication(console, createSelfUpdateOperations()),
             ["search", ..] when createSearchCommand is not null =>
                 new CliApplication(console, createSearchCommand()),
+            ["mcp", ..] when createMcpCommand is not null =>
+                new CliApplication(console, createMcpCommand()),
             _ => createSynchronizedApplication(console)
         };
     }
@@ -61,7 +65,8 @@ public static class CliComposition
         var console = new SystemCliConsole();
         return CreateForArguments(args, console, CreateSynchronizedApplication, CreateSessionManagerRunner,
             CreateSessionViewerRunner, static () => new DefaultSelfUpdateOperations(),
-            () => CreateSearchCommand(console));
+            () => CreateSearchCommand(console),
+            () => new SessionMcpCommand(CreateReadOnlySessionCatalog(), new SessionContentReader()));
     }
 
     public static CliApplication CreateDefault() => CreateSynchronizedApplication(new SystemCliConsole());
@@ -144,7 +149,10 @@ public static class CliComposition
             annotationStore, suggester, titling.Rejection, searchIndex));
     }
 
-    private static ISessionSearchCommand CreateSearchCommand(ICliConsole console)
+    private static ISessionSearchCommand CreateSearchCommand(ICliConsole console) =>
+        new SessionSearchCommand(CreateReadOnlySessionCatalog(), new SessionSearchIndex(), new SessionContentReader(), console);
+
+    private static ILocalSessionCatalog CreateReadOnlySessionCatalog()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
         var codexPaths = TryResolveCodexPaths();
@@ -154,8 +162,7 @@ public static class CliComposition
         var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
         var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
         var annotationStore = new SessionAnnotationStore();
-        var annotated = new AnnotatedSessionCatalog(catalog, annotationStore);
-        return new SessionSearchCommand(annotated, new SessionSearchIndex(), new SessionContentReader(), console);
+        return new AnnotatedSessionCatalog(catalog, annotationStore);
     }
 
     private static ISessionManagerRunner CreateSessionManagerRunner()

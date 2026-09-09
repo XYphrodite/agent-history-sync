@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using CodexHistorySync.Cli;
 using CodexHistorySync.Cli.Search;
+using CodexHistorySync.Cli.Mcp;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
@@ -17,6 +18,35 @@ public sealed class CliTests
     private static readonly string Remote = string.Concat("https://", "user", ":", "credential", "@github.com/example/private-history.git");
     private static readonly string Passphrase = string.Join(' ', "correct", "horse", "battery", "staple");
     private static readonly string PromptMarker = string.Join('-', "UNIQUE", "PLAINTEXT", "PROMPT", "MARKER");
+
+    [Theory]
+    [InlineData("", 0, 1)]
+    [InlineData("--help", 0, 0)]
+    [InlineData("--http", 2, 0)]
+    public async Task McpCompositionNeverConstructsSyncOrOtherLocalCommands(string option, int expectedExit, int expectedRuns)
+    {
+        var args = option.Length == 0 ? new[] { "mcp" } : new[] { "mcp", option };
+        var console = new FakeConsole();
+        var command = new FakeMcpCommand();
+        var application = CliComposition.CreateForArguments(args, console,
+            _ => throw new InvalidOperationException("Sync must not be composed for MCP."),
+            () => throw new InvalidOperationException("The manager must not be composed for MCP."),
+            createMcpCommand: () => command);
+
+        Assert.Equal(expectedExit, await application.RunAsync(args, CancellationToken.None));
+        Assert.Equal(expectedRuns, command.Runs);
+        if (option.Length == 0) Assert.Empty(console.OutputText);
+    }
+
+    private sealed class FakeMcpCommand : ISessionMcpCommand
+    {
+        public int Runs { get; private set; }
+        public Task RunAsync(CancellationToken cancellationToken)
+        {
+            Runs++;
+            return Task.CompletedTask;
+        }
+    }
 
     [Theory]
     [InlineData("--help")]
