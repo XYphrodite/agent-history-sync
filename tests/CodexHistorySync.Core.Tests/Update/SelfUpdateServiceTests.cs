@@ -8,6 +8,81 @@ public sealed class SelfUpdateServiceTests
 {
     private static readonly ReleaseVersion InstalledVersion = new(0, 7, 0);
 
+    [Theory]
+    [InlineData(null, 100)]
+    [InlineData(200L, 100L)]
+    [InlineData(null, 0)]
+    public async Task ProgressReportsPhasesAndUsesTheHeaderSizeBeforeTheDeclaredSize(long? headerSize, long declaredSize)
+    {
+        using var fixture = new UpdateFixture();
+        var source = fixture.Source("v0.8.0");
+        source.HeaderSize = headerSize;
+        source.DeclaredSize = declaredSize;
+        var progress = new List<SelfUpdateProgress>();
+
+        await fixture.Service(source).UpdateAsync(new SelfUpdateRequest(), CancellationToken.None, progress.Add);
+
+        Assert.Equal(new[] { SelfUpdatePhase.Checking, SelfUpdatePhase.Downloading,
+            SelfUpdatePhase.Verifying, SelfUpdatePhase.Installing }, progress.Select(p => p.Phase).Distinct());
+        var download = progress.Where(p => p.Phase == SelfUpdatePhase.Downloading).ToArray();
+        Assert.Equal(0, download[0].ReceivedBytes);
+        Assert.Equal(source.Payload.Length, download[^1].ReceivedBytes);
+        Assert.Equal(headerSize ?? (declaredSize > 0 ? declaredSize : null), download[^1].TotalBytes);
+        Assert.All(download, p => Assert.Equal("v0.8.0", p.Release!.Tag));
+    }
+
+    [Theory]
+    [InlineData(true, "v0.8.0")]
+    [InlineData(false, "v0.7.0")]
+    public async Task ChecksAndCurrentVersionsNeverReportDownloadProgress(bool checkOnly, string tag)
+    {
+        using var fixture = new UpdateFixture();
+        var source = fixture.Source(tag);
+        var progress = new List<SelfUpdateProgress>();
+
+        await fixture.Service(source).UpdateAsync(new SelfUpdateRequest(CheckOnly: checkOnly),
+            CancellationToken.None, progress.Add);
+
+        Assert.Equal(SelfUpdatePhase.Checking, Assert.Single(progress).Phase);
+        Assert.Equal(0, source.Downloads);
+    }
+
+    [Fact]
+    public async Task FailedVerificationNeverReportsInstallation()
+    {
+        using var fixture = new UpdateFixture();
+        var source = fixture.Source("v0.8.0");
+        source.Checksum = new string('a', 64) + "  agent-sync.exe";
+        var progress = new List<SelfUpdateProgress>();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service(source)
+            .UpdateAsync(new SelfUpdateRequest(), CancellationToken.None, progress.Add));
+
+        Assert.Equal(SelfUpdatePhase.Verifying, progress[^1].Phase);
+        Assert.DoesNotContain(progress, p => p.Phase == SelfUpdatePhase.Installing);
+        Assert.Equal("installed", fixture.InstalledBody());
+        Assert.Empty(fixture.StagingDirectories());
+    }
+
+    [Fact]
+    public async Task CancellationDuringDownloadPreservesTheInstallationAndCleansStaging()
+    {
+        using var fixture = new UpdateFixture();
+        using var cancellation = new CancellationTokenSource();
+        var progress = new List<SelfUpdateProgress>();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Service(fixture.Source("v0.8.0"))
+            .UpdateAsync(new SelfUpdateRequest(), cancellation.Token, p =>
+            {
+                progress.Add(p);
+                if (p.Phase == SelfUpdatePhase.Downloading) cancellation.Cancel();
+            }));
+
+        Assert.DoesNotContain(progress, p => p.Phase == SelfUpdatePhase.Installing);
+        Assert.Equal("installed", fixture.InstalledBody());
+        Assert.Empty(fixture.StagingDirectories());
+    }
+
     [Fact]
     public async Task ThePublishedReleaseIsNotDownloadedWhenItIsNotNewer()
     {
@@ -264,19 +339,29 @@ public sealed class SelfUpdateServiceTests
 
         public int Downloads { get; private set; }
 
+        public long? HeaderSize { get; set; }
+
+        public long DeclaredSize { get; set; }
+
         public Task<ReleaseDescriptor> ResolveAsync(string? requested, CancellationToken cancellationToken)
         {
             RequestedTag = requested;
             Assert.True(ReleaseVersion.TryParse(tag, out var version));
             return Task.FromResult(new ReleaseDescriptor(tag, version,
                 new Uri("https://github.com/example/releases/download/agent-sync.exe"),
-                new Uri("https://github.com/example/releases/download/agent-sync.exe.sha256")));
+                new Uri("https://github.com/example/releases/download/agent-sync.exe.sha256"), DeclaredSize));
         }
 
-        public async Task DownloadAsync(Uri address, string destinationPath, CancellationToken cancellationToken)
+        public async Task DownloadAsync(
+            Uri address,
+            string destinationPath,
+            CancellationToken cancellationToken,
+            Action<long, long?>? progress = null)
         {
             Downloads++;
+            progress?.Invoke(0, HeaderSize);
             await File.WriteAllBytesAsync(destinationPath, Payload, cancellationToken);
+            progress?.Invoke(Payload.Length, HeaderSize);
         }
 
         public Task<string> ReadTextAsync(Uri address, CancellationToken cancellationToken) =>

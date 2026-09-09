@@ -59,7 +59,10 @@ public sealed class SelfUpdateService
         this.probe = probe;
     }
 
-    public async Task<SelfUpdateReport> UpdateAsync(SelfUpdateRequest request, CancellationToken cancellationToken)
+    public async Task<SelfUpdateReport> UpdateAsync(
+        SelfUpdateRequest request,
+        CancellationToken cancellationToken,
+        Action<SelfUpdateProgress>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
@@ -68,6 +71,7 @@ public sealed class SelfUpdateService
         // mapped by that run's own process and can only be deleted by a later one.
         var removed = replacer.RemoveRetiredCopies(executablePath);
 
+        progress?.Invoke(new(SelfUpdatePhase.Checking));
         var release = await source.ResolveAsync(request.Tag, cancellationToken).ConfigureAwait(false);
         if (release is null) throw new InvalidDataException("The release source returned no release.");
 
@@ -79,11 +83,14 @@ public sealed class SelfUpdateService
         if (request.CheckOnly)
             return Report(SelfUpdateStatus.UpdateAvailable, release, removed);
 
-        await ApplyAsync(release, cancellationToken).ConfigureAwait(false);
+        await ApplyAsync(release, progress, cancellationToken).ConfigureAwait(false);
         return Report(SelfUpdateStatus.Updated, release, removed);
     }
 
-    private async Task ApplyAsync(ReleaseDescriptor release, CancellationToken cancellationToken)
+    private async Task ApplyAsync(
+        ReleaseDescriptor release,
+        Action<SelfUpdateProgress>? progress,
+        CancellationToken cancellationToken)
     {
         var installDirectory = Path.GetDirectoryName(executablePath)
             ?? throw new InvalidOperationException("The install directory could not be determined.");
@@ -95,7 +102,13 @@ public sealed class SelfUpdateService
         try
         {
             var staged = Path.Combine(staging, Path.GetFileName(executablePath));
-            await source.DownloadAsync(release.ExecutableUrl, staged, cancellationToken).ConfigureAwait(false);
+            long? declaredSize = release.SizeBytes > 0 ? release.SizeBytes : null;
+            progress?.Invoke(new(SelfUpdatePhase.Downloading, release, TotalBytes: declaredSize));
+            await source.DownloadAsync(release.ExecutableUrl, staged, cancellationToken,
+                    (received, total) => progress?.Invoke(new(SelfUpdatePhase.Downloading, release,
+                        received, total is > 0 ? total : declaredSize)))
+                .ConfigureAwait(false);
+            progress?.Invoke(new(SelfUpdatePhase.Verifying, release));
             var checksum = await source.ReadTextAsync(release.ChecksumUrl, cancellationToken).ConfigureAwait(false);
 
             await VerifyAsync(staged, ReleaseChecksum.Parse(checksum), cancellationToken).ConfigureAwait(false);
@@ -108,6 +121,7 @@ public sealed class SelfUpdateService
             if (probe is not null && !await probe(staged, cancellationToken).ConfigureAwait(false))
                 throw new InvalidDataException("The downloaded release did not run.");
 
+            progress?.Invoke(new(SelfUpdatePhase.Installing, release));
             var retired = replacer.Replace(executablePath, staged);
             if (probe is null) return;
 
@@ -168,5 +182,8 @@ public sealed class SelfUpdateService
     }
 
     private SelfUpdateReport Report(SelfUpdateStatus status, ReleaseDescriptor release, int removed) =>
-        new(status, installedVersion, release.Version, release.Tag) { RetiredCopiesRemoved = removed };
+        new(status, installedVersion, release.Version, release.Tag)
+        {
+            RetiredCopiesRemoved = removed
+        };
 }
