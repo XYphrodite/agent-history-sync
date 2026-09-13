@@ -544,7 +544,7 @@ public sealed class CliServiceTests
         }
 
         public Task<CliLocalConfiguration> LoadConfigurationAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(Configurations.Last());
+            Task.FromResult(Configurations.LastOrDefault() ?? throw new CliNotJoinedException());
 
         public Task SaveInitialStateAsync(string repositoryId, CancellationToken cancellationToken)
         {

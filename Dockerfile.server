@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:4ea6fe75dd36706bb6d8c3c293d4c4315840f5d76ea28ac97def77e3ec487fa5 AS build
+WORKDIR /source
+COPY Directory.Build.props ./
+COPY src/CodexHistorySync.Protocol/ src/CodexHistorySync.Protocol/
+COPY src/CodexHistorySync.Server/ src/CodexHistorySync.Server/
+RUN dotnet publish src/CodexHistorySync.Server/CodexHistorySync.Server.csproj -c Release -o /app --nologo /p:UseAppHost=false
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1fe86375600b62e6566b465da9553eef0621f13c67f40fe764cd8dbb1dee1497 AS runtime
+WORKDIR /app
+COPY --from=build /app/ ./
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080 DOTNET_EnableDiagnostics=0
+USER $APP_UID
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["dotnet", "CodexHistorySync.Server.dll", "--health-check"]
+ENTRYPOINT ["dotnet", "CodexHistorySync.Server.dll"]

@@ -1,6 +1,6 @@
 # Security Model
 
-Agent History Sync encrypts every repository index and history object independently with AES-256-GCM. The public setup manifest contains the repository identifier, Argon2id parameters, salt, and a key-derived authenticator. It does not contain the passphrase or repository key. Every encrypted file begins with the `CHS1` envelope header; authenticated metadata binds its schema, logical object identifier, and object kind.
+Agent History Sync encrypts every repository index and history object independently with AES-256-GCM. The public setup manifest contains the repository identifier, Argon2id parameters, salt, and a key-derived authenticator. It does not contain the passphrase or repository key. Every encrypted file begins with the `CHS1` envelope header; authenticated metadata binds its schema, logical object identifier, and object kind. The legacy header is authenticated, **not encrypted**: Git readers can see native logical IDs and object kinds, including the encoded project and filename of Claude memory objects.
 
 The public rename does not change existing storage: `%LOCALAPPDATA%\CodexHistorySync`, the `CHS1` envelope, manifest names, and authenticated formats are deliberately retained for compatibility.
 
@@ -8,7 +8,15 @@ The public rename does not change existing storage: `%LOCALAPPDATA%\CodexHistory
 
 The design protects history content from a Git host, a reader of the private repository, and accidental inclusion of unrelated Codex state. GitHub can still observe the repository owner, collaborators, commit authors, commit timing and count, ciphertext paths, ciphertext sizes, deletion history, and repository activity. A compromised Windows account, a process that can read Codex history while it is open, a malicious Codex build, or an attacker controlling the unlocked desktop is outside this boundary.
 
-Use a dedicated empty **private** GitHub repository. `init` and `join` stop before reading or retaining a passphrase when `gh` cannot prove `visibility=PRIVATE`; inability to verify is a failure, not permission to continue. Git credentials remain with Git Credential Manager. Credential-bearing remote URLs are stripped before persistence and never belong in commands, configuration, logs, or support output.
+For the Git backend, use a dedicated empty **private** GitHub repository. `init` and `join` stop before reading or retaining a passphrase when `gh` cannot prove `visibility=PRIVATE`; inability to verify is a failure, not permission to continue. Git credentials remain with Git Credential Manager. Credential-bearing GitHub remote URLs are stripped before persistence and never belong in commands, configuration, logs, or support output.
+
+## Self-hosted storage
+
+The HTTP provider seals the entire legacy object envelope with a separate HKDF-derived transport key, hiding native IDs, object kinds and encoded memory paths from the server. The outer CHS1 header uses only the opaque object reference and a fixed generic kind; both layers are authenticated on the client before import. The index already has a fixed, non-sensitive header. This does not change the legacy Git format or introduce an API credential.
+
+The PostgreSQL API stores the same client-encrypted payloads. It has **no API token or per-user authorization**: isolation depends on Tailscale ACL/grants, host/Docker firewall rules and explicit private port binding. Every network client that can reach the API is trusted to mutate all repositories, including corrupting or deleting references; encryption does not protect availability. PostgreSQL credentials stay server-side, distinct from the client passphrase. The server receives neither the decryption key nor agent homes, parsers, local SQLite catalog or MCP.
+
+The client permits loopback/Tailscale IP endpoints and HTTPS `*.ts.net` names, rejects URL credentials/query/fragment, disables proxies/redirects, pins object hashes and authenticates encrypted data before local import. Browser Origin/Fetch-Site checks, explicit allowed hosts and content/size/concurrency limits are defense in depth, not a substitute for network isolation. Historical ciphertext blobs are retained, so operators must monitor disk usage and maintain backups. See [deployment and recovery](server.md); real tailnet isolation must be tested before storing real data.
 
 ## Local MCP access
 

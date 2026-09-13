@@ -9,7 +9,34 @@ permissions:
   contents: write
 
 jobs:
+  server-linux:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+        env:
+          POSTGRES_PASSWORD: disposable-ci-only
+          POSTGRES_DB: agent_sync_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent_sync_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Test protocol and PostgreSQL API on Linux
+        env:
+          AGENT_SYNC_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=agent_sync_test;Username=postgres;Password=disposable-ci-only
+        run: >-
+          dotnet test tests/CodexHistorySync.Server.Tests -c Debug --nologo
+          --filter 'FullyQualifiedName!~ServerSyncTests&FullyQualifiedName!~ContainerDrillTests'
+      - name: Build Linux server image
+        run: docker build -f Dockerfile.server -t agent-sync-server:${{ github.ref_name }} .
+
   build-and-release:
+    needs: server-linux
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -20,9 +47,13 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Test
+      - name: Verify release version and notes
         shell: pwsh
-        run: dotnet test CodexHistorySync.sln -c Release --nologo
+        run: |
+          [xml]$props = Get-Content Directory.Build.props
+          $version = ($props.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1)
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag and declared version differ" }
+          if (-not (Test-Path "docs/releases/$env:GITHUB_REF_NAME.md")) { throw "Release notes are missing" }
 
       - name: Publish win-x64 single-file
         shell: pwsh
@@ -31,15 +62,21 @@ jobs:
             -c Release `
             -r win-x64 `
             --self-contained true `
-            -p:PublishSingleFile=true `
-            -o artifacts/win-x64
-          if (-not (Test-Path "artifacts/win-x64/agent-sync.exe")) {
+            -p:PublishSingleFile=true
+          if ($LASTEXITCODE -ne 0) { throw "Publish failed" }
+          if (-not (Test-Path "src/CodexHistorySync.Cli/bin/Release/net10.0/win-x64/publish/agent-sync.exe")) {
             throw "Publish output missing agent-sync.exe"
           }
+
+      - name: Test including published executable
+        shell: pwsh
+        run: dotnet test CodexHistorySync.sln -c Release --nologo
 
       - name: SHA-256 checksum
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force artifacts/win-x64 | Out-Null
+          Copy-Item src/CodexHistorySync.Cli/bin/Release/net10.0/win-x64/publish/agent-sync.exe artifacts/win-x64/
           $exe = "artifacts/win-x64/agent-sync.exe"
           $hash = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLowerInvariant()
           "$hash  agent-sync.exe" | Set-Content -Path "artifacts/win-x64/agent-sync.exe.sha256" -Encoding ascii
@@ -49,7 +86,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: |
             artifacts/win-x64/agent-sync.exe
             artifacts/win-x64/agent-sync.exe.sha256

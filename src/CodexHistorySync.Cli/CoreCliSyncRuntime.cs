@@ -1,4 +1,5 @@
 using System.Globalization;
+using CodexHistorySync.Remote;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -198,8 +199,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         checks.Add(new("claude-paths", ClaudePaths.TryResolve(claudeHome) is not null));
         checks.Add(new("continue-paths", ContinuePaths.TryResolve(continueHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));
-        checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
-        checks.Add(new("github-private", configuration is not null && (await gateway.VerifyPrivateAsync(configuration.RemoteUrl, cancellationToken).ConfigureAwait(false)).Passed));
+        var serverStorage = configuration is not null && StoreEndpoint.IsServerUrl(configuration.RemoteUrl);
+        if (!serverStorage) checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
+        checks.Add(new(serverStorage ? "server-access" : "github-private", configuration is not null &&
+            (await gateway.VerifyPrivateAsync(configuration.RemoteUrl, cancellationToken).ConfigureAwait(false)).Passed));
         checks.Add(new("key-access", configuration is not null && key.Length == RepositoryCrypto.MasterKeySize));
         checks.Add(new("repository-schema", await RepositorySchemaIsValidAsync(configuration, key, cancellationToken).ConfigureAwait(false)));
         var processStateChecked = false;
@@ -257,19 +260,27 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
+        if (engineFactory is not null) return new Components(paths, scanner, conflicts, engineFactory(configuration, key));
         var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths,
             claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
-        IStorageProvider provider = new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
+        IStorageProvider provider = StoreEndpoint.IsServerUrl(configuration.RemoteUrl)
+            ? new HttpStorageProvider(new StoreClient(new StoreEndpoint(configuration.RemoteUrl)), key)
+            : new GitStorageProvider(configuration.RepositoryId, configuration.RemoteUrl, GitRemoteKind.GitHub,
             Path.Combine(localAppData, "CodexHistorySync", "repositories"),
             commandTimeout: TimeSpan.FromMinutes(30));
+        var providerOwner = provider as IDisposable;
         if (pinnedRevision is not null) provider = new RevisionPinnedProvider(provider, pinnedRevision);
         var staging = Path.Combine(localAppData, "CodexHistorySync", "repositories", configuration.RepositoryId, "staging");
-        var engine = engineFactory?.Invoke(configuration, key) ?? new SyncEngine(configuration.RepositoryId,
-            configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
-            grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths,
-            annotationsDirectory: annotationsDirectory);
-        return new Components(paths, scanner, conflicts, engine);
+        try
+        {
+            var engine = new SyncEngine(configuration.RepositoryId,
+                configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
+                grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths,
+                annotationsDirectory: annotationsDirectory);
+            return new Components(paths, scanner, conflicts, engine, providerOwner);
+        }
+        catch { providerOwner?.Dispose(); throw; }
     }
 
     private async Task<bool> RepositorySchemaIsValidAsync(CliLocalConfiguration? configuration, ReadOnlyMemory<byte> key,
@@ -298,10 +309,15 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         catch { return false; }
     }
 
-    private sealed record Components(CodexPaths Paths, SessionScanner Scanner, ConflictStore Conflicts, SyncEngine? Engine)
+    private sealed record Components(CodexPaths Paths, SessionScanner Scanner, ConflictStore Conflicts, SyncEngine? Engine,
+        IDisposable? ProviderOwner = null)
         : IAsyncDisposable
     {
-        public ValueTask DisposeAsync() => Engine?.DisposeAsync() ?? ValueTask.CompletedTask;
+        public async ValueTask DisposeAsync()
+        {
+            try { if (Engine is not null) await Engine.DisposeAsync().ConfigureAwait(false); }
+            finally { ProviderOwner?.Dispose(); }
+        }
     }
 
     private sealed class RevisionPinnedProvider(IStorageProvider inner, string expectedRevision) : IStorageProvider

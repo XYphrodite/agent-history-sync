@@ -86,10 +86,12 @@ public static class CliComposition
     private static CliApplication CreateSynchronizedApplication(ICliConsole console)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA") ??
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData)) throw new InvalidOperationException("Local application data is unavailable.");
-        var gateway = new GitHubCliRepositoryGateway();
-        var local = new FileCliLocalRepository(localAppData, new DpapiKeyStore());
+        var gateway = new StorageRepositoryGateway();
+        var local = new FileCliLocalRepository(localAppData,
+            new DpapiKeyStore(Path.Combine(localAppData, "CodexHistorySync", "keys")));
         var scheduler = new AgentScheduler();
         var codexResolution = new CodexExecutableLocator().ResolveWithSource();
         var codexExecutable = codexResolution.ExecutablePath ?? string.Empty;

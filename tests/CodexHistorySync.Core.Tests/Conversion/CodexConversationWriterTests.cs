@@ -432,6 +432,35 @@ public sealed class CodexConversationWriterTests
         Assert.False(Directory.Exists(stagingFactory.RootPath));
     }
 
+    [Fact]
+    public async Task RegistrationFailureAfterPublicationDoesNotCreateAnotherCopy()
+    {
+        await using var fixture = await CodexWriterFixture.CreateAsync();
+        var executablePath = Path.Combine(fixture.Root, "codex.exe");
+        await File.WriteAllTextAsync(executablePath, "fixture");
+        var allocations = 0;
+        var writer = fixture.Writer(
+            new CodexExecutableOption(executablePath, CodexExecutableAvailability.Configured),
+            () => { allocations++; return Guid.NewGuid(); },
+            registrationFactory: (_, _, _) => Task.FromResult<ICodexSessionRegistration>(new FailedRegistration()));
+
+        var error = await Assert.ThrowsAsync<CodexSessionRegistrationException>(() =>
+            writer.WriteAsync(fixture.Conversation(), CancellationToken.None));
+
+        Assert.Contains("The copy was saved", error.Message);
+        Assert.Equal(1, allocations);
+        Assert.Single(Directory.EnumerateFiles(fixture.Paths.Sessions, "*.jsonl", SearchOption.AllDirectories));
+        AssertNoStaging(fixture.Paths.Sessions);
+    }
+
+    private sealed class FailedRegistration : ICodexSessionRegistration
+    {
+        public string ModelProvider => "openai";
+        public Task RegisterAsync(string sessionId, string expectedPath, CancellationToken cancellationToken) =>
+            Task.FromException(new InvalidDataException("Injected registration failure."));
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private static async Task AssertNativeRecordsAsync(
         string path,
         string sessionId,
@@ -443,7 +472,7 @@ public sealed class CodexConversationWriterTests
             .Where(turn => turn.Role == ConversationRole.User)
             .Select(turn => turn.Text)
             .ToArray();
-        Assert.Equal(turnCount + expectedUserMessages.Length + 1, lines.Length);
+        Assert.Equal(turnCount * 2 + 1, lines.Length);
         using var metadata = JsonDocument.Parse(lines[0]);
         Assert.Equal("session_meta", metadata.RootElement.GetProperty("type").GetString());
         var payload = metadata.RootElement.GetProperty("payload");
@@ -453,10 +482,12 @@ public sealed class CodexConversationWriterTests
         Assert.Equal(conversation.WorkingDirectory, payload.GetProperty("cwd").GetString());
         Assert.Equal("codex-history-sync", payload.GetProperty("originator").GetString());
         Assert.Equal("0.7.0", payload.GetProperty("cli_version").GetString());
-        Assert.Equal(JsonValueKind.Null, payload.GetProperty("model_provider").ValueKind);
+        Assert.Equal("openai", payload.GetProperty("model_provider").GetString());
+        Assert.Equal("cli", payload.GetProperty("source").GetString());
         Assert.Equal(JsonValueKind.Null, payload.GetProperty("base_instructions").ValueKind);
         var responseItems = new List<JsonDocument>();
         var discoverableUserMessages = new List<string>();
+        var discoverableAssistantMessages = new List<string>();
         try
         {
             for (var index = 1; index < lines.Length; index++)
@@ -473,14 +504,18 @@ public sealed class CodexConversationWriterTests
                 {
                     Assert.Equal("event_msg", type);
                     var eventPayload = root.GetProperty("payload");
-                    Assert.Equal("user_message", eventPayload.GetProperty("type").GetString());
-                    discoverableUserMessages.Add(eventPayload.GetProperty("message").GetString()!);
+                    var eventType = eventPayload.GetProperty("type").GetString();
+                    Assert.Contains(eventType, new[] { "user_message", "agent_message" });
+                    (eventType == "user_message" ? discoverableUserMessages : discoverableAssistantMessages)
+                        .Add(eventPayload.GetProperty("message").GetString()!);
                     record.Dispose();
                 }
             }
 
             Assert.Equal(turnCount, responseItems.Count);
             Assert.Equal(expectedUserMessages, discoverableUserMessages);
+            Assert.Equal(conversation.Turns.Where(turn => turn.Role == ConversationRole.Assistant).Select(turn => turn.Text),
+                discoverableAssistantMessages);
         }
         finally
         {
@@ -665,7 +700,8 @@ public sealed class CodexConversationWriterTests
             IConversationPublisher? publisher = null,
             Func<string, string, CancellationToken, Task<CompatibilityResult>>? probe = null,
             IConversationStagingDirectoryFactory? stagingFactory = null,
-            Func<DateTimeOffset>? utcNow = null) =>
+            Func<DateTimeOffset>? utcNow = null,
+            Func<string, string, CancellationToken, Task<ICodexSessionRegistration>>? registrationFactory = null) =>
             new(
                 Paths,
                 executable,
@@ -674,7 +710,8 @@ public sealed class CodexConversationWriterTests
                 publisher ?? SystemConversationPublisher.Instance,
                 probe ?? ((_, _, _) => Task.FromResult(new CompatibilityResult(true, "test", "compatible"))),
                 stagingFactory,
-                utcNow);
+                utcNow,
+                registrationFactory);
 
         public PortableConversation Conversation(string sourceSessionId = "source-session") => new(
             ConversationAgent.Grok,

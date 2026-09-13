@@ -123,7 +123,7 @@ public sealed class CodexSessionRegistrarTests
                 return value.GetProperty("type").GetString() != "event_msg" ||
                     value.GetProperty("payload").GetProperty("type").GetString() != "agent_message";
             }));
-            var broken = await new CodexCompatibilityProbe().ProbeAsync(executable, brokenPath, CancellationToken.None);
+            var broken = await new CodexCompatibilityProbe().ProbeConversationAsync(executable, brokenPath, CancellationToken.None);
             Assert.False(broken.IsCompatible);
             // The VS Code client resumes without turns and then requests paginated history.
             // This must preserve answers too, including after Codex migrates the rollout.

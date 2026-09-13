@@ -26,6 +26,7 @@ public sealed class CodexConversationWriter : IConversationWriter
     private readonly Func<string, string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe;
     private readonly IConversationStagingDirectoryFactory stagingFactory;
     private readonly Func<DateTimeOffset> utcNow;
+    private readonly Func<string, string, CancellationToken, Task<ICodexSessionRegistration>>? registrationFactory;
 
     public CodexConversationWriter(
         CodexPaths paths,
@@ -39,9 +40,10 @@ public sealed class CodexConversationWriter : IConversationWriter
             idGenerator ?? Guid.NewGuid,
             new CodexConversationReader(),
             SystemConversationPublisher.Instance,
-            (compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe))).ProbeAsync,
+            (compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe))).ProbeConversationAsync,
             null,
-            utcNow)
+            utcNow,
+            async (path, home, token) => await CodexSessionRegistrar.StartAsync(path, home, token).ConfigureAwait(false))
     {
     }
 
@@ -53,7 +55,8 @@ public sealed class CodexConversationWriter : IConversationWriter
         IConversationPublisher publisher,
         Func<string, string, CancellationToken, Task<CompatibilityResult>> compatibilityProbe,
         IConversationStagingDirectoryFactory? stagingFactory = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        Func<string, string, CancellationToken, Task<ICodexSessionRegistration>>? registrationFactory = null)
     {
         this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
         this.executable = executable ?? throw new ArgumentNullException(nameof(executable));
@@ -63,6 +66,7 @@ public sealed class CodexConversationWriter : IConversationWriter
         this.compatibilityProbe = compatibilityProbe ?? throw new ArgumentNullException(nameof(compatibilityProbe));
         this.stagingFactory = stagingFactory ?? SystemConversationStagingDirectoryFactory.Instance;
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        this.registrationFactory = registrationFactory;
     }
 
     public async Task<ConversationWriteResult> WriteAsync(
@@ -85,6 +89,9 @@ public sealed class CodexConversationWriter : IConversationWriter
             paths.Sessions,
             destinationDirectory);
         destinationDirectory = destinationGuard.DestinationDirectory;
+        await using var registration = executablePath is not null && registrationFactory is not null
+            ? await registrationFactory(executablePath, paths.Home, cancellationToken).ConfigureAwait(false)
+            : null;
 
         for (var attempt = 0; attempt < MaximumIdAttempts; attempt++)
         {
@@ -100,10 +107,12 @@ public sealed class CodexConversationWriter : IConversationWriter
 
             destinationGuard.VerifyUnchanged();
             var stagingDirectory = stagingFactory.Create(destinationDirectory);
+            var published = false;
             try
             {
                 var staging = stagingDirectory.FilePath(Path.GetFileName(destination));
-                await WriteRolloutAsync(staging, sessionId, conversation, cancellationToken).ConfigureAwait(false);
+                await WriteRolloutAsync(staging, sessionId, conversation, registration?.ModelProvider ?? "openai", cancellationToken)
+                    .ConfigureAwait(false);
                 var seal = destinationGuard.Protect(stagingDirectory.Seal());
                 var roundTrip = await validator.ReadAsync(staging, cancellationToken).ConfigureAwait(false);
                 ValidateRoundTrip(conversation, roundTrip, sessionId);
@@ -118,9 +127,22 @@ public sealed class CodexConversationWriter : IConversationWriter
                 }
 
                 publisher.PublishFile(staging, destination, seal);
+                published = true;
+                if (registration is not null)
+                {
+                    try
+                    {
+                        await registration.RegisterAsync(sessionId, destination, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is IOException or InvalidDataException or InvalidOperationException or
+                        OperationCanceledException or JsonException)
+                    {
+                        throw new CodexSessionRegistrationException(exception);
+                    }
+                }
                 return new ConversationWriteResult(sessionId, destination);
             }
-            catch (IOException) when (File.Exists(destination) || Directory.Exists(destination))
+            catch (IOException) when (!published && (File.Exists(destination) || Directory.Exists(destination)))
             {
                 continue;
             }
@@ -161,6 +183,7 @@ public sealed class CodexConversationWriter : IConversationWriter
         string staging,
         string sessionId,
         PortableConversation conversation,
+        string modelProvider,
         CancellationToken cancellationToken)
     {
         await using var stream = new FileStream(
@@ -184,7 +207,8 @@ public sealed class CodexConversationWriter : IConversationWriter
             json.WriteString("title", conversation.Title);
             json.WriteString("originator", "codex-history-sync");
             json.WriteString("cli_version", "0.7.0");
-            json.WriteNull("model_provider");
+            json.WriteString("model_provider", modelProvider);
+            json.WriteString("source", "cli");
             json.WriteNull("base_instructions");
             json.WriteEndObject();
             json.WriteEndObject();
@@ -230,6 +254,20 @@ public sealed class CodexConversationWriter : IConversationWriter
                     json.WriteEndArray();
                     json.WriteStartArray("text_elements");
                     json.WriteEndArray();
+                    json.WriteEndObject();
+                    json.WriteEndObject();
+                });
+            }
+            else
+            {
+                WriteRecord(stream, json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteString("timestamp", Timestamp(conversation.LastModifiedAt));
+                    json.WriteString("type", "event_msg");
+                    json.WriteStartObject("payload");
+                    json.WriteString("type", "agent_message");
+                    json.WriteString("message", turn.Text);
                     json.WriteEndObject();
                     json.WriteEndObject();
                 });
