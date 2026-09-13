@@ -202,6 +202,7 @@ public sealed class SelfUpdateProgressDisplayTests
         {
             Console = AnsiConsole.Create(new AnsiConsoleSettings
             {
+                EnvironmentVariables = new Dictionary<string, string>(),
                 Ansi = interactive ? AnsiSupport.Yes : AnsiSupport.No,
                 Interactive = interactive ? InteractionSupport.Yes : InteractionSupport.No,
                 ColorSystem = ColorSystemSupport.NoColors,
