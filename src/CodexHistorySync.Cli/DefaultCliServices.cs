@@ -5,6 +5,7 @@ using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
+using CodexHistorySync.Remote;
 
 namespace CodexHistorySync.Cli;
 
@@ -212,16 +213,25 @@ public sealed class DefaultCliServices : ICliServices
         this.crypto = crypto ?? throw new ArgumentNullException(nameof(crypto));
     }
 
-    public Task<CliGateResult> VerifyPrivateRepositoryAsync(string remoteUrl, CancellationToken cancellationToken) =>
-        gateway.VerifyPrivateAsync(remoteUrl, cancellationToken);
+    public async Task<CliGateResult> VerifyPrivateRepositoryAsync(string remoteUrl, CancellationToken cancellationToken)
+    {
+        remoteUrl = CanonicalRemoteUrl(remoteUrl);
+        if (await CheckTargetGateAsync(remoteUrl, false, cancellationToken).ConfigureAwait(false) is { } refused) return refused;
+        return await gateway.VerifyPrivateAsync(remoteUrl, cancellationToken).ConfigureAwait(false);
+    }
 
-    public Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken) =>
-        gateway.VerifyInitializationTargetAsync(CanonicalRemoteUrl(remoteUrl), cancellationToken);
+    public async Task<CliGateResult> VerifyInitializationTargetAsync(string remoteUrl, CancellationToken cancellationToken)
+    {
+        remoteUrl = CanonicalRemoteUrl(remoteUrl);
+        if (await CheckTargetGateAsync(remoteUrl, true, cancellationToken).ConfigureAwait(false) is { } refused) return refused;
+        return await gateway.VerifyInitializationTargetAsync(remoteUrl, cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<CliInitializationResult> InitializeAsync(string remoteUrl, ReadOnlyMemory<char> passphrase,
         CancellationToken cancellationToken)
     {
         remoteUrl = CanonicalRemoteUrl(remoteUrl);
+        await RequireCompatibleTargetAsync(remoteUrl, null, true, cancellationToken).ConfigureAwait(false);
         var repositoryId = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         var deviceId = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         var created = await RepositoryManifestAuthenticator.CreateAsync(repositoryId, passphrase, crypto, cancellationToken).ConfigureAwait(false);
@@ -244,6 +254,7 @@ public sealed class DefaultCliServices : ICliServices
         ReadOnlyMemory<char> passphrase, CancellationToken cancellationToken)
     {
         remoteUrl = CanonicalRemoteUrl(remoteUrl);
+        await RequireCompatibleTargetAsync(remoteUrl, null, false, cancellationToken).ConfigureAwait(false);
         var setup = await gateway.ReadSetupAsync(remoteUrl, cancellationToken).ConfigureAwait(false);
         CliManifestAuthentication? authentication = null;
         try
@@ -251,6 +262,7 @@ public sealed class DefaultCliServices : ICliServices
             authentication = await RepositoryManifestAuthenticator.AuthenticateAsync(setup.Manifest, passphrase, crypto, cancellationToken).ConfigureAwait(false);
             await RepositoryManifestAuthenticator.AuthenticateIndexAsync(setup.Index, authentication.Manifest.RepositoryId,
                 authentication.MasterKey, crypto, cancellationToken).ConfigureAwait(false);
+            await RequireCompatibleTargetAsync(remoteUrl, authentication.Manifest.RepositoryId, false, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -288,14 +300,16 @@ public sealed class DefaultCliServices : ICliServices
         var pending = GetPending(repository);
         try
         {
+            var existing = await RequireCompatibleTargetAsync(pending.RemoteUrl, repository.RepositoryId, false, cancellationToken).ConfigureAwait(false);
+            var configuration = existing ?? pending.Configuration;
             var currentRevision = await gateway.ReadCurrentRevisionAsync(pending.RemoteUrl, cancellationToken).ConfigureAwait(false);
             if (!StringComparer.Ordinal.Equals(currentRevision, pending.Setup.Revision))
                 throw new CliGateException("The repository changed after join authentication; retry the join.");
             await local.SaveKeyAsync(repository.RepositoryId, pending.MasterKey, cancellationToken).ConfigureAwait(false);
-            await local.SaveConfigurationAsync(pending.Configuration, cancellationToken).ConfigureAwait(false);
-            await local.SaveInitialStateAsync(repository.RepositoryId, cancellationToken).ConfigureAwait(false);
-            var result = await runtime.SynchronizeAsync(pending.Configuration, pending.MasterKey, SyncMode.Pull, cancellationToken).ConfigureAwait(false);
-            await local.SaveConfigurationAsync(pending.Configuration with { LastSuccessfulRevision = result.RemoteRevision }, cancellationToken).ConfigureAwait(false);
+            await local.SaveConfigurationAsync(configuration, cancellationToken).ConfigureAwait(false);
+            if (existing is null) await local.SaveInitialStateAsync(repository.RepositoryId, cancellationToken).ConfigureAwait(false);
+            var result = await runtime.SynchronizeAsync(configuration, pending.MasterKey, SyncMode.Pull, cancellationToken).ConfigureAwait(false);
+            await local.SaveConfigurationAsync(configuration with { LastSuccessfulRevision = result.RemoteRevision }, cancellationToken).ConfigureAwait(false);
             return result;
         }
         finally { AbortPending(repository.RepositoryId); }
@@ -379,10 +393,16 @@ public sealed class DefaultCliServices : ICliServices
     internal static string CanonicalRemoteUrl(string remoteUrl)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(remoteUrl);
+        if (StoreEndpoint.IsServerUrl(remoteUrl))
+        {
+            try { return new StoreEndpoint(remoteUrl).RepositoryUri.AbsoluteUri; }
+            catch (Exception exception) when (exception is ArgumentException or InvalidDataException)
+            { throw new CliGateException(exception.Message, exception); }
+        }
         if (!Uri.TryCreate(remoteUrl, UriKind.Absolute, out var uri) ||
             !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
             !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
-            throw new CliGateException("Only HTTPS GitHub repository URLs are supported.");
+            throw new CliGateException("Use an HTTPS GitHub URL or a Tailscale storage repository URL.");
         var builder = new UriBuilder(uri)
         {
             UserName = string.Empty,
@@ -394,6 +414,28 @@ public sealed class DefaultCliServices : ICliServices
             Port = -1
         };
         return builder.Uri.AbsoluteUri;
+    }
+
+    private async Task<CliLocalConfiguration?> RequireCompatibleTargetAsync(string remoteUrl, string? repositoryId,
+        bool initializing, CancellationToken cancellationToken)
+    {
+        CliLocalConfiguration existing;
+        try { existing = await local.LoadConfigurationAsync(cancellationToken).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { return null; }
+        if (!StoreEndpoint.IsServerUrl(remoteUrl) && !StoreEndpoint.IsServerUrl(existing.RemoteUrl)) return null;
+        if (initializing || !StringComparer.Ordinal.Equals(CanonicalRemoteUrl(existing.RemoteUrl), remoteUrl) ||
+            (repositoryId is not null && !StringComparer.Ordinal.Equals(existing.RepositoryId, repositoryId)))
+            throw new CliGateException("This device is already configured for a repository. Automatic storage migration is not supported; use a fresh local profile for server init/join.");
+        return existing;
+    }
+
+    private async Task<CliGateResult?> CheckTargetGateAsync(string remoteUrl, bool initializing, CancellationToken ct)
+    {
+        try { await RequireCompatibleTargetAsync(remoteUrl, null, initializing, ct).ConfigureAwait(false); return null; }
+        catch (CliGateException)
+        {
+            return new CliGateResult(false, "storage-switch", "This device is already configured. Automatic storage migration is not supported; use a fresh local profile for server init/join.");
+        }
     }
 
     private sealed record PendingJoin(string RemoteUrl, CliRemoteSetup Setup, byte[] MasterKey, CliLocalConfiguration Configuration);

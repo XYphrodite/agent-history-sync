@@ -1,0 +1,9 @@
+**
+!Directory.Build.props
+!src/
+!src/CodexHistorySync.Protocol/
+!src/CodexHistorySync.Protocol/**
+!src/CodexHistorySync.Server/
+!src/CodexHistorySync.Server/**
+**/bin/
+**/obj/

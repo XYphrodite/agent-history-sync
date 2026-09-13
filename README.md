@@ -1,8 +1,10 @@
 # Agent History Sync
 
-Windows 11 x64 CLI that synchronizes **Codex**, **Grok CLI**, **Claude Code**, and **Continue** conversation history through an encrypted private GitHub repository.
+Windows 11 x64 CLI that synchronizes **Codex**, **Grok CLI**, **Claude Code**, and **Continue** conversation history through encrypted storage: a private GitHub repository or a self-hosted PostgreSQL API over Tailscale.
 
-CLI для Windows 11 x64: синхронизация истории **Codex**, **Grok CLI**, **Claude Code** и **Continue** через зашифрованный private-репозиторий GitHub.
+CLI для Windows 11 x64: синхронизация истории **Codex**, **Grok CLI**, **Claude Code** и **Continue** через зашифрованное хранилище — private-репозиторий GitHub или свой сервер с PostgreSQL через Tailscale.
+
+Self-hosted backend / серверное хранилище (slice 3): [setup, trust boundary, backup and restore](docs/server.md). No API token; client-side encryption remains. Existing GitHub installations are not migrated automatically.
 
 ---
 
@@ -23,11 +25,11 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 
 Beside the sessions themselves, `agent-sync` synchronizes the **titles and descriptions you give them** in `--sessions`: one small encrypted object per named session, kept in `%LOCALAPPDATA%\CodexHistorySync\annotations` and never written into an agent home.
 
-Each successful publish rewrites `main` to a **single orphan commit** (snapshot store, not append-only history). Large tool outputs, compaction snapshots, and images are stripped or truncated before encrypt/upload. Local agent homes on disk are **not** modified.
+With the Git backend, each successful publish rewrites `main` to a **single orphan commit** (snapshot store, not append-only history). The server backend atomically publishes an encrypted snapshot in PostgreSQL. Large tool outputs, compaction snapshots, and images are stripped or truncated before encrypt/upload. Local agent homes on disk are **not** modified by upload normalization.
 
 Session titling is turned on with `agent-sync titles set http://<host>:11434`, checked with `agent-sync titles test`, and turned off with `agent-sync titles off`.
 
-The public command is `agent-sync`, and the release binary is `agent-sync.exe`. Prerequisites: Git, GitHub CLI (`gh`), and the agents you use.
+The public command is `agent-sync`, and the release binary is `agent-sync.exe`. The Git backend needs Git and GitHub CLI (`gh`); the server backend needs access to the private API instead. Agent homes are local in both modes.
 
 For compatibility with existing installations, the installer deliberately keeps `agent-sync.exe` under `%LOCALAPPDATA%\Programs\CodexHistorySync`, while application state remains under `%LOCALAPPDATA%\CodexHistorySync`. These are separate directories; upgrading does not migrate or rename either one.
 

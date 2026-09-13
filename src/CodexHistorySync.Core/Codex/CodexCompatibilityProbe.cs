@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Conversion;
 
 namespace CodexHistorySync.Core.Codex;
 
@@ -18,7 +20,26 @@ public sealed class CodexCompatibilityProbe
         this.deleteDisposableHome = deleteDisposableHome;
     }
 
-    public async Task<CompatibilityResult> ProbeAsync(string codexExe, string sourceSession, CancellationToken cancellationToken)
+    public Task<CompatibilityResult> ProbeAsync(string codexExe, string sourceSession, CancellationToken cancellationToken) =>
+        ProbeAsync(codexExe, sourceSession, null, cancellationToken);
+
+    public async Task<CompatibilityResult> ProbeConversationAsync(
+        string codexExe, string sourceSession, CancellationToken cancellationToken)
+    {
+        PortableConversation expected;
+        try
+        {
+            expected = await new CodexConversationReader().ReadAsync(sourceSession, cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidDataException)
+        {
+            return Incompatible("unknown", "The staged Codex conversation is invalid.");
+        }
+        return await ProbeAsync(codexExe, sourceSession, expected, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<CompatibilityResult> ProbeAsync(
+        string codexExe, string sourceSession, PortableConversation? expected, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(codexExe)) return Incompatible("unknown", "A Codex executable path is required.");
         if (!File.Exists(codexExe)) return Incompatible("unknown", "Codex executable was not found. Install the OpenAI Codex VS Code extension or set CODEX_EXE.");
@@ -42,6 +63,9 @@ public sealed class CodexCompatibilityProbe
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(30));
             var startInfo = new ProcessStartInfo { FileName = codexExe, UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+            startInfo.StandardInputEncoding = new UTF8Encoding(false);
+            startInfo.StandardOutputEncoding = new UTF8Encoding(false);
+            startInfo.StandardErrorEncoding = new UTF8Encoding(false);
             startInfo.ArgumentList.Add("app-server");
             startInfo.ArgumentList.Add("--listen");
             startInfo.ArgumentList.Add("stdio://");
@@ -57,10 +81,18 @@ public sealed class CodexCompatibilityProbe
             using var threadList = await ReadResponseAsync(process.StandardOutput, 2, timeout.Token);
             var listed = threadList.RootElement.GetProperty("result").GetProperty("data").EnumerateArray().Any(thread => thread.TryGetProperty("id", out var id) && id.GetString() == threadId);
             result = listed ? new CompatibilityResult(true, codexVersion, "The imported JSONL thread was listed from the disposable Codex home.") : Incompatible(codexVersion, "The imported JSONL thread was not listed by Codex.");
+            if (listed && expected is not null)
+            {
+                await WriteRequestAsync(process.StandardInput, 3, "thread/read", new { threadId, includeTurns = true }, timeout.Token);
+                using var read = await ReadResponseAsync(process.StandardOutput, 3, timeout.Token);
+                CodexConversationVisibility.EnsureMatches(expected, read.RootElement.GetProperty("result").GetProperty("thread"));
+                result = new CompatibilityResult(true, codexVersion, "Codex listed the imported thread and preserved every conversation message.");
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { result = Incompatible(codexVersion, "The compatibility probe was cancelled."); }
         catch (OperationCanceledException) { result = Incompatible(codexVersion, "The Codex app-server did not respond before the compatibility probe timed out."); }
         catch (JsonException) { result = Incompatible(codexVersion, "The compatibility session could not be read."); }
+        catch (InvalidDataException) { result = Incompatible(codexVersion, "Codex did not preserve all visible conversation messages."); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception) { result = Incompatible(codexVersion, $"The Codex compatibility probe failed: {exception.GetType().Name}."); }
         finally
         {

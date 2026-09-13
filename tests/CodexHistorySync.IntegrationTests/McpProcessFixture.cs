@@ -44,7 +44,17 @@ internal sealed class McpProcessFixture : IAsyncDisposable
             StandardOutputEncoding = Encoding.UTF8,
             WorkingDirectory = root
         };
-        if (publishedExecutable is null) start.ArgumentList.Add(typeof(CliApplication).Assembly.Location);
+        if (publishedExecutable is null)
+        {
+            // Project references copy the CLI assembly, but not its self-contained runtime.
+            // Use this test project's runtime and dependency graph for that assembly.
+            start.ArgumentList.Add("exec");
+            start.ArgumentList.Add("--runtimeconfig");
+            start.ArgumentList.Add(Path.ChangeExtension(typeof(McpProcessFixture).Assembly.Location, ".runtimeconfig.json"));
+            start.ArgumentList.Add("--depsfile");
+            start.ArgumentList.Add(Path.ChangeExtension(typeof(McpProcessFixture).Assembly.Location, ".deps.json"));
+            start.ArgumentList.Add(typeof(CliApplication).Assembly.Location);
+        }
         start.ArgumentList.Add("mcp");
         start.Environment["LOCALAPPDATA"] = Path.Combine(root, "data");
         start.Environment["CODEX_HOME"] = Path.Combine(root, "missing-codex");
@@ -93,7 +103,7 @@ internal sealed class McpProcessFixture : IAsyncDisposable
         while (true)
         {
             var line = await process.StandardOutput.ReadLineAsync(timeout.Token);
-            Assert.NotNull(line);
+            if (line is null) Assert.Fail("MCP process closed its output: " + await errors.WaitAsync(timeout.Token));
             // Parsing every line also proves stdout contains no startup banners or progress text.
             using var response = JsonDocument.Parse(line);
             if (!response.RootElement.TryGetProperty("id", out var responseId)) continue;
