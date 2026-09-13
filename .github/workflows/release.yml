@@ -20,6 +20,10 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      - name: Test
+        shell: pwsh
+        run: dotnet test CodexHistorySync.sln -c Release --nologo
+
       - name: Publish win-x64 single-file
         shell: pwsh
         run: |

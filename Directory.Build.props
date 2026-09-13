@@ -5,7 +5,13 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <LangVersion>14.0</LangVersion>
     <Deterministic>true</Deterministic>
-    <Version>0.12.1</Version>
+    <Version>0.12.2</Version>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <CodeAnalysisTreatWarningsAsErrors>false</CodeAnalysisTreatWarningsAsErrors>
+    <WarningsNotAsErrors>IDE0055;IDE0305;IDE0370</WarningsNotAsErrors>
     <Authors>XYphrodite</Authors>
     <Company>XYphrodite</Company>
   </PropertyGroup>
