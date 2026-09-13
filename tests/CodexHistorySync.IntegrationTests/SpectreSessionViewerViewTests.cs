@@ -321,6 +321,7 @@ public sealed class SpectreSessionViewerViewTests
         writer = new StringWriter();
         return AnsiConsole.Create(new AnsiConsoleSettings
         {
+            EnvironmentVariables = new Dictionary<string, string>(),
             Ansi = AnsiSupport.No,
             ColorSystem = ColorSystemSupport.NoColors,
             Interactive = InteractionSupport.No,

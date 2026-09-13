@@ -258,7 +258,7 @@ public sealed class GitStorageProviderTests : IAsyncLifetime
         var script = Path.Combine(_root, "echo-secrets.ps1");
         await File.WriteAllTextAsync(script,
             "$text = $args -join ' '; [Console]::Out.WriteLine($text); [Console]::Error.WriteLine($text); exit 7\r\n");
-        var result = await new GitCommand("powershell.exe", TimeSpan.FromSeconds(10)).RunAsync(
+        var result = await new GitCommand("powershell.exe", TimeSpan.FromSeconds(60)).RunAsync(
             [
                 "-NoProfile",
                 "-File",

@@ -317,9 +317,12 @@ public sealed class CliServiceTests
         SyncEngine? created = null;
         try
         {
+            var codexHome = Path.Combine(root, "codex");
+            Directory.CreateDirectory(codexHome);
             var runtime = new CoreCliSyncRuntime(root, new FakeGateway([]), new RecordingProcessDetector(),
                 (_, _) => Task.FromResult(new CompatibilityResult(true, "test", "compatible")),
-                (configuration, key) => created = CreateEngine(root, configuration, key));
+                (configuration, key) => created = CreateEngine(root, configuration, key), null,
+                codexHome: codexHome);
             var configuration = new CliLocalConfiguration(1, "repository-123", "device-123", Remote, "old-revision");
 
             await runtime.SynchronizeAsync(configuration, callerKey, SyncMode.Pull, CancellationToken.None);
@@ -371,7 +374,8 @@ public sealed class CliServiceTests
                 CancellationToken.None);
             var runtime = new CoreCliSyncRuntime(root, new FakeGateway([]), new RecordingProcessDetector(),
                 (_, _) => Task.FromResult(new CompatibilityResult(true, "test", "compatible")),
-                (current, currentKey) => CreateEngine(root, current, currentKey, provider));
+                (current, currentKey) => CreateEngine(root, current, currentKey, provider), null,
+                codexHome: targetPaths.Home);
 
             var status = await runtime.GetStatusAsync(configuration, key, CancellationToken.None);
 

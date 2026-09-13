@@ -725,6 +725,7 @@ public sealed class SpectreSessionManagerViewTests
         writer = new StringWriter();
         return AnsiConsole.Create(new AnsiConsoleSettings
         {
+            EnvironmentVariables = new Dictionary<string, string>(),
             Ansi = ansi ? AnsiSupport.Yes : AnsiSupport.No,
             ColorSystem = ColorSystemSupport.TrueColor,
             Interactive = interactive ? InteractionSupport.Yes : InteractionSupport.No,
@@ -740,6 +741,7 @@ public sealed class SpectreSessionManagerViewTests
         bool interactive = false) =>
         AnsiConsole.Create(new AnsiConsoleSettings
         {
+            EnvironmentVariables = new Dictionary<string, string>(),
             Ansi = ansi ? AnsiSupport.Yes : AnsiSupport.No,
             ColorSystem = ColorSystemSupport.TrueColor,
             Interactive = interactive ? InteractionSupport.Yes : InteractionSupport.No,
