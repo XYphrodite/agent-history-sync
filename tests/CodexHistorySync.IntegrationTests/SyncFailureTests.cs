@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -1894,13 +1895,13 @@ public sealed class SyncFailureTests : IDisposable
         public Task<RemoteSnapshot> ReadSnapshotAsync(CancellationToken ct)
         {
             ReadCalls++;
-            return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(), _index?.ToArray(),
+            return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(CultureInfo.InvariantCulture), _index?.ToArray(),
                 _objects.Select(pair => new EncryptedRemoteObject(pair.Key, pair.Value.ToArray())).ToArray()));
         }
         public Task<RemoteSnapshot> ReadSnapshotMetadataAsync(CancellationToken ct)
         {
             ReadCalls++;
-            return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(),
+            return Task.FromResult(new RemoteSnapshot(_revision == 0 ? string.Empty : _revision.ToString(CultureInfo.InvariantCulture),
                 _index?.ToArray(), [], _objects.Keys.ToArray()));
         }
         public Task<byte[]> ReadObjectAsync(RemoteSnapshot snapshot, LogicalObjectId objectId, CancellationToken ct)
@@ -1912,14 +1913,14 @@ public sealed class SyncFailureTests : IDisposable
         public async Task<PublishResult> TryPublishAsync(PublishRequest request, CancellationToken ct)
         {
             PublishCalls++;
-            if (RejectionsRemaining-- > 0) return new(false, _revision.ToString());
-            if (!StringComparer.Ordinal.Equals(request.ExpectedRevision, _revision == 0 ? string.Empty : _revision.ToString())) return new(false, _revision.ToString());
+            if (RejectionsRemaining-- > 0) return new(false, _revision.ToString(CultureInfo.InvariantCulture));
+            if (!StringComparer.Ordinal.Equals(request.ExpectedRevision, _revision == 0 ? string.Empty : _revision.ToString(CultureInfo.InvariantCulture))) return new(false, _revision.ToString(CultureInfo.InvariantCulture));
             if (request.Index is { Delete: false } index) _index = await File.ReadAllBytesAsync(index.CiphertextPath, ct);
             foreach (var change in request.Changes)
                 if (change.Delete) _objects.Remove(change.ObjectId);
                 else _objects[change.ObjectId] = await File.ReadAllBytesAsync(change.CiphertextPath, ct);
             _revision++;
-            return new(true, _revision.ToString());
+            return new(true, _revision.ToString(CultureInfo.InvariantCulture));
         }
         public void CorruptFirstObject() { var key = _objects.Keys.First(); _objects[key][^1] ^= 0x80; }
         public void CorruptIndex() => _index![^1] ^= 0x80;
