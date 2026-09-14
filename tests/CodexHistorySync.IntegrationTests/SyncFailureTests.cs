@@ -432,6 +432,92 @@ public sealed class SyncFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task RunningCodex_DefersDownloadsAndDeletesButUploadsAndRetriesWithoutAdvancingTheirBaseline()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var source = CreateDevice("source-busy", key, provider);
+        await WriteSessionAsync(source.Paths.Sessions, "busy-update");
+        await WriteSessionAsync(source.Paths.Sessions, "busy-delete");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var initialTarget = CreateDevice("target-busy", key, provider);
+        await initialTarget.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        var targetPath = Path.Combine(initialTarget.Paths.Sessions, "busy-update.jsonl");
+        var original = await File.ReadAllBytesAsync(targetPath);
+        var baseline = await initialTarget.State.LoadAsync("repository", CancellationToken.None);
+        await File.AppendAllTextAsync(Path.Combine(source.Paths.Sessions, "busy-update.jsonl"),
+            "{\"type\":\"message\",\"payload\":{\"text\":\"remote update\"}}\n");
+        File.Delete(Path.Combine(source.Paths.Sessions, "busy-delete.jsonl"));
+        await WriteSessionAsync(source.Paths.Sessions, "busy-new");
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        await WriteSessionAsync(initialTarget.Paths.Sessions, "local-upload");
+        var detector = new RunningDetector();
+        var progress = new List<SyncProgress>();
+        var target = CreateDevice("target-busy", key, provider, detector: detector, progress: progress.Add);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(1, result.Uploaded);
+        Assert.Equal(3, result.DeferredActive);
+        Assert.Equal(0, result.Downloaded);
+        Assert.Equal(0, result.Deleted);
+        Assert.Equal(0, result.Conflicts);
+        Assert.Equal(original, await File.ReadAllBytesAsync(targetPath));
+        Assert.True(File.Exists(Path.Combine(target.Paths.Sessions, "busy-delete.jsonl")));
+        Assert.False(File.Exists(Path.Combine(target.Paths.Sessions, "busy-new.jsonl")));
+        var pending = await target.State.LoadAsync("repository", CancellationToken.None);
+        foreach (var previous in baseline.Objects) Assert.Contains(previous, pending.Objects);
+        Assert.DoesNotContain(pending.Objects, item => item.Id.Value == "busy-new");
+        Assert.Contains(progress, item => item.Message.Contains("deferring 3 local Codex changes", StringComparison.Ordinal));
+        Assert.Empty(Directory.EnumerateDirectories(target.StagingRoot));
+
+        detector.Running = false;
+        var retried = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None);
+        Assert.Equal(0, retried.DeferredActive);
+        Assert.Equal(2, retried.Downloaded);
+        Assert.Equal(1, retried.Deleted);
+        Assert.Equal(0, retried.Conflicts);
+        Assert.Contains("remote update", await File.ReadAllTextAsync(targetPath));
+        Assert.False(File.Exists(Path.Combine(target.Paths.Sessions, "busy-delete.jsonl")));
+        Assert.True(File.Exists(Path.Combine(target.Paths.Sessions, "busy-new.jsonl")));
+    }
+
+    [Fact]
+    public async Task RunningCodex_DoesNotBlockClaudeOrAnnotationImports()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var provider = new MemoryProvider();
+        var sourceClaude = CreateClaudeHome("source-busy-claude");
+        var sourceAnnotations = new SessionAnnotationStore(Path.Combine(_root, "source-busy-claude", "local"));
+        var source = CreateDevice("source-busy-claude", key, provider, claudePaths: sourceClaude,
+            claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false),
+            annotationsDirectory: sourceAnnotations.Directory);
+        await WriteSessionAsync(source.Paths.Sessions, "pending-codex");
+        const string claudeId = "72000000-0000-0000-0000-000000000097";
+        await WriteClaudeSessionAsync(sourceClaude, ClaudeProject, claudeId, _root);
+        var annotationKey = new SessionAnnotationKey(ManagedAgent.Codex, "pending-codex");
+        await sourceAnnotations.SaveAsync(annotationKey, new SessionAnnotation("Independent title", null,
+            SessionAnnotationSource.Edited, "digest-hash", null, DateTimeOffset.UtcNow), CancellationToken.None);
+        await source.Engine.SynchronizeAsync(SyncMode.Push, CancellationToken.None);
+        var targetClaude = CreateClaudeHome("target-busy-claude");
+        var targetAnnotations = new SessionAnnotationStore(Path.Combine(_root, "target-busy-claude", "local"));
+        var target = CreateDevice("target-busy-claude", key, provider, detector: new RunningDetector(),
+            claudePaths: targetClaude, claudeScanner: new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false),
+            annotationsDirectory: targetAnnotations.Directory);
+
+        var result = await target.Engine.SynchronizeAsync(SyncMode.Pull, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(1, result.DeferredActive);
+        Assert.Equal(2, result.Downloaded);
+        Assert.Equal(0, result.Conflicts);
+        Assert.True(File.Exists(targetClaude.SessionFilePath(ClaudeProject, claudeId)));
+        Assert.True(File.Exists(Path.Combine(targetAnnotations.Directory, SessionAnnotationStore.FileName(annotationKey))));
+        Assert.Empty(await ScanAsync(target));
+    }
+
+    [Fact]
     public async Task LocalEditAfterScan_IsPreservedAndDefersDownloadedBaseline()
     {
         var key = RandomNumberGenerator.GetBytes(32);
@@ -1821,8 +1907,15 @@ public sealed class SyncFailureTests : IDisposable
     private sealed class StartsAtMutationBoundaryDetector : ICodexProcessDetector
     {
         private int _checks;
-        public bool IsRunning() => Interlocked.Increment(ref _checks) == 3;
+        public bool IsRunning() => Interlocked.Increment(ref _checks) >= 4;
         public Task WaitForExitAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+    private sealed class RunningDetector : ICodexProcessDetector
+    {
+        public bool Running { get; set; } = true;
+        public bool IsRunning() => Running;
+        public Task WaitForExitAsync(CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Synchronization must never wait for a running Codex process.");
     }
     private sealed class OfflineProvider : IStorageProvider
     {

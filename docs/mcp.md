@@ -48,6 +48,12 @@ For the next page, pass the previous `next_offset` as `offset`. `next_offset: nu
 
 ## Indexing and data access
 
+To select named settings and session directories, use `agent-sync mcp --profile reader`
+(MCP arguments: `["mcp", "--profile", "reader"]`). Register the profile as described in
+[profiles](profiles.md). This applies to both tools and their SQLite catalog; no profile
+banner is written to stdout. Interactive `--select-profile` requires a terminal and is
+not suitable for an MCP subprocess.
+
 Initialization and tool discovery do not scan conversations or build SQLite. Each search scans local metadata and refreshes `%LOCALAPPDATA%\CodexHistorySync\catalog.db`; unchanged sessions are not reread. The first search can take longer for a large history. A local `agent-sync search <query>` can warm the same index beforehand.
 
 Search uses SQLite FTS5 and requires all whitespace-separated query terms to match. It searches indexed excerpts, not embeddings: the existing index keeps up to 2000 characters per turn and 256 KiB of conversation text per session. Use `get_session` to read beyond those excerpts. It resolves a fresh catalog entry and reads the native conversation; pages do not inherit the search excerpt limit. Changed titles and deleted sessions are refreshed during the same MCP connection.

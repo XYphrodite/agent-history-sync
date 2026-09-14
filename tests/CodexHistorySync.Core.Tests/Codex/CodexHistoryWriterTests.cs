@@ -59,6 +59,24 @@ public sealed class CodexHistoryWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAndDelete_WhenCodexIsAlreadyRunning_RejectImmediatelyAndPreserveTheFile()
+    {
+        var detector = new MutableProcessDetector { Running = true };
+        var fixture = CreateFixture(new AtomicFileSystem(), detector);
+        var path = await WriteSessionAsync(fixture.Paths, "busy.jsonl", "chat", "original");
+        var original = await File.ReadAllBytesAsync(path);
+        var incoming = Session("chat", "remote");
+
+        await Assert.ThrowsAsync<CodexBecameActiveException>(() => fixture.Writer.ImportAsync(
+            Object(path, incoming), new MemoryStream(incoming), "busy-import", CancellationToken.None));
+        await Assert.ThrowsAsync<CodexBecameActiveException>(() => fixture.Writer.ApplyTombstoneAsync(
+            Object(path, original), new ContentHash(Hash(original)), "busy-delete", CancellationToken.None));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(path));
+        Assert.False(Directory.Exists(fixture.Backups.RootPath));
+    }
+
+    [Fact]
     public async Task ImportAsync_WhenDestinationChangesAfterBackup_PreservesConcurrentBytes()
     {
         var fileSystem = new MutatingReplaceFileSystem();

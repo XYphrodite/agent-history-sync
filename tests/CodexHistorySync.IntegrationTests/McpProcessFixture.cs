@@ -12,27 +12,39 @@ internal sealed class McpProcessFixture : IAsyncDisposable
     internal const string AssistantText = "Use local history for this task.";
     private readonly Process process;
     private readonly Task<string> errors;
+    private readonly string dataRoot;
+    private readonly string historyRoot;
     private readonly CancellationTokenSource timeout = new(TimeSpan.FromSeconds(45));
     private int requestId;
 
-    private McpProcessFixture(string root, Process process)
+    private McpProcessFixture(string root, Process process, string dataRoot, string historyRoot)
     {
         Root = root;
         this.process = process;
+        this.dataRoot = dataRoot;
+        this.historyRoot = historyRoot;
         errors = process.StandardError.ReadToEndAsync();
     }
 
     public string Root { get; }
-    public string SessionPath => Path.Combine(Root, "continue", "sessions", SessionId + ".json");
-    public string CatalogPath => Path.Combine(Root, "data", "CodexHistorySync", "catalog.db");
+    public string SessionPath => Path.Combine(historyRoot, "continue", "sessions", SessionId + ".json");
+    public string CatalogPath => Path.Combine(dataRoot, "CodexHistorySync", "catalog.db");
 
-    public static async Task<McpProcessFixture> StartAsync(string? publishedExecutable = null)
+    public static async Task<McpProcessFixture> StartAsync(string? publishedExecutable = null, string? profileName = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "chs-mcp-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(Path.Combine(root, "continue", "sessions"));
+        var historyRoot = profileName is null ? root : Path.Combine(root, "snapshot");
+        var dataRoot = Path.Combine(root, profileName is null ? "data" : "profile-data");
+        Directory.CreateDirectory(Path.Combine(historyRoot, "continue", "sessions"));
         Directory.CreateDirectory(Path.Combine(root, "data", "CodexHistorySync"));
+        Directory.CreateDirectory(Path.Combine(dataRoot, "CodexHistorySync"));
         // A joined repository and even a valid sync configuration must be unnecessary.
-        await File.WriteAllTextAsync(Path.Combine(root, "data", "CodexHistorySync", "config.json"), "invalid sync configuration");
+        await File.WriteAllTextAsync(Path.Combine(dataRoot, "CodexHistorySync", "config.json"), "invalid sync configuration");
+        if (profileName is not null)
+            await File.WriteAllTextAsync(Path.Combine(root, "data", "CodexHistorySync", "profiles.json"), JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1, profiles = new[] { new { name = profileName, dataDirectory = dataRoot, sessionsDirectory = historyRoot } }
+            }));
         var start = new ProcessStartInfo(publishedExecutable ?? "dotnet")
         {
             UseShellExecute = false,
@@ -56,13 +68,18 @@ internal sealed class McpProcessFixture : IAsyncDisposable
             start.ArgumentList.Add(typeof(CliApplication).Assembly.Location);
         }
         start.ArgumentList.Add("mcp");
+        if (profileName is not null)
+        {
+            start.ArgumentList.Add("--profile");
+            start.ArgumentList.Add(profileName);
+        }
         start.Environment["LOCALAPPDATA"] = Path.Combine(root, "data");
         start.Environment["CODEX_HOME"] = Path.Combine(root, "missing-codex");
         start.Environment["GROK_HOME"] = Path.Combine(root, "missing-grok");
         start.Environment["CLAUDE_CONFIG_DIR"] = Path.Combine(root, "missing-claude");
-        start.Environment["CONTINUE_GLOBAL_DIR"] = Path.Combine(root, "continue");
+        start.Environment["CONTINUE_GLOBAL_DIR"] = Path.Combine(historyRoot, "continue");
         var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start MCP process.");
-        var fixture = new McpProcessFixture(root, process);
+        var fixture = new McpProcessFixture(root, process, dataRoot, historyRoot);
         await fixture.WriteSessionAsync("Local example");
         return fixture;
     }

@@ -21,7 +21,7 @@ internal static class Program
         Console.CancelKeyPress += handler;
         try
         {
-            return await CliComposition.CreateDefault(args).RunAsync(args, cancellation.Token).ConfigureAwait(false);
+            return await CliEntryPoint.RunAsync(args, cancellation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return 0; }
         finally { Console.CancelKeyPress -= handler; }

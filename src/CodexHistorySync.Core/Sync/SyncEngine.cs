@@ -64,6 +64,9 @@ public sealed record SyncResult(
     /// part of the repository still says so.
     /// </summary>
     public int SkippedNoAgentHome { get; init; }
+
+    /// <summary>Local Codex changes left pending while a Codex process is running.</summary>
+    public int DeferredActive { get; init; }
 }
 public sealed record SyncPreview(string RemoteRevision, int LocalObjects, int RemoteObjects, int PendingChanges,
     IReadOnlySet<string> ConflictIdentities)
@@ -295,7 +298,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     Directory.CreateDirectory(directory);
                     await HistoryMutationBatch.EnsureCleanupEvidenceAsync(directory, ct).ConfigureAwait(false);
                     var successful = new Dictionary<LogicalObjectId, ObjectVersion>();
-                    var deferred = new HashSet<LogicalObjectId>();
+                    var busy = plan.Actions.Where(action => mode != SyncMode.Push &&
+                            (action.Kind is SyncActionKind.Download or SyncActionKind.ApplyTombstone) &&
+                            (action.Remote is { } incoming && _historyWriter.IsMutationBlocked(incoming.Kind) ||
+                             action.Local is { } existing && existing.Kind != action.Remote?.Kind && _historyWriter.IsMutationBlocked(existing.Kind)))
+                        .Select(action => action.ObjectId).ToHashSet();
+                    var deferred = new HashSet<LogicalObjectId>(busy);
                     var entries = remote.Entries.ToDictionary(entry => entry.Id);
                     var changes = new List<EncryptedObjectChange>();
                     var attemptUploads = 0;
@@ -306,10 +314,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                     var missingAgentHomes = new SortedSet<ObjectKind>();
                     var stagedImports = new Dictionary<LogicalObjectId, StagedImport>();
                     var pendingConflicts = new List<PendingConflict>();
-                    var actionable = plan.Actions.Count(action => IsApplicablePreviewChange(action.Kind, mode));
+                    var actionable = plan.Actions.Count(action => !busy.Contains(action.ObjectId) && IsApplicablePreviewChange(action.Kind, mode));
+                    if (busy.Count != 0)
+                        Report(SyncProgressPhase.StagingChanges, $"deferring {busy.Count} local Codex changes because Codex is running");
                     Report(SyncProgressPhase.StagingChanges,
-                        actionable == 0 ? "no changes detected; finalizing" : $"validating and staging {actionable} changes");
-                    foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push))
+                        actionable == 0 ? (busy.Count == 0 ? "no changes detected; finalizing" : "Codex changes deferred; finalizing")
+                            : $"validating and staging {actionable} changes");
+                    foreach (var action in plan.Actions.Where(action => action.Kind == SyncActionKind.Download && mode != SyncMode.Push && !busy.Contains(action.ObjectId)))
                     {
                         try
                         {
@@ -352,7 +363,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             case SyncActionKind.Download when mode != SyncMode.Push && !deferred.Contains(action.ObjectId):
                                 successful[action.ObjectId] = action.Remote!;
                                 break;
-                            case SyncActionKind.ApplyTombstone when mode != SyncMode.Push:
+                            case SyncActionKind.ApplyTombstone when mode != SyncMode.Push && !deferred.Contains(action.ObjectId):
                                 successful[action.ObjectId] = action.Remote!;
                                 break;
                             case SyncActionKind.Upload when mode != SyncMode.Pull:
@@ -451,7 +462,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             mutationPlans.Add(new HistoryMutationPlan(staged.Incoming, staged.ExpectedState,
                                 ExpectedHistoryState.Present(staged.Incoming.Hash)));
                         }
-                        else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null)
+                        else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null && !deferred.Contains(action.ObjectId))
                         {
                             var source = locals.Single(item => item.Id == action.ObjectId);
                             mutationPlans.Add(new HistoryMutationPlan(source, ExpectedHistoryState.Present(action.Baseline!.PlaintextHash),
@@ -526,7 +537,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                 }
                                 attemptDownloaded++;
                             }
-                            else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null)
+                            else if (action.Kind == SyncActionKind.ApplyTombstone && mode != SyncMode.Push && action.Local is not null && !deferred.Contains(action.ObjectId))
                             {
                                 await mutationBatch!.BeginApplyAsync(action.ObjectId, ct).ConfigureAwait(false);
                                 var source = locals.Single(item => item.Id == action.ObjectId);
@@ -560,7 +571,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             {
                                 LocalByKind = SummarizeByKind(scan),
                                 LocalIgnored = scan.IgnoredIds.Count,
-                                SkippedNoAgentHome = skippedNoAgentHome
+                                SkippedNoAgentHome = skippedNoAgentHome,
+                                DeferredActive = busy.Count
                             };
                         Report(SyncProgressPhase.SavingState, "saving synchronization state");
                         await _stateStore.SaveAsync(new DeviceState(LocalStateStore.CurrentSchemaVersion, _repositoryId,
@@ -572,7 +584,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                         {
                             LocalByKind = SummarizeByKind(scan),
                             LocalIgnored = scan.IgnoredIds.Count,
-                            SkippedNoAgentHome = skippedNoAgentHome
+                            SkippedNoAgentHome = skippedNoAgentHome,
+                            DeferredActive = busy.Count
                         };
                     }
                     catch (Exception primary) when (mutationBatch is not null && !stateSaved)
