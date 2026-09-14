@@ -70,7 +70,8 @@ public sealed class CodexHistoryWriter
         var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        await WaitIfRunningAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        EnsureAgentInactive(incoming.Kind);
 
         if (incoming.Kind == ObjectKind.GrokSession)
             return await ImportGrokPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
@@ -123,7 +124,8 @@ public sealed class CodexHistoryWriter
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
-        await WaitIfRunningAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        EnsureAgentInactive(local.Kind);
         var current = await ContentHashAsync(destination, local.Kind, ct).ConfigureAwait(false);
         if (current is null || !BackupStore.HashEquals(current.Value, baselineHash)) return TombstoneApplyResult.Conflict;
         if (local.Kind == ObjectKind.GrokSession)
@@ -131,7 +133,6 @@ public sealed class CodexHistoryWriter
             // Package hash is not the raw chat_history file hash; best-effort backup of chat text only.
             if (File.Exists(destination))
                 await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
-            EnsureCodexInactive();
             File.Delete(destination);
             var summary = Path.Combine(Path.GetDirectoryName(destination)!, "summary.json");
             if (File.Exists(summary)) File.Delete(summary);
@@ -140,7 +141,7 @@ public sealed class CodexHistoryWriter
 
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         if (!BackupStore.HashEquals(backup.ContentHash, baselineHash)) return TombstoneApplyResult.Conflict;
-        return await _fileSystem.DeleteIfUnchangedAsync(destination, baselineHash, EnsureCodexInactive, ct).ConfigureAwait(false)
+        return await _fileSystem.DeleteIfUnchangedAsync(destination, baselineHash, () => EnsureAgentInactive(local.Kind), ct).ConfigureAwait(false)
             ? TombstoneApplyResult.Applied
             : TombstoneApplyResult.Conflict;
     }
@@ -166,7 +167,6 @@ public sealed class CodexHistoryWriter
 
         try
         {
-            EnsureCodexInactive();
             GrokSessionPackage.Materialize(package, _grokPaths);
             var after = await ContentHashAsync(destination, ObjectKind.GrokSession, ct).ConfigureAwait(false);
             if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
@@ -254,7 +254,6 @@ public sealed class CodexHistoryWriter
 
         try
         {
-            EnsureCodexInactive();
             ClaudeSessionPackage.Materialize(package, _claudePaths);
             var after = await ContentHashAsync(destination, ObjectKind.ClaudeSession, ct).ConfigureAwait(false);
             if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
@@ -290,7 +289,6 @@ public sealed class CodexHistoryWriter
 
         try
         {
-            EnsureCodexInactive();
             ClaudeMemoryPackage.Materialize(package, _claudePaths);
             var after = await ContentHashAsync(destination, ObjectKind.ClaudeMemory, ct).ConfigureAwait(false);
             if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
@@ -337,7 +335,6 @@ public sealed class CodexHistoryWriter
 
         try
         {
-            EnsureCodexInactive();
             ContinueSessionPackage.Materialize(package, _continuePaths);
             var after = await ContentHashAsync(destination, ObjectKind.ContinueSession, ct).ConfigureAwait(false);
             if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
@@ -350,9 +347,15 @@ public sealed class CodexHistoryWriter
         }
     }
 
-    private async Task WaitIfRunningAsync(CancellationToken ct)
+    // The process detector cannot identify which Codex thread is open. Defer Codex mutations
+    // conservatively, but never wait for a long-lived app-server or block other agents on it.
+    internal bool IsMutationBlocked(ObjectKind kind) =>
+        (kind is ObjectKind.ActiveSession or ObjectKind.ArchivedSession) && _processDetector.IsRunning();
+
+    private bool EnsureAgentInactive(ObjectKind kind)
     {
-        if (_processDetector.IsRunning()) await _processDetector.WaitForExitAsync(ct).ConfigureAwait(false);
+        if (IsMutationBlocked(kind)) throw new CodexBecameActiveException();
+        return true;
     }
 
     internal async Task<RollbackCapture> CaptureRollbackAsync(HistoryMutationPlan plan, string operationId, CancellationToken ct)
@@ -361,7 +364,8 @@ public sealed class CodexHistoryWriter
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
-        await WaitIfRunningAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        EnsureAgentInactive(plan.Target.Kind);
         if (!await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
             throw new IOException("Local history changed before the mutation batch could be captured.");
         if (!plan.Before.Exists) return new RollbackCapture(destination, null);
@@ -384,14 +388,15 @@ public sealed class CodexHistoryWriter
         var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
-        await WaitIfRunningAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
         if (await MatchesExpectedStateAsync(destination, kind, before, ct).ConfigureAwait(false)) return;
+        EnsureAgentInactive(kind);
         if (!await MatchesExpectedStateAsync(destination, kind, after, ct).ConfigureAwait(false))
             throw new IOException("Local history changed after an interrupted synchronized mutation; automatic rollback was refused.");
         if (!before.Exists)
         {
             if (after.Exists && !await _fileSystem.DeleteIfUnchangedAsync(destination, after.ContentHash!.Value,
-                    EnsureCodexInactive, ct).ConfigureAwait(false))
+                    () => EnsureAgentInactive(kind), ct).ConfigureAwait(false))
                 throw new IOException("The synchronized file changed before rollback deletion.");
             return;
         }
@@ -410,7 +415,7 @@ public sealed class CodexHistoryWriter
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             await _fileSystem.WriteTemporaryAsync(temporary, content, ct).ConfigureAwait(false);
             await _fileSystem.PublishAsync(temporary, destination, before.ContentHash.Value,
-                after.Exists ? after.ContentHash : null, EnsureCodexInactive, ct).ConfigureAwait(false);
+                after.Exists ? after.ContentHash : null, () => EnsureAgentInactive(kind), ct).ConfigureAwait(false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

@@ -13,6 +13,8 @@ artifacts/
 /CodexHistorySync/config.json
 /CodexHistorySync/keys/
 /CodexHistorySync/logs/
+/CodexHistorySync/profiles.json*
+/CodexHistorySync/profiles/
 /CodexHistorySync/repositories/*/state.json
 /CodexHistorySync/repositories/*/git/
 /CodexHistorySync/repositories/*/backups/

@@ -112,7 +112,8 @@ public static class CliComposition
         var worker = new AgentWorker(detector, new CliAgentSyncOperations(services), new SystemAgentClock(),
             new WindowsNotifier(), new RotatingAgentLogger(localAppData));
         var agent = new DefaultAgentCliOperations(worker, scheduler, () => Environment.ProcessPath);
-        return new CliApplication(services, console, agent, selfUpdate: new DefaultSelfUpdateOperations());
+        return new CliApplication(services, console, agent, selfUpdate: new DefaultSelfUpdateOperations(),
+            localAppDataDirectory: localAppData);
     }
 
     private static ISessionManagerRunner CreateSessionViewerRunner()
@@ -128,7 +129,7 @@ public static class CliComposition
         var catalog = new AnnotatedSessionCatalog(
             new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths), annotations);
         var conversations = new SessionContentReader();
-        var titling = SessionTitleConfiguration.Load();
+        var titling = SessionTitleConfiguration.Load(Environment.GetEnvironmentVariable("LOCALAPPDATA"));
         ILocalSessionOperations? operations = OperatingSystem.IsWindows()
             ? new LocalSessionOperations(codexPaths, grokPaths, activeState, new WindowsManagedSessionDirectoryDeleter(),
                 null, null, claudePaths, null, continuePaths, null)
@@ -154,7 +155,7 @@ public static class CliComposition
         var annotationStore = new SessionAnnotationStore();
         var annotated = new AnnotatedSessionCatalog(catalog, annotationStore);
         // No endpoint configured means no suggester at all: the key says so and nothing is sent.
-        var titling = SessionTitleConfiguration.Load();
+        var titling = SessionTitleConfiguration.Load(Environment.GetEnvironmentVariable("LOCALAPPDATA"));
         var suggester = titling.IsConfigured ? new OllamaSessionTitleSuggester(titling.Options) : null;
         // The viewer never copies, so no conversation writers are composed for it (design D6).
         var operations = new LocalSessionOperations(

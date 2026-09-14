@@ -76,6 +76,23 @@ An excluded session is **not** a deleted one. It stays on disk, keeps its baseli
 
 If Codex or Grok locks a session after the stable scan but before encryption, Windows sharing/lock violations defer only that session. Other eligible objects are still published, and the locked session remains pending for a later run. Other I/O failures remain fatal.
 
+### Synchronizing while Codex is open
+
+`sync`, `pull`, and `join --apply` never wait for all Codex processes to exit. While
+Codex is running, local Codex imports, replacements, archive moves and deletions are
+deferred. Uploads and work on other agents and annotations can continue. The progress
+message and `deferred-active=N` result say how many local changes remain pending;
+their previous baseline is preserved so the next sync can retry them.
+
+This first implementation is conservative: the process detector cannot reliably tell
+which thread is open, so it defers **all local Codex changes**, including new imports,
+even when a named profile uses a separate history directory. It does not claim that
+every deferred conversation is active. Close Codex and sync again to apply them.
+If Codex starts after planning, the final write checks stop the operation promptly;
+they never wait indefinitely or overwrite history merely to finish a sync. An interrupted
+rollback that still needs to change Codex history preserves its recovery journal for a
+later run after Codex exits.
+
 Interactive `sync`, `push`, and `pull` print elapsed phase updates for lock acquisition, bounded-parallel local scanning, remote metadata fetch, index authentication, planning, staging, publication, local application, and state persistence. Codex and Grok scans run concurrently, with at most eight session bodies processed concurrently inside each scanner. For an unchanged repository, the engine authenticates the encrypted index and verifies that its opaque IDs exactly match the materialized object filenames; ciphertext bytes are loaded, hashed, decrypted, and plaintext-hash checked lazily only for objects required by download or conflict actions.
 
 Each successful publish rewrites `main` to a **single orphan commit** (force-with-lease against the CAS baseline). Previous commits become unreachable so GitHub can reclaim old encrypted blobs; the repository is a snapshot store, not an append-only audit log. `main` therefore has exactly one commit and no parent: there is no history to prune, and no oldest commit to delete.

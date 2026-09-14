@@ -774,6 +774,32 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Sync_reports_deferred_active_changes_as_pending_work()
+    {
+        var fixture = new Fixture();
+        fixture.Services.SyncResult = new SyncResult("revision-busy", 2, 1, 0, 0, false) { DeferredActive = 3 };
+
+        var exitCode = await fixture.Application.RunAsync(["sync"], CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("deferred-active=3", fixture.Console.OutputText);
+        Assert.Contains("They remain pending for a later sync", fixture.Console.OutputText);
+        Assert.DoesNotContain("Operation failed", fixture.Console.AllText);
+    }
+
+    [Fact]
+    public async Task Codex_starting_during_sync_reports_busy_without_hanging_or_claiming_success()
+    {
+        var fixture = new Fixture();
+        fixture.Services.Failure = new CodexBecameActiveException();
+
+        Assert.Equal(1, await fixture.Application.RunAsync(["sync"], CancellationToken.None));
+        Assert.Contains("Local Codex history is busy", fixture.Console.AllText);
+        Assert.Contains("retry it after Codex exits", fixture.Console.AllText);
+        Assert.DoesNotContain("revision=", fixture.Console.OutputText);
+    }
+
+    [Fact]
     public async Task Sync_with_unresolved_conflicts_returns_exit_code_four()
     {
         var fixture = new Fixture();

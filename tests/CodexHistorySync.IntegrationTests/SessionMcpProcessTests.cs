@@ -6,6 +6,20 @@ namespace CodexHistorySync.IntegrationTests;
 public sealed class SessionMcpProcessTests
 {
     [Fact]
+    public async Task NamedProfileUsesItsOwnCatalogWithoutAddingTextToTheStdioProtocol()
+    {
+        await using var fixture = await McpProcessFixture.StartAsync(profileName: "reader");
+        await fixture.InitializeAsync();
+        var found = Data(await fixture.CallAsync("search_sessions", new { query = "xylophone handshake" }));
+        Assert.Single(found.GetProperty("sessions").EnumerateArray());
+        Assert.True(File.Exists(fixture.CatalogPath));
+        Assert.False(File.Exists(Path.Combine(fixture.Root, "data", "CodexHistorySync", "catalog.db")));
+        var read = Data(await fixture.CallAsync("get_session", new { agent = "continue", session_id = McpProcessFixture.SessionId }));
+        Assert.Contains(McpProcessFixture.UserText, read.GetProperty("text").GetString());
+        await fixture.FinishAsync();
+    }
+
+    [Fact]
     public async Task StdioHandshakeSearchAndPagedReadWorkWithoutSyncConfiguration()
     {
         await using var fixture = await McpProcessFixture.StartAsync();

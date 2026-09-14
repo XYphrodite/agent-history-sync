@@ -236,6 +236,11 @@ public sealed class CliApplication
             console.WriteError("Run: agent-sync join <remote-url>");
             return 1;
         }
+        catch (CodexBecameActiveException)
+        {
+            console.WriteError("Local Codex history is busy. The command stopped instead of waiting; retry it after Codex exits.");
+            return 1;
+        }
         catch (Exception exception)
         {
             // Keep output free of paths/secrets; surface only a stable type token for support.
@@ -306,7 +311,8 @@ public sealed class CliApplication
                 return plan.Conflicts == 0 ? 0 : 4;
             }
             var result = await Services.ApplyJoinAsync(repository, plan, cancellationToken).ConfigureAwait(false);
-            console.WriteLine($"Join applied: revision={SafeToken(result.RemoteRevision)} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts}.");
+            console.WriteLine($"Join applied: revision={SafeToken(result.RemoteRevision)} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} deferred-active={result.DeferredActive}.");
+            WriteDeferredActive(result);
             return result.Conflicts == 0 ? 0 : 4;
         }
         finally
@@ -319,7 +325,8 @@ public sealed class CliApplication
     private async Task<int> RunSyncAsync(SyncMode mode, CancellationToken cancellationToken)
     {
         var result = await Services.SynchronizeAsync(mode, cancellationToken).ConfigureAwait(false);
-        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized} skipped-no-agent-home={result.SkippedNoAgentHome}");
+        console.WriteLine($"revision={SafeToken(result.RemoteRevision)} uploaded={result.Uploaded} downloaded={result.Downloaded} deleted={result.Deleted} conflicts={result.Conflicts} skipped-oversized={result.SkippedOversized} skipped-no-agent-home={result.SkippedNoAgentHome} deferred-active={result.DeferredActive}");
+        WriteDeferredActive(result);
         // The counter alone reads as a statistic; this says what it means and what ends it. The
         // run itself succeeded, so nothing else on the line tells the operator that part of the
         // repository is still on the remote.
@@ -330,6 +337,13 @@ public sealed class CliApplication
                 "Install that agent, or create its history directory, and synchronize again.");
         WriteLocalBreakdown(result.LocalByKind, result.LocalIgnored);
         return result.Conflicts == 0 ? 0 : 4;
+    }
+
+    private void WriteDeferredActive(SyncResult result)
+    {
+        if (result.DeferredActive > 0)
+            console.WriteLine($"{result.DeferredActive} local Codex changes deferred because Codex is running. " +
+                "They remain pending for a later sync after Codex exits.");
     }
 
     /// <summary>
@@ -755,6 +769,9 @@ public sealed class CliApplication
     private int Help()
     {
         console.WriteLine("Usage: agent-sync <init|join|sync|pull|push|status|doctor|conflicts|resolve|agent|update|titles|search|mcp> [options] [--manage] [--sessions] [--version]");
+        console.WriteLine("  --profile <name>             choose settings and session directories for this command");
+        console.WriteLine("  --select-profile             choose a profile interactively for this command");
+        console.WriteLine("  profile list|add|show|remove  manage named profiles (see profile --help)");
         console.WriteLine("  titles                       show what session titling is configured with");
         console.WriteLine("  titles set <endpoint> [--model <name>] [--language <auto|ru|en>]");
         console.WriteLine("  titles off                   turn session titling off");
@@ -799,7 +816,7 @@ public sealed class CliApplication
         try
         {
             var root = string.IsNullOrWhiteSpace(localAppDataDirectory)
-                ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+                ? Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
                 : localAppDataDirectory;
             if (string.IsNullOrWhiteSpace(root)) return null;
             var directory = Path.Combine(root, "CodexHistorySync", "logs");

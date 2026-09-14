@@ -6,6 +6,10 @@ CLI для Windows 11 x64: синхронизация истории **Codex**, 
 
 Self-hosted backend / серверное хранилище (slice 3): [setup, trust boundary, backup and restore](docs/server.md). No API token; client-side encryption remains. Existing GitHub installations are not migrated automatically.
 
+Per-command profiles / Профиль для каждой команды: `agent-sync sync --profile xeon`,
+`agent-sync --sessions --profile reader`, or `--select-profile` for an interactive choice.
+[Register connections and separate session copies / Настройка профилей](docs/profiles.md).
+
 ---
 
 ## English
