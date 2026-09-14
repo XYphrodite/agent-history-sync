@@ -1,21 +1,29 @@
-using CodexHistorySync.Cli;
+namespace CodexHistorySync.Cli;
 
-using var cancellation = new CancellationTokenSource();
-ConsoleCancelEventHandler handler = (_, eventArgs) =>
+internal static class Program
 {
-    eventArgs.Cancel = true;
-    cancellation.Cancel();
-};
-Console.CancelKeyPress += handler;
-try
-{
-    return await CliComposition.CreateDefault(args).RunAsync(args, cancellation.Token);
-}
-catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-{
-    return 0;
-}
-finally
-{
-    Console.CancelKeyPress -= handler;
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        // The desktop event loop must start on the entry thread (also on macOS).
+        // This is the process boundary; asynchronous I/O remains asynchronous inside the app.
+        return RunAsync(args).GetAwaiter().GetResult();
+    }
+
+    private static async Task<int> RunAsync(string[] args)
+    {
+        using var cancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler handler = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
+        };
+        Console.CancelKeyPress += handler;
+        try
+        {
+            return await CliComposition.CreateDefault(args).RunAsync(args, cancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return 0; }
+        finally { Console.CancelKeyPress -= handler; }
+    }
 }

@@ -117,6 +117,32 @@ public static class CliComposition
 
     private static ISessionManagerRunner CreateSessionViewerRunner()
     {
+        var codexPaths = TryResolveCodexPaths();
+        var grokPaths = GrokPaths.TryResolve();
+        var claudePaths = ClaudePaths.TryResolve();
+        var continuePaths = ContinuePaths.TryResolve();
+        IManagedSessionActiveState activeState = OperatingSystem.IsWindows()
+            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths)
+            : new ReadOnlySessionActiveState();
+        var annotations = new SessionAnnotationStore();
+        var catalog = new AnnotatedSessionCatalog(
+            new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths), annotations);
+        var conversations = new SessionContentReader();
+        var titling = SessionTitleConfiguration.Load();
+        ILocalSessionOperations? operations = OperatingSystem.IsWindows()
+            ? new LocalSessionOperations(codexPaths, grokPaths, activeState, new WindowsManagedSessionDirectoryDeleter(),
+                null, null, claudePaths, null, continuePaths, null)
+            : null;
+        return new DesktopSessionViewerRunner(new Desktop.DesktopSessionServices(catalog,
+            new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.CodexSessionFamilyReader(codexPaths),
+            conversations, annotations, operations,
+            titling.IsConfigured ? new OllamaSessionTitleSuggester(titling.Options) : null, new SessionSearchIndex(),
+            $"{CliBuildInfo.Version} · {CliBuildInfo.Commit}"));
+    }
+
+    // Retained as source for reference and existing terminal-view tests; no public command routes here.
+    private static ISessionManagerRunner CreateTerminalSessionViewerRunner()
+    {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
         var codexPaths = TryResolveCodexPaths();
         var grokPaths = GrokPaths.TryResolve();

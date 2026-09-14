@@ -764,7 +764,7 @@ public sealed class CliApplication
         console.WriteLine("doctor [--compatibility-session <jsonl> --codex-exe <path>]");
         console.WriteLine("update [--check] [--version <tag>]  install the latest published release");
         console.WriteLine("--manage    copy and delete sessions across agents");
-        console.WriteLine("--sessions  read session contents, search, export, delete");
+        console.WriteLine("--sessions  open desktop viewer: messages, subagents, tools, search, export");
         console.WriteLine("--version   print the installed version");
         return 0;
     }

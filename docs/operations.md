@@ -70,7 +70,7 @@ Before this was so, a single session from an agent the machine lacked aborted th
 
 ### Subagent threads are not synchronized
 
-A Codex session whose `session_meta` payload carries `thread_source: "subagent"` or a `source.subagent` object is a subagent thread. The session manager has always hidden these; the scanner now also keeps them out of synchronization, and reports how many were held back as `excluded=N` on the `local=` line. On a machine that runs subagents heavily they can be the large majority of both session count and disk use.
+A Codex session whose `session_meta` payload carries `thread_source: "subagent"` or a `source.subagent` object is a subagent thread. The terminal manager and portable search catalog hide these. The desktop viewer can reveal them under their parent; the sync scanner still excludes them and reports `excluded=N` on the `local=` line. On a machine that runs subagents heavily they can be the large majority of both session count and disk use.
 
 An excluded session is **not** a deleted one. It stays on disk, keeps its baseline version, and never produces a tombstone — publishing one would erase that transcript on every other device that pulls. The practical consequence is that subagent sessions already published by an earlier version stay on the remote: they are no longer refreshed, and nothing removes them. Reclaiming that space means deliberately deleting those objects, which propagates as a deletion to every device; treat it as a separate, explicit operation rather than a side effect of upgrading. A successful operation records its last successful remote revision. Conflicts are preserved as encrypted evidence and return exit code 4; they are never resolved by overwriting live history implicitly.
 
@@ -97,22 +97,27 @@ Read what is inside a session without opening its native file:
 agent-sync --sessions
 ```
 
-One list holds every session from every installed agent, newest first, with an `AGENT` column; the selected conversation is rendered beside it. This screen never opens the sync repository or writes sync state. It contacts the network in exactly one case: the `T` key below, when titling has been configured, and never otherwise. `--manage` contacts it in no case at all.
+This opens an Avalonia desktop window. Conversations from Codex, Grok, Claude and Continue appear newest first, with an agent selector and list filter. It never opens the sync repository or writes sync state. Only **Suggest title**, when a model endpoint has been configured, sends conversation text to that endpoint.
 
-| Key | Action |
+For a selected Codex conversation, **Show subagents** reveals a nested tree beneath that parent. Selecting another top-level chat resets the toggle. Explicit native parent IDs establish the tree; similarly named chats and ordinary forks are not treated as subagents. Active and archived local JSONL files are inspected. A missing transcript cannot be reconstructed from a completion notification, and children that are absent from this machine will not appear.
+
+Codex messages, tool calls, tool results and completion notifications are shown in native order. Technical entries start collapsed. Large entries are split into display pages; **Copy**, search and export use the whole available text. An incomplete JSONL record is skipped with a visible warning. **Refresh** reads a new snapshot of active conversations.
+
+| Control | Action |
 |---|---|
-| Up / Down | Move the selection, or scroll the text once it has focus |
-| Left / Right | Move focus between the list and the text |
-| PgUp / PgDn / Home / End | Scroll the text |
-| `/` | Follows the focus: with the list focused it filters sessions by title and, once the local catalog is warm, by conversation text; with the text focused it searches inside the open session; `N` steps to the next match and wraps |
-| `E` | Export the open session to `%USERPROFILE%\Documents\agent-sync\<agent>-<id>.md` |
-| `T` | Name the open session with the configured local model, when one is configured |
-| `A` | Type a title and a description for the open session |
-| `Del` | Delete the session locally, behind the same confirmation the manager uses |
-| `R` | Rescan |
-| `Q` / `Esc` | Exit |
+| Left search field | Filter chat titles/IDs; when the local index is ready, also match portable conversation text |
+| Ctrl+F / Cmd+F | Focus transcript search |
+| Enter / Find | Search messages and tool input/output; optionally include the parent and all nested subagents |
+| Result row / F3 / Shift+F3 | Navigate to a match, reveal its subagent, expand its tool entry and select the matching text |
+| Export Markdown | Choose a folder and write the selected conversation to a new Markdown file |
+| Export chat + subagents | Choose a folder and create a new family directory with individual transcripts and `index.md` |
+| Edit title / Suggest title | Edit annotations or review a model-generated draft before saving |
+| Delete… | On Windows, explicitly delete the selected top-level transcript after confirmation; keep its subagent files |
+| F5 / Refresh | Refresh local conversations |
 
-The two things `/` can do look alike and are not. Filtering narrows the list to sessions whose **title** matches, showing `matched/total` beneath the panels; searching walks the **text** of the one session already open, showing `current/total` matches. After the local catalog has indexed this machine's sessions, the list filter also includes conversations whose portable user/assistant text matches even when the title does not. The first frame of `--sessions` does not wait for that index; a search before it is warm is title-only, the same as before. The filter keeps the selected session when it survives the query, so typing and clearing lands back where you were rather than at the top of a list of forty. `Esc` clears whichever of the two is active before it offers to leave.
+Transcript search is literal and case-insensitive, including tool input/output; results are capped at 10,000 with a message to narrow the query. It does not add subagents or tool output to the shared portable FTS/MCP catalog. Exports include all available message/tool text and read warnings, use fresh destinations, and never overwrite earlier exports. A failed family export does not publish a partial directory.
+
+The TUI implementation and tests remain in source, but there is no `--sessions-tui` command. `--manage` keeps its existing terminal interface. The desktop layer targets `net10.0` without a Windows-specific UI dependency. Windows is validated locally; Linux/macOS packaging and native execution require checks on those platforms. On non-Windows systems the viewer offers reading, search, annotations and export, but no local delete; the Windows-only synchronization infrastructure is unchanged.
 
 ### Corpus search
 
@@ -124,11 +129,11 @@ The same local catalog from the command line. It scans native session homes, upd
 
 Every screen carries the same header: the name, the version, and the seven-character commit the build came from. `agent-sync --version` prints the same pair.
 
-The text is the conversation as `agent-sync` understands it for cross-agent copying: user and assistant turns only. Reasoning blocks, tool calls, and tool results are **not** shown - they are absent from the portable model, not hidden. Neither are technical wrappers such as `<system-reminder>`, for the same reason.
+The portable corpus used by CLI search, MCP and cross-agent copying contains user and assistant turns only. Reasoning, tool calls/results and technical wrappers are absent from that portable model. The desktop Codex transcript reader is separate and includes tool calls/results without exposing reasoning or system/developer instructions.
 
 A wrapper is dropped by itself, not with the turn around it. Claude Code puts editor and reminder context in its own block ahead of the text a person typed, and judging the blocks as one string used to drop the question along with the wrapper - which is how a session could read as the assistant talking to itself.
 
-Sessions marked `!` cannot be opened. That is the same readability verdict that blocks copying them, so the pane explains itself rather than showing an empty conversation.
+Unreadable sessions show an explanation in the viewer. The terminal manager continues to mark them with `!` and block copying.
 
 ### Titles of your own
 
@@ -136,7 +141,7 @@ A title of your own is shown above the conversation of the session it belongs to
 
 Sessions arrive named by the agent that wrote them, or not named at all. Codex, Grok, and Claude titles are used as they are; where an agent left nothing, the row falls back to the first user message or the bare id, and that is what a title of your own replaces. An official name is never overwritten.
 
-`T` asks a local model to name the open session; `A` opens the same two fields for typing. Both write one file per session under `%LOCALAPPDATA%\CodexHistorySync\annotations` and never into an agent home.
+**Suggest title** asks the configured model for a draft; **Edit title** opens the same fields for typing. Saving writes one file per session under `%LOCALAPPDATA%\CodexHistorySync\annotations` and never into an agent home.
 
 Titles and descriptions synchronize with everything else, so a session named on one machine arrives named on the others - read [the upgrade gate](#upgrade-every-machine-before-the-first-annotation-push) before the first push that carries one.
 
@@ -167,7 +172,7 @@ $env:AGENT_SYNC_TITLE_MODEL = "gpt-oss:20b"; agent-sync --sessions
 
 Reasoning is turned off in the request. A thinking model spends most of its wall clock and most of its token budget on it, and a budget spent thinking comes back as an empty answer - measured on one real session, 9.8 seconds against 38.5 with reasoning on, same model, and a sharper title. A model without a thinking mode ignores the flag.
 
-Naming a session takes a handful of seconds, and the screen stays usable while it does: the request is cancelled by any keystroke. An endpoint that is down costs a message and nothing else, and `agent-sync titles test` prints the reason it came back empty.
+Naming runs asynchronously while the window stays usable. Closing the window cancels the request; a draft for a conversation that is no longer selected is discarded. An unavailable endpoint produces a status message, and `agent-sync titles test` provides detailed diagnostics.
 
 Copying between agents stays in `--manage`: it needs the destination prompt that screen already has.
 

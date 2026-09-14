@@ -1,0 +1,136 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:CodexHistorySync.Desktop"
+        x:Class="CodexHistorySync.Desktop.SessionViewerWindow"
+        Title="Agent Sync — Conversations" Width="1320" Height="860" MinWidth="900" MinHeight="600"
+        Background="#17191C" FontFamily="Inter" FontSize="14" Foreground="#E8E6E0">
+  <Window.Styles>
+    <Style Selector="Button"><Setter Property="CornerRadius" Value="6" /><Setter Property="Padding" Value="12,7" /></Style>
+    <Style Selector="TextBox"><Setter Property="CornerRadius" Value="6" /></Style>
+    <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="#A5A8AF" /></Style>
+    <Style Selector="Button.accent"><Setter Property="Background" Value="#D6B979" /><Setter Property="Foreground" Value="#24221B" /></Style>
+    <Style Selector="TreeViewItem"><Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" /></Style>
+    <Style Selector="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="Padding" Value="0" /></Style>
+  </Window.Styles>
+  <Grid RowDefinitions="68,*,38">
+    <Border Grid.Row="0" Background="#1D2024" BorderBrush="#34373C" BorderThickness="0,0,0,1" Padding="24,12">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+          <Border Background="#D6B979" CornerRadius="7" Width="32" Height="32">
+            <TextBlock Text="a" FontWeight="Bold" FontSize="24" Foreground="#24221B" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Border>
+          <TextBlock Text="Agent Sync" FontSize="19" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <TextBlock Text="/  Conversations" Classes="muted" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+          <TextBlock Text="{Binding BuildLabel}" Classes="muted" FontSize="11" VerticalAlignment="Center" />
+          <TextBlock Text="LOCAL ARCHIVE" Classes="muted" FontSize="11" LetterSpacing="1.6" VerticalAlignment="Center" />
+          <Button Content="Refresh" Click="OnRefresh" ToolTip.Tip="Refresh local conversations (F5)" />
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="1" ColumnDefinitions="320,5,*">
+      <Border Background="#1D2024" Padding="12,18,10,8">
+        <Grid RowDefinitions="Auto,Auto,*">
+          <ComboBox ItemsSource="{Binding Agents}" SelectedItem="{Binding Agent, Mode=TwoWay}"
+                    HorizontalAlignment="Stretch" Margin="0,0,0,10" SelectionChanged="OnAgentChanged" />
+          <TextBox Grid.Row="1" Watermark="Find a conversation…" Text="{Binding Filter, Mode=TwoWay}"
+                   TextChanged="OnFilterChanged" Margin="0,0,0,14" />
+          <TreeView Grid.Row="2" x:Name="SessionTree" ItemsSource="{Binding Sessions}" SelectionChanged="OnSelectionChanged">
+            <TreeView.ItemTemplate>
+              <TreeDataTemplate DataType="local:SessionNode" ItemsSource="{Binding Children}">
+                <StackPanel Margin="0,8,8,8" Spacing="5">
+                  <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxLines="2" FontSize="13" />
+                  <TextBlock Text="{Binding Detail}" Classes="muted" FontSize="10" />
+                </StackPanel>
+              </TreeDataTemplate>
+            </TreeView.ItemTemplate>
+          </TreeView>
+        </Grid>
+      </Border>
+      <GridSplitter Grid.Column="1" Background="#34373C" ResizeDirection="Columns" />
+      <Grid Grid.Column="2" RowDefinitions="Auto,Auto,Auto,*" Margin="26,22,26,12">
+        <StackPanel Spacing="8" Margin="0,0,0,18">
+          <TextBlock Text="{Binding Subtitle}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="{Binding Title}" FontSize="24" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" />
+          <TextBlock Text="{Binding Description}" Classes="muted" TextWrapping="Wrap" IsVisible="{Binding HasSelection}" />
+        </StackPanel>
+        <WrapPanel Grid.Row="1" Margin="0,0,0,14">
+          <CheckBox x:Name="SubagentsToggle" Content="Show subagents" IsChecked="{Binding ShowSubagents, Mode=OneWay}"
+                    IsVisible="{Binding CanShowSubagents}" Click="OnSubagents" Margin="0,0,18,6" />
+          <Button Content="Export Markdown" Classes="accent" Click="OnExport" IsEnabled="{Binding HasTrace}" Margin="0,0,6,6" />
+          <Button Content="Export chat + subagents" Click="OnExportFamily" IsVisible="{Binding CanShowSubagents}" IsEnabled="{Binding HasTrace}" Margin="0,0,6,6" />
+          <Button Content="Edit title" Click="OnEditTitle" IsEnabled="{Binding HasSelection}" Margin="0,0,6,6" />
+          <Button Content="Suggest title" Click="OnSuggestTitle" IsVisible="{Binding CanGenerateTitle}" Margin="0,0,6,6" />
+          <Button Content="Delete…" Click="OnDelete" IsVisible="{Binding CanDelete}" Margin="0,0,0,6" />
+        </WrapPanel>
+        <StackPanel Grid.Row="2" Spacing="8" Margin="0,0,0,14">
+          <Grid ColumnDefinitions="*,Auto,Auto,Auto" IsEnabled="{Binding HasSelection}">
+            <TextBox x:Name="SearchBox" Watermark="Search messages and tool input/output… (Ctrl+F)"
+                     Text="{Binding Query, Mode=TwoWay}" KeyDown="OnSearchKey" />
+            <Button Grid.Column="1" Content="Find" Click="OnSearch" Margin="8,0,0,0" />
+            <Button Grid.Column="2" Content="↑" Click="OnPreviousMatch" Margin="5,0,0,0" ToolTip.Tip="Previous match" />
+            <Button Grid.Column="3" Content="↓" Click="OnNextMatch" Margin="5,0,0,0" ToolTip.Tip="Next match (F3)" />
+          </Grid>
+          <Grid ColumnDefinitions="*,Auto">
+            <CheckBox Content="Include this chat’s subagents" IsChecked="{Binding FamilySearch, Mode=TwoWay}"
+                      IsVisible="{Binding CanShowSubagents}" FontSize="12" />
+            <TextBlock Grid.Column="1" Text="{Binding MatchCount}" Classes="muted" VerticalAlignment="Center" IsVisible="{Binding HasMatches}" />
+          </Grid>
+          <ListBox x:Name="SearchResults" ItemsSource="{Binding Matches}" IsVisible="{Binding HasMatches}" MaxHeight="136"
+                   SelectionChanged="OnMatchSelected" Background="#22262B">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Spacing="3" Margin="10,6">
+                  <TextBlock Text="{Binding Session.Title}" Foreground="#D6B979" FontSize="11" />
+                  <TextBlock Text="{Binding Preview}" TextTrimming="CharacterEllipsis" FontSize="12" />
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsLoading}" Height="2" />
+        </StackPanel>
+        <Grid Grid.Row="3">
+          <StackPanel IsVisible="{Binding !HasSelection}" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
+            <TextBlock Text="A place for every conversation." FontSize="23" />
+            <TextBlock Text="Browse your local history, follow a subagent, or find a tool result." Classes="muted" TextWrapping="Wrap" />
+          </StackPanel>
+          <ListBox x:Name="Transcript" ItemsSource="{Binding Entries}" Background="Transparent" SelectionMode="Single"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListBox.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+            <ListBox.ItemTemplate>
+              <DataTemplate DataType="local:TraceEntryModel">
+                <Border Margin="0,0,0,14" Padding="18,14" CornerRadius="8" Background="#22262B" BorderBrush="#343A41" BorderThickness="1">
+                  <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto,Auto">
+                      <TextBlock Text="{Binding Label}" Foreground="#D6B979" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1" Text="{Binding Time}" Classes="muted" FontSize="11" VerticalAlignment="Center" Margin="12,0" />
+                      <Button Grid.Column="2" Content="Copy" Click="OnCopyEntry" FontSize="11" Padding="8,3" ToolTip.Tip="Copy this entire record" />
+                    </Grid>
+                    <SelectableTextBlock Text="{Binding Text}" IsVisible="{Binding IsMessage}" TextWrapping="Wrap"
+                                         SelectionStart="{Binding SelectionStart}" SelectionEnd="{Binding SelectionEnd}" FontSize="14" />
+                    <Expander Header="View details" IsVisible="{Binding IsTechnical}" IsExpanded="{Binding IsExpanded, Mode=TwoWay}" HorizontalAlignment="Stretch">
+                      <StackPanel Spacing="10">
+                        <TextBlock Text="{Binding CallId}" Classes="muted" FontSize="10" />
+                        <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" FontFamily="Cascadia Code,Consolas,monospace" FontSize="12"
+                                             SelectionStart="{Binding SelectionStart}" SelectionEnd="{Binding SelectionEnd}" />
+                      </StackPanel>
+                    </Expander>
+                    <StackPanel Orientation="Horizontal" Spacing="10" IsVisible="{Binding HasPages}">
+                      <Button Content="Previous part" Click="OnPreviousPage" IsEnabled="{Binding HasPrevious}" FontSize="11" />
+                      <TextBlock Text="{Binding PageLabel}" Classes="muted" VerticalAlignment="Center" />
+                      <Button Content="Next part" Click="OnNextPage" IsEnabled="{Binding HasNext}" FontSize="11" />
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Grid>
+    </Grid>
+    <Border Grid.Row="2" Background="#1D2024" BorderBrush="#34373C" BorderThickness="0,1,0,0" Padding="20,9">
+      <SelectableTextBlock Text="{Binding Status}" FontSize="11" Foreground="#A5A8AF" TextTrimming="CharacterEllipsis" />
+    </Border>
+  </Grid>
+</Window>

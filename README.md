@@ -140,7 +140,7 @@ This opens a session manager with one panel per installed agent (Codex, Grok, Cl
 agent-sync --sessions
 ```
 
-One list of every session from every installed agent, with the selected conversation beside it. `/` filters the list by title or searches inside the open session, depending on which pane has focus; once the local catalog is warm, the list filter also matches conversation text. Export to Markdown and delete are here too. Also local-only. See [operations](docs/operations.md#session-viewer).
+Opens a desktop window with local conversations on the left and the selected transcript on the right. For a Codex chat, **Show subagents** reveals its nested workers. Messages, tool calls and results are searchable; search hits navigate to the owning conversation. Export one transcript or a whole chat family as Markdown with an index. The Avalonia UI is designed for Windows, Linux and macOS; Windows is the currently validated desktop platform. The old TUI source is retained without a public launcher. See [operations](docs/operations.md#session-viewer).
 
 ```powershell
 agent-sync search xylophone handshake
@@ -289,7 +289,7 @@ agent-sync --manage
 agent-sync --sessions
 ```
 
-Один список сессий всех установленных агентов и текст выбранной рядом. `/` фильтрует список по названию или ищет внутри открытой сессии — смотря какая панель в фокусе; когда локальный каталог тёплый, фильтр списка ищет и по тексту разговора. Есть экспорт в Markdown и удаление. Тоже только локально. Подробности — в [operations](docs/operations.md#session-viewer).
+Открывает отдельное окно: слева локальные чаты, справа переписка. В выбранном чате Codex переключатель **Show subagents** раскрывает вложенный список субагентов. Поиск охватывает сообщения, вызовы инструментов и результаты; из найденного можно перейти к нужному субагенту. Экспортируется либо один чат, либо вся ветка в папку Markdown-файлов с оглавлением. Интерфейс на Avalonia рассчитан на Windows, Linux и macOS; проверенная сейчас платформа — Windows. Код TUI сохранён без отдельной команды запуска. Подробности — в [operations](docs/operations.md#session-viewer).
 
 ```powershell
 agent-sync search xylophone handshake
