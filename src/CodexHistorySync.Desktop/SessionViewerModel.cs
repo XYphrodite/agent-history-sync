@@ -367,7 +367,8 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
         foreach (var child in root.Children) foreach (var node in Nodes(child)) yield return node;
     }
     private static bool Same(ManagedSession left, ManagedSession right) => left.Agent == right.Agent && left.SessionId == right.SessionId;
-    private static bool ReadFailure(Exception exception) => exception is IOException or UnauthorizedAccessException or ArgumentException
+    // InvalidDataException derives from SystemException, not IOException.
+    private static bool ReadFailure(Exception exception) => exception is InvalidDataException or IOException or UnauthorizedAccessException or ArgumentException
         or InvalidOperationException or System.Text.DecoderFallbackException or System.Text.Json.JsonException or Microsoft.Data.Sqlite.SqliteException;
     public void Dispose()
     {

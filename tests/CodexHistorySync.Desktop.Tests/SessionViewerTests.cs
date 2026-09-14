@@ -5,6 +5,7 @@ using Avalonia.Headless.XUnit;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using CodexHistorySync.Core.Annotations;
+using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Viewing;
 using CodexHistorySync.Desktop;
@@ -21,6 +22,143 @@ public static class TestAppBuilder
 
 public sealed class SessionViewerTests
 {
+    [AvaloniaFact]
+    public async Task UnreadableFirstSessionShowsErrorAndAnotherConversationCanBeOpened()
+    {
+        using var model = CreateModel(catalog: new FakeCatalog(unreadableParent: true));
+
+        await model.RefreshAsync();
+
+        Assert.Equal("parent", model.Selected!.Session.SessionId);
+        Assert.False(model.Selected.Session.CanRead);
+        Assert.False(model.IsLoading);
+        Assert.False(model.IsRefreshing);
+        Assert.False(model.HasTrace);
+        Assert.Empty(model.Entries);
+        Assert.Equal("Cannot read this session: The session is not readable.", model.Status);
+
+        await model.SelectAsync(model.Sessions[1]);
+
+        Assert.Equal("second", model.Selected!.Session.SessionId);
+        Assert.True(model.HasTrace);
+        Assert.Single(model.Entries);
+    }
+
+    [AvaloniaFact]
+    public async Task InvalidDataAfterSelectionClearsOldTranscriptAndReportsTheError()
+    {
+        using var model = CreateModel(new FakeTraces { InvalidSessionId = "second" });
+        await model.RefreshAsync();
+        Assert.True(model.HasTrace);
+
+        await model.SelectAsync(model.Sessions[1]);
+
+        Assert.False(model.HasTrace);
+        Assert.Empty(model.Entries);
+        Assert.False(model.IsLoading);
+        Assert.Contains("Cannot read this session: Invalid synthetic session.", model.Status);
+
+        await model.SelectAsync(model.Sessions[0]);
+        Assert.True(model.HasTrace);
+    }
+
+    [AvaloniaFact]
+    public async Task FamilySearchSkipsInvalidSubagentAndKeepsResultsFromReadableParent()
+    {
+        using var model = CreateModel(new FakeTraces { InvalidSessionId = "reviewer" });
+        await model.RefreshAsync();
+        model.Query = "current task";
+
+        await model.SearchAsync();
+
+        Assert.Equal("parent", Assert.Single(model.Matches).Session.SessionId);
+        Assert.Contains("1 could not be read", model.Status);
+        Assert.True(model.HasTrace);
+    }
+
+    [AvaloniaFact]
+    public async Task FamilyExportReportsInvalidSubagentWithoutPublishingPartialFiles()
+    {
+        using var model = CreateModel(new FakeTraces { InvalidSessionId = "reviewer" });
+        await model.RefreshAsync();
+        var directory = Path.Combine(Path.GetTempPath(), "agent-sync-viewer-export-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            await model.ExportAsync(directory, includeFamily: true);
+
+            Assert.Equal("Export failed: Invalid synthetic session.", model.Status);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(directory));
+            Assert.True(model.HasTrace);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [AvaloniaFact]
+    public async Task WindowStaysOpenWithUnreadableFirstSessionAndCanSelectHealthyConversation()
+    {
+        using var model = CreateModel(catalog: new FakeCatalog(unreadableParent: true));
+        var window = new SessionViewerWindow(model);
+        window.Show();
+        try
+        {
+            await UntilAsync(() => !model.IsRefreshing && model.Selected is not null);
+            Assert.True(window.IsVisible);
+            Assert.False(model.HasTrace);
+            Assert.Contains("Cannot read this session", model.Status);
+
+            window.FindControl<TreeView>("SessionTree")!.SelectedItem = model.Sessions[1];
+            await UntilAsync(() => model.Selected?.Session.SessionId == "second" && model.HasTrace);
+
+            Assert.True(window.IsVisible);
+            Assert.Single(model.Entries);
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public async Task WindowSurvivesUnreadableDuplicatesDiscoveredByTheRealCatalog()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "agent-sync-viewer-catalog-" + Guid.NewGuid().ToString("N"));
+        var sessions = Path.Combine(directory, "sessions");
+        Directory.CreateDirectory(sessions);
+        try
+        {
+            const string duplicate = """
+                {"type":"session_meta","payload":{"id":"duplicate","title":"Duplicate session","timestamp":"2026-09-14T19:00:00Z"}}
+                """;
+            const string healthy = """
+                {"type":"session_meta","payload":{"id":"healthy","title":"Healthy session","timestamp":"2026-09-14T18:00:00Z"}}
+                {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Readable synthetic message."}]}}
+                """;
+            await File.WriteAllTextAsync(Path.Combine(sessions, "duplicate-one.jsonl"), duplicate);
+            await File.WriteAllTextAsync(Path.Combine(sessions, "duplicate-two.jsonl"), duplicate);
+            await File.WriteAllTextAsync(Path.Combine(sessions, "healthy.jsonl"), healthy);
+            var catalog = new LocalSessionCatalog(CodexPaths.Resolve(directory), null, new NoActiveSessions());
+            using var model = new SessionViewerModel(new DesktopSessionServices(catalog, new SessionTraceReader(),
+                new FakeFamilies(), new SessionContentReader(), new FakeAnnotations()));
+            var window = new SessionViewerWindow(model);
+            window.Show();
+            try
+            {
+                await UntilAsync(() => !model.IsRefreshing && model.Selected is not null);
+                Assert.Equal(3, model.Sessions.Count);
+                Assert.Equal("duplicate", model.Selected!.Session.SessionId);
+                Assert.False(model.Selected.Session.CanRead);
+                Assert.Contains("Cannot read this session", model.Status);
+                Assert.True(window.IsVisible);
+
+                window.FindControl<TreeView>("SessionTree")!.SelectedItem = model.Sessions.Single(node => node.Session.CanRead);
+                await UntilAsync(() => model.HasTrace);
+
+                Assert.Equal("Readable synthetic message.", Assert.Single(model.Entries).Text);
+                Assert.True(window.IsVisible);
+            }
+            finally { window.Close(); }
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [AvaloniaFact]
     public async Task SubagentsAreOptInAndResetWhenAnotherParentIsSelected()
     {
@@ -143,19 +281,20 @@ public sealed class SessionViewerTests
         Assert.True(predicate(), "The window did not reach the expected state.");
     }
 
-    private static SessionViewerModel CreateModel(FakeTraces? traces = null)
+    private static SessionViewerModel CreateModel(FakeTraces? traces = null, ILocalSessionCatalog? catalog = null)
     {
-        return new SessionViewerModel(new DesktopSessionServices(new FakeCatalog(), traces ?? new FakeTraces(),
+        return new SessionViewerModel(new DesktopSessionServices(catalog ?? new FakeCatalog(), traces ?? new FakeTraces(),
             new FakeFamilies(), new SessionContentReader(), new FakeAnnotations()));
     }
 
     private static ManagedSession Session(string id, string title) => new(ManagedAgent.Codex, id, id + ".jsonl", title,
         new DateTimeOffset(2026, 9, 14, id == "parent" ? 18 : 17, 0, 0, TimeSpan.Zero), false, true);
 
-    private sealed class FakeCatalog : ILocalSessionCatalog
+    private sealed class FakeCatalog(bool unreadableParent = false) : ILocalSessionCatalog
     {
         public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken) => Task.FromResult(
-            new SessionCatalogSnapshot([Session("parent", "Find the project’s current task"), Session("second", "Review release notes")], []));
+            new SessionCatalogSnapshot([Session("parent", "Find the project’s current task") with { CanRead = !unreadableParent },
+                Session("second", "Review release notes")], []));
     }
     private sealed class FakeFamilies : ISessionFamilyReader
     {
@@ -165,10 +304,13 @@ public sealed class SessionViewerTests
     private sealed class FakeTraces : ISessionTraceReader
     {
         public bool Block { get; set; }
+        public string? InvalidSessionId { get; init; }
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<SessionTrace> ReadAsync(ManagedSession session, CancellationToken cancellationToken)
         {
+            if (!session.CanRead) return await new SessionTraceReader().ReadAsync(session, cancellationToken);
+            if (session.SessionId == InvalidSessionId) throw new InvalidDataException("Invalid synthetic session.");
             if (Block && session.SessionId == "second") { Entered.SetResult(); await Release.Task; }
             return session.SessionId == "reviewer"
                 ? new SessionTrace(session, [new TraceEntry(0, TraceEntryKind.ToolCall, "exec_command",
@@ -184,5 +326,13 @@ public sealed class SessionViewerTests
             Task.FromResult<IReadOnlyDictionary<SessionAnnotationKey, SessionAnnotation>>(new Dictionary<SessionAnnotationKey, SessionAnnotation>());
         public Task SaveAsync(SessionAnnotationKey key, SessionAnnotation annotation, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task DeleteAsync(SessionAnnotationKey key, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class NoActiveSessions : IManagedSessionActiveState
+    {
+        public Task<IReadOnlySet<string>> GetActiveSessionIdsAsync(ManagedAgent agent, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlySet<string>>(new HashSet<string>());
+        public Task<bool> IsActiveAsync(ManagedAgent agent, string sessionId, string nativePath, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
     }
 }
