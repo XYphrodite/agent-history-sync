@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Agent History Sync runs on Windows. Install `git`, GitHub CLI (`gh`), and the agents you sync (Codex and/or Grok CLI), then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The **data** repository must already exist, be private, and be empty for `init` (recommended name: `agent-history-sync-data`).
+Agent History Sync runs on Windows. Install `git`, GitHub CLI (`gh`), and the agents you sync (Codex, Grok CLI, Claude Code, Continue, and/or Kimi Code CLI), then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The **data** repository must already exist, be private, and be empty for `init` (recommended name: `agent-history-sync-data`).
 
 The public command is `agent-sync`. For compatibility with existing installations, the installer deliberately keeps `agent-sync.exe` under `%LOCALAPPDATA%\Programs\CodexHistorySync`, while application state remains under `%LOCALAPPDATA%\CodexHistorySync`. These are separate directories; upgrading does not migrate or rename either one.
 
@@ -320,6 +320,24 @@ A Continue session is therefore deferred on write recency alone: written within 
 
 Continue's two roles are shaped differently in its own files — a user message holds an array of content parts, an assistant message a plain string — and a copy into Continue writes each the way the extension expects. `thinking` entries, empty assistant placeholders, `contextItems`, `editorState`, and `promptLogs` are dropped: the portable model is text turns only.
 
+## Kimi Code CLI sessions
+
+When `%USERPROFILE%\.kimi-code\sessions` exists, `agent-sync` also inventories Kimi Code CLI sessions. Set `KIMI_CODE_HOME` to point at a different Kimi home, the same way `CONTINUE_GLOBAL_DIR`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, and `CODEX_HOME` work.
+
+One session lives in `sessions\<workDirKey>\session_<uuid>\` and is synchronized as one encrypted package under logical id `ki-<uuid>` containing `state.json`, every `agents\<id>\wire.jsonl`, and the agent's plan files, together with the session's line in the shared `session_index.jsonl` at the Kimi home root. The index line is merged like Continue's: only the imported session's entry is replaced, every other line is preserved, and an index that does not parse stops the import instead of being replaced.
+
+`state.json` is normalized before packaging: the absolute `agents.*.homedir` paths are replaced with a placeholder and substituted back with this machine's session directory at import. Without that, the same session would hash differently on every machine and republish forever. Nothing outside the session package is read or synchronized — not `logs/`, `notify/`, `tasks/`, `cron/`, `upcoming-goals.json`, or `credentials/`.
+
+Kimi publishes no active-session file. Like Claude, a session is treated as live — and deferred to a later run — when a `kimi`/`kimi-code` process is running **and** its `wire.jsonl` or `state.json` was written within the last 30 seconds.
+
+### Upgrade every machine before the first Kimi push
+
+`ObjectKind.KimiSession` is a new integer in the encrypted index, and the rule from [the Claude gate](#upgrade-every-machine-before-the-first-claude-push) applies unchanged: a build that does not know the value rejects the **whole** index and its `pull` stops working for every agent, not just Kimi. Upgrade every machine sharing the repository before the first push that carries a Kimi session. `agent-sync status` prints `kimi-sessions=` on a build that knows the kind and does not on an older one.
+
+### Cross-agent copy
+
+Copying out of Kimi takes user/assistant text from the `agent.message.appended` events of each agent wire; thinking blocks and tool calls stay behind, the same rule other agents follow. Copying into Kimi synthesizes a new session: a fresh UUID, a `state.json`, a minimal `wire.jsonl`, and a merged index line. The synthesized session is written to look like a native one, but **resuming it inside Kimi Code CLI is not verified** — treat copies into Kimi as archived transcripts rather than continuable conversations.
+
 ## Status and diagnostics
 
 ```powershell
@@ -328,7 +346,7 @@ agent-sync doctor
 agent-sync doctor --compatibility-session <inactive archived JSONL> --codex-exe <codex executable>
 ```
 
-`status` also prints a second line for Claude: the resolved projects root (or `none`), how many Claude sessions the scan saw, and whether that count is uncertain because something could not be read. `doctor` reports `claude-paths`, which fails only when no Claude home was found — that is the first thing to check when the manager shows no Claude panel.
+`status` also prints a second line for Claude: the resolved projects root (or `none`), how many Claude sessions the scan saw, and whether that count is uncertain because something could not be read. A third line reports the same for Continue, and a fourth for Kimi (`kimi-home=`, `kimi-sessions=`, `kimi-uncertain=`). `doctor` reports `claude-paths`, `continue-paths`, and `kimi-paths`, each of which fails only when no home of that agent was found — that is the first thing to check when the manager shows no panel for that agent.
 
 `status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus both the current authenticated remote revision and the last successfully synchronized revision. Its conflict count is the exact identity-deduplicated union of persisted evidence and conflicts in the current plan; an unreadable evidence store makes status fail closed. Equal counts do not hide divergent objects.
 

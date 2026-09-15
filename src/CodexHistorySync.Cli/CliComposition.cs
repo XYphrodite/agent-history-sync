@@ -15,6 +15,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Search;
 using CodexHistorySync.Core.Model;
@@ -122,17 +123,18 @@ public static class CliComposition
         var grokPaths = GrokPaths.TryResolve();
         var claudePaths = ClaudePaths.TryResolve();
         var continuePaths = ContinuePaths.TryResolve();
+        var kimiPaths = KimiPaths.TryResolve();
         IManagedSessionActiveState activeState = OperatingSystem.IsWindows()
-            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths)
+            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths)
             : new ReadOnlySessionActiveState();
         var annotations = new SessionAnnotationStore();
         var catalog = new AnnotatedSessionCatalog(
-            new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths), annotations);
+            new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths), annotations);
         var conversations = new SessionContentReader();
         var titling = SessionTitleConfiguration.Load(Environment.GetEnvironmentVariable("LOCALAPPDATA"));
         ILocalSessionOperations? operations = OperatingSystem.IsWindows()
             ? new LocalSessionOperations(codexPaths, grokPaths, activeState, new WindowsManagedSessionDirectoryDeleter(),
-                null, null, claudePaths, null, continuePaths, null)
+                null, null, claudePaths, null, continuePaths, null, kimiPaths, null)
             : null;
         return new DesktopSessionViewerRunner(new Desktop.DesktopSessionServices(catalog,
             new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.CodexSessionFamilyReader(codexPaths),
@@ -149,8 +151,9 @@ public static class CliComposition
         var grokPaths = GrokPaths.TryResolve();
         var claudePaths = ClaudePaths.TryResolve();
         var continuePaths = ContinuePaths.TryResolve();
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
+        var kimiPaths = KimiPaths.TryResolve();
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths);
         // Only the viewer wears this machine's own titles; --manage stays exactly as it was.
         var annotationStore = new SessionAnnotationStore();
         var annotated = new AnnotatedSessionCatalog(catalog, annotationStore);
@@ -168,6 +171,8 @@ public static class CliComposition
             claudePaths,
             null,
             continuePaths,
+            null,
+            kimiPaths,
             null);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionViewerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
@@ -188,8 +193,9 @@ public static class CliComposition
         var grokPaths = GrokPaths.TryResolve();
         var claudePaths = ClaudePaths.TryResolve();
         var continuePaths = ContinuePaths.TryResolve();
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
+        var kimiPaths = KimiPaths.TryResolve();
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths);
         var annotationStore = new SessionAnnotationStore();
         return new AnnotatedSessionCatalog(catalog, annotationStore);
     }
@@ -201,16 +207,18 @@ public static class CliComposition
         var grokPaths = GrokPaths.TryResolve();
         var claudePaths = ClaudePaths.TryResolve();
         var continuePaths = ContinuePaths.TryResolve();
+        var kimiPaths = KimiPaths.TryResolve();
         var resolution = new CodexExecutableLocator().ResolveWithSource();
         var executable = ToCodexExecutableOption(resolution);
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths);
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths);
         var codexWriter = codexPaths is null
             ? null
             : new CodexConversationWriter(codexPaths, executable, new CodexCompatibilityProbe());
         var grokWriter = grokPaths is null ? null : new GrokConversationWriter(grokPaths);
         var claudeWriter = claudePaths is null ? null : new ClaudeConversationWriter(claudePaths);
         var continueWriter = continuePaths is null ? null : new ContinueConversationWriter(continuePaths);
+        var kimiWriter = kimiPaths is null ? null : new KimiConversationWriter(kimiPaths);
         var operations = new LocalSessionOperations(
             codexPaths,
             grokPaths,
@@ -221,7 +229,9 @@ public static class CliComposition
             claudePaths,
             claudeWriter,
             continuePaths,
-            continueWriter);
+            continueWriter,
+            kimiPaths,
+            kimiWriter);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionManagerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
         return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog, operations, view));

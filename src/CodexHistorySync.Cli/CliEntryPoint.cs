@@ -78,7 +78,7 @@ internal static class CliEntryPoint
     {
         if (profile.SessionsDirectory is not { } root || command[0] is not ("init" or "join" or "pull" or "push" or "sync")) return;
         foreach (var (agent, directory) in new[] { ("codex", "sessions"), ("codex", "archived_sessions"),
-            ("grok", "sessions"), ("claude", "projects"), ("continue", "sessions") })
+            ("grok", "sessions"), ("claude", "projects"), ("continue", "sessions"), ("kimi", "sessions") })
             Directory.CreateDirectory(Path.Combine(root, agent, directory));
     }
 

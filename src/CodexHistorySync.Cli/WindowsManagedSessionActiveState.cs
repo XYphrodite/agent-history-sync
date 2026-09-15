@@ -15,6 +15,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Search;
 using CodexHistorySync.Core.Model;
@@ -31,11 +32,13 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
 {
     private const string GrokProcessName = "grok";
     private const string ClaudeProcessName = "claude";
+    private const string KimiProcessName = "kimi";
     private static readonly IReadOnlySet<string> EmptyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     private readonly CodexPaths? codexPaths;
     private readonly GrokPaths? grokPaths;
     private readonly ClaudePaths? claudePaths;
+    private readonly KimiPaths? kimiPaths;
     private readonly Func<int, string, bool> isNamedProcessRunning;
     private readonly Func<string, bool> isExclusiveLockHeld;
     private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
@@ -44,7 +47,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     private readonly Func<string, DateTime?> lastWriteTimeUtc;
     private readonly Func<DateTime> utcNow;
 
-    public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths, ClaudePaths? claudePaths = null)
+    public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths, ClaudePaths? claudePaths = null,
+        KimiPaths? kimiPaths = null)
         : this(
             codexPaths,
             grokPaths,
@@ -55,7 +59,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
             claudePaths,
             IsAnyNamedProcessRunning,
             path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null,
-            () => DateTime.UtcNow)
+            () => DateTime.UtcNow,
+            kimiPaths)
     {
     }
 
@@ -69,11 +74,13 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ClaudePaths? claudePaths = null,
         Func<string, bool>? isAnyNamedProcessRunning = null,
         Func<string, DateTime?>? lastWriteTimeUtc = null,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        KimiPaths? kimiPaths = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
         this.claudePaths = claudePaths;
+        this.kimiPaths = kimiPaths;
         this.isAnyNamedProcessRunning = isAnyNamedProcessRunning ?? IsAnyNamedProcessRunning;
         this.lastWriteTimeUtc = lastWriteTimeUtc ?? (path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null);
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -109,8 +116,35 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ManagedAgent.Codex => ReadCodexActiveIds(),
         ManagedAgent.Grok => ReadGrokActiveIds(),
         ManagedAgent.Claude => ReadClaudeActiveIds(),
+        ManagedAgent.Kimi => ReadKimiActiveIds(),
         _ => EmptyIds
     };
+
+    /// <summary>
+    /// Kimi Code publishes no active-session file, so liveness is a running kimi process plus a
+    /// recent write to the session's state or wire, mirroring the scanner's rule (design D3).
+    /// </summary>
+    private IReadOnlySet<string> ReadKimiActiveIds()
+    {
+        if (kimiPaths is null || !isAnyNamedProcessRunning(KimiProcessName)) return EmptyIds;
+
+        var activeSince = utcNow() - KimiSessionScanner.DefaultActivityWindow;
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var bucket in EnumerateDirectories(kimiPaths.Sessions))
+            foreach (var sessionDirectory in EnumerateDirectories(bucket))
+            {
+                var sessionName = Path.GetFileName(Path.TrimEndingDirectorySeparator(sessionDirectory));
+                if (!sessionName.StartsWith(KimiPaths.SessionIdPrefix, StringComparison.Ordinal)) continue;
+                var stateWrite = lastWriteTimeUtc(Path.Combine(sessionDirectory, KimiSessionPackage.StateFileName));
+                var wireWrite = lastWriteTimeUtc(
+                    Path.Combine(sessionDirectory, "agents", "main", KimiSessionPackage.WireFileName));
+                if ((stateWrite is { } state && state >= activeSince) ||
+                    (wireWrite is { } wire && wire >= activeSince))
+                    ids.Add(sessionName[KimiPaths.SessionIdPrefix.Length..]);
+            }
+
+        return ids;
+    }
 
     /// <summary>
     /// Claude publishes no active-session file, so liveness is a running claude process plus a

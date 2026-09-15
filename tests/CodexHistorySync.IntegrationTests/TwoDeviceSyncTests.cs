@@ -6,6 +6,7 @@ using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.State;
@@ -328,12 +329,106 @@ public sealed class TwoDeviceSyncTests : IDisposable
             "a machine that lost its Claude home published a tombstone and erased the memory everywhere");
     }
 
+    [Fact]
+    public async Task KimiSessionsConvergeAcrossTwoDevicesAndStayOutOfTheRemotePlaintext()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string sessionId = "80000000-0000-0000-0000-000000000008";
+        const string marker = "kimi turn never stored remotely";
+        var source = await WriteKimiSessionAsync(first.KimiPaths, sessionId, marker);
+
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        var result = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, result.Downloaded);
+        var workDirKey = KimiPaths.ComputeWorkDirKey(KimiWorkDir(first.KimiPaths));
+        var destination = second.KimiPaths.SessionDirectory(workDirKey, KimiPaths.SessionIdPrefix + sessionId);
+        Assert.True(File.Exists(Path.Combine(destination, KimiSessionPackage.StateFileName)),
+            "the Kimi session was not materialized on the second device");
+        // The hash has to reproduce on the other machine or the next run republishes forever.
+        var firstHash = KimiSessionPackage.HashPackage(
+            KimiSessionPackage.BuildFromDirectory(Path.GetDirectoryName(source)!, workDirKey));
+        var secondHash = KimiSessionPackage.HashPackage(
+            KimiSessionPackage.BuildFromDirectory(destination, workDirKey));
+        Assert.Equal(firstHash, secondHash);
+        // The shared index on the second machine points at its own copy and carries the workDir.
+        var entry = Assert.Single(KimiSessionIndex.Parse(File.ReadAllText(second.KimiPaths.IndexFilePath)));
+        Assert.Equal(KimiPaths.SessionIdPrefix + sessionId, KimiSessionIndex.SessionIdOf(entry));
+        Assert.Equal(destination.Replace('\\', '/'), entry["sessionDir"]!.GetValue<string>());
+        Assert.DoesNotContain(marker, ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AKimiSessionWhoseHomeIsMissingIsDeferredWhileTheRestOfTheRepositoryArrives()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key, withKimiHome: false);
+
+        await WriteSessionAsync(first.Paths.Sessions, "session-a", "codex text");
+        await WriteKimiSessionAsync(first.KimiPaths, "81000000-0000-0000-0000-000000000008", "kimi text");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        var result = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.Equal(1, result.SkippedNoAgentHome);
+        Assert.Equal(1, result.Downloaded);
+        Assert.True(File.Exists(Path.Combine(second.Paths.Sessions, "session-a.jsonl")),
+            "a Kimi session this machine cannot place withheld the Codex session as well");
+        Assert.False(Directory.Exists(second.KimiPaths.Sessions),
+            "a Kimi home was invented on a machine that has none");
+    }
+
+    [Fact]
+    public async Task AKimiTombstoneRemovesTheSessionAndItsIndexLineFromTheOtherDevice()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key);
+        var second = CreateDevice("second", remote, key);
+        const string sessionId = "82000000-0000-0000-0000-000000000008";
+        const string localId = "83000000-0000-0000-0000-000000000008";
+
+        await WriteKimiSessionAsync(first.KimiPaths, sessionId, "gone");
+        await WriteKimiSessionAsync(first.KimiPaths, localId, "stays");
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        var workDirKey = KimiPaths.ComputeWorkDirKey(KimiWorkDir(first.KimiPaths));
+        var removed = second.KimiPaths.SessionDirectory(workDirKey, KimiPaths.SessionIdPrefix + sessionId);
+        Assert.True(Directory.Exists(removed), "the session never reached the second device, so the test proves nothing");
+
+        Directory.Delete(Path.Combine(first.KimiPaths.Sessions, workDirKey,
+            KimiPaths.SessionIdPrefix + sessionId), recursive: true);
+        await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+
+        Assert.False(Directory.Exists(removed), "the tombstone did not remove the session directory");
+        var remaining = KimiSessionIndex.Parse(File.ReadAllText(second.KimiPaths.IndexFilePath));
+        Assert.DoesNotContain(remaining, entry =>
+            string.Equals(KimiSessionIndex.SessionIdOf(entry), KimiPaths.SessionIdPrefix + sessionId,
+                StringComparison.Ordinal));
+        Assert.Contains(remaining, entry =>
+            string.Equals(KimiSessionIndex.SessionIdOf(entry), KimiPaths.SessionIdPrefix + localId,
+                StringComparison.Ordinal));
+    }
+
     /// <param name="withClaudeHome">
     /// False models a machine where Claude Code was never installed: the resolver finds no
     /// <c>projects</c> directory, so the engine is handed no Claude paths at all. The device
     /// still carries the paths it would have had, so a test can assert nothing was written there.
     /// </param>
-    private Device CreateDevice(string name, string remote, byte[] key, bool withClaudeHome = true)
+    private Device CreateDevice(string name, string remote, byte[] key, bool withClaudeHome = true,
+        bool withKimiHome = true)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -345,15 +440,19 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var claudePaths = new ClaudePaths(claudeHome, Path.Combine(claudeHome, "projects"));
         var configuredClaudePaths = withClaudeHome ? claudePaths : null;
         if (withClaudeHome) Directory.CreateDirectory(claudePaths.Projects);
+        var kimiHome = Path.Combine(_root, name, "kimi");
+        var kimiPaths = new KimiPaths(kimiHome, Path.Combine(kimiHome, "sessions"));
+        var configuredKimiPaths = withKimiHome ? kimiPaths : null;
+        if (withKimiHome) Directory.CreateDirectory(kimiPaths.Sessions);
         var annotations = new SessionAnnotationStore(local);
         var conflicts = new ConflictStore("repository", local, paths);
         var backups = new BackupStore("repository", local, paths, claudePaths: configuredClaudePaths,
-            annotationsDirectory: annotations.Directory);
+            annotationsDirectory: annotations.Directory, kimiPaths: configuredKimiPaths);
         var engine = new SyncEngine(
             "repository", name, paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
             new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: configuredClaudePaths,
-                annotationsDirectory: annotations.Directory),
+                annotationsDirectory: annotations.Directory, kimiPaths: configuredKimiPaths),
             conflicts,
             new GitStorageProvider("repository", remote, GitRemoteKind.Local, providerRoot),
             Path.Combine(local, "staging"),
@@ -362,8 +461,12 @@ public sealed class TwoDeviceSyncTests : IDisposable
             claudeScanner: withClaudeHome
                 ? new ClaudeSessionScanner(_ => Task.CompletedTask, isClaudeRunning: () => false)
                 : null,
-            annotationsDirectory: annotations.Directory);
-        return new Device(paths, claudePaths, providerRoot, engine, annotations, conflicts);
+            annotationsDirectory: annotations.Directory,
+            kimiPaths: configuredKimiPaths,
+            kimiScanner: withKimiHome
+                ? new KimiSessionScanner(_ => Task.CompletedTask, isKimiRunning: () => false)
+                : null);
+        return new Device(paths, claudePaths, kimiPaths, providerRoot, engine, annotations, conflicts);
     }
 
     private static async Task WriteSessionAsync(string directory, string id, string text)
@@ -401,6 +504,25 @@ public sealed class TwoDeviceSyncTests : IDisposable
         return transcript;
     }
 
+    private static string KimiWorkDir(KimiPaths paths) => "C:/Repos/Demo";
+
+    private static async Task<string> WriteKimiSessionAsync(KimiPaths paths, string sessionId, string text)
+    {
+        var workDirKey = KimiPaths.ComputeWorkDirKey(KimiWorkDir(paths));
+        var directory = paths.SessionDirectory(workDirKey, KimiPaths.SessionIdPrefix + sessionId);
+        Directory.CreateDirectory(Path.Combine(directory, "agents", "main"));
+        var state = $"{{\"id\":\"{KimiPaths.SessionIdPrefix}{sessionId}\",\"version\":2,\"cwd\":\"{KimiWorkDir(paths)}\"," +
+            $"\"createdAt\":1789426633555,\"updatedAt\":1789426974020,\"archived\":false," +
+            $"\"agents\":{{\"main\":{{\"homedir\":\"{(directory + "/agents/main").Replace('\\', '/')}\",\"type\":\"main\"}}}}," +
+            $"\"custom\":{{}},\"lastPrompt\":\"{text}\",\"title\":\"synthetic\",\"titleKind\":\"replaceable\",\"isCustomTitle\":false}}\n";
+        await File.WriteAllTextAsync(Path.Combine(directory, KimiSessionPackage.StateFileName), state, new UTF8Encoding(false));
+        var wire = "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1789426633663}\n" +
+            $"{{\"type\":\"agent.message.appended\",\"message\":{{\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}},\"time\":1789426633780}}\n";
+        await File.WriteAllTextAsync(Path.Combine(directory, "agents", "main", KimiSessionPackage.WireFileName),
+            wire, new UTF8Encoding(false));
+        return Path.Combine(directory, KimiSessionPackage.StateFileName);
+    }
+
     private static string ReadAllRemoteBytesAsText(string remote) =>
         Encoding.UTF8.GetString(Directory.EnumerateFiles(remote, "*", SearchOption.AllDirectories).SelectMany(File.ReadAllBytes).ToArray());
 
@@ -425,6 +547,7 @@ public sealed class TwoDeviceSyncTests : IDisposable
     private sealed record Device(
         CodexPaths Paths,
         ClaudePaths ClaudePaths,
+        KimiPaths KimiPaths,
         string ProviderRoot,
         SyncEngine Engine,
         SessionAnnotationStore Annotations,

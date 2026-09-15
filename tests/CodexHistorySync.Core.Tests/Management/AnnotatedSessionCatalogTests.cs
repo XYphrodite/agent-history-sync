@@ -65,6 +65,33 @@ public sealed class AnnotatedSessionCatalogTests
     }
 
     [Fact]
+    public async Task ScanAsync_KeepsKimiSessionsWhenAnnotationsExist()
+    {
+        // The overlay rebuilds the snapshot; it must carry every agent list, not just the
+        // four that predated Kimi, or annotated machines lose their Kimi panel and search hits.
+        var catalog = new AnnotatedSessionCatalog(
+            new StubCatalog(new SessionCatalogSnapshot(
+                [],
+                [],
+                [],
+                [],
+                [Session("kimi-one", "kimi-one", ManagedTitleSource.SessionId, ManagedAgent.Kimi)])
+            {
+                ConfiguredAgents = [ManagedAgent.Kimi]
+            }),
+            new StubStore(new Dictionary<SessionAnnotationKey, SessionAnnotation>
+            {
+                [new SessionAnnotationKey(ManagedAgent.Kimi, "kimi-one")] = Annotation("Our name for it")
+            }));
+
+        var snapshot = await catalog.ScanAsync(CancellationToken.None);
+
+        var session = Assert.Single(snapshot.Kimi);
+        Assert.Equal("Our name for it", session.Title);
+        Assert.Single(snapshot.ConfiguredAgents);
+    }
+
+    [Fact]
     public async Task ScanAsync_IgnoresAnAnnotationWhoseSessionIsGone()
     {
         var snapshot = await Catalog(

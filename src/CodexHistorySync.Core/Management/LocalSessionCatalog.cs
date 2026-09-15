@@ -2,6 +2,7 @@ using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Kimi;
 
 namespace CodexHistorySync.Core.Management;
 
@@ -13,6 +14,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
     private readonly ILocalSessionCatalogSource? grokSource;
     private readonly ILocalSessionCatalogSource? claudeSource;
     private readonly ILocalSessionCatalogSource? continueSource;
+    private readonly ILocalSessionCatalogSource? kimiSource;
     private readonly IManagedSessionActiveState activeState;
 
     public LocalSessionCatalog(
@@ -20,7 +22,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         GrokPaths? grokPaths,
         IManagedSessionActiveState activeState,
         ClaudePaths? claudePaths = null,
-        ContinuePaths? continuePaths = null)
+        ContinuePaths? continuePaths = null,
+        KimiPaths? kimiPaths = null)
         : this(
             codexPaths is null
                 ? null
@@ -34,7 +37,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 : new ClaudeSessionCatalogSource(claudePaths, new SystemSessionCatalogIo()),
             continuePaths is null
                 ? null
-                : new ContinueSessionCatalogSource(continuePaths, new SystemSessionCatalogIo()))
+                : new ContinueSessionCatalogSource(continuePaths, new SystemSessionCatalogIo()),
+            kimiPaths is null
+                ? null
+                : new KimiSessionCatalogSource(kimiPaths, new SystemSessionCatalogIo()))
     {
     }
 
@@ -43,12 +49,14 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ILocalSessionCatalogSource? grokSource,
         IManagedSessionActiveState activeState,
         ILocalSessionCatalogSource? claudeSource = null,
-        ILocalSessionCatalogSource? continueSource = null)
+        ILocalSessionCatalogSource? continueSource = null,
+        ILocalSessionCatalogSource? kimiSource = null)
     {
         this.codexSource = codexSource;
         this.grokSource = grokSource;
         this.claudeSource = claudeSource;
         this.continueSource = continueSource;
+        this.kimiSource = kimiSource;
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
     }
 
@@ -63,13 +71,16 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             claudeSource, ManagedAgent.Claude, limiter, cancellationToken);
         var continueTask = ScanAgentAsync(
             continueSource, ManagedAgent.Continue, limiter, cancellationToken);
+        var kimiTask = ScanAgentAsync(
+            kimiSource, ManagedAgent.Kimi, limiter, cancellationToken);
 
-        await Task.WhenAll(codexTask, grokTask, claudeTask, continueTask).ConfigureAwait(false);
+        await Task.WhenAll(codexTask, grokTask, claudeTask, continueTask, kimiTask).ConfigureAwait(false);
         return new SessionCatalogSnapshot(
             Order(codexTask.Result),
             Order(grokTask.Result),
             Order(claudeTask.Result),
-            Order(continueTask.Result))
+            Order(continueTask.Result),
+            Order(kimiTask.Result))
         {
             ConfiguredAgents = ManagedAgents.All.Where(IsConfigured).ToArray()
         };
@@ -83,6 +94,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ManagedAgent.Grok => grokSource,
         ManagedAgent.Claude => claudeSource,
         ManagedAgent.Continue => continueSource,
+        ManagedAgent.Kimi => kimiSource,
         _ => null
     };
 

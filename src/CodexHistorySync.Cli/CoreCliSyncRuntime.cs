@@ -16,6 +16,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Search;
 using CodexHistorySync.Core.Model;
@@ -41,6 +42,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly string? grokHome;
     private readonly string? claudeHome;
     private readonly string? continueHome;
+    private readonly string? kimiHome;
     private readonly Action<SyncProgress>? syncProgress;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
@@ -71,7 +73,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         string? grokHome = null,
         Action<SyncProgress>? syncProgress = null,
         string? claudeHome = null,
-        string? continueHome = null)
+        string? continueHome = null,
+        string? kimiHome = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -84,6 +87,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.grokHome = grokHome;
         this.claudeHome = claudeHome;
         this.continueHome = continueHome;
+        this.kimiHome = kimiHome;
         this.syncProgress = syncProgress;
     }
 
@@ -183,7 +187,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
                 || preview.UncertainKinds.Contains(ObjectKind.ClaudeMemory),
             ContinueHome = ContinuePaths.TryResolve(continueHome)?.Sessions,
             ContinueSessions = preview.LocalByKind.TryGetValue(ObjectKind.ContinueSession, out var continueCount) ? continueCount : 0,
-            ContinueUncertain = preview.UncertainKinds.Contains(ObjectKind.ContinueSession)
+            ContinueUncertain = preview.UncertainKinds.Contains(ObjectKind.ContinueSession),
+            KimiHome = KimiPaths.TryResolve(kimiHome)?.Sessions,
+            KimiSessions = preview.LocalByKind.TryGetValue(ObjectKind.KimiSession, out var kimiCount) ? kimiCount : 0,
+            KimiUncertain = preview.UncertainKinds.Contains(ObjectKind.KimiSession)
         };
     }
 
@@ -198,6 +205,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         // at all, which is what tells the user why no Claude panel or sessions appear.
         checks.Add(new("claude-paths", ClaudePaths.TryResolve(claudeHome) is not null));
         checks.Add(new("continue-paths", ContinuePaths.TryResolve(continueHome) is not null));
+        checks.Add(new("kimi-paths", KimiPaths.TryResolve(kimiHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));
         var serverStorage = configuration is not null && StoreEndpoint.IsServerUrl(configuration.RemoteUrl);
         if (!serverStorage) checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
@@ -253,16 +261,19 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var grokPaths = CodexHistorySync.Core.Grok.GrokPaths.TryResolve(grokHome);
         var claudePaths = ClaudePaths.TryResolve(claudeHome);
         var continuePaths = ContinuePaths.TryResolve(continueHome);
+        var kimiPaths = KimiPaths.TryResolve(kimiHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
         var annotationsDirectory = new SessionAnnotationStore(localAppData).Directory;
         var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths,
-            claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory);
+            claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory,
+            kimiPaths: kimiPaths);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
         if (engineFactory is not null) return new Components(paths, scanner, conflicts, engineFactory(configuration, key));
         var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths,
-            claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory);
+            claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory,
+            kimiPaths: kimiPaths);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = StoreEndpoint.IsServerUrl(configuration.RemoteUrl)
             ? new HttpStorageProvider(new StoreClient(new StoreEndpoint(configuration.RemoteUrl)), key)
@@ -277,7 +288,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             var engine = new SyncEngine(configuration.RepositoryId,
                 configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
                 grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths,
-                annotationsDirectory: annotationsDirectory);
+                annotationsDirectory: annotationsDirectory, kimiPaths: kimiPaths);
             return new Components(paths, scanner, conflicts, engine, providerOwner);
         }
         catch { providerOwner?.Dispose(); throw; }

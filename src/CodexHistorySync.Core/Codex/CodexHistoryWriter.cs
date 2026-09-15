@@ -5,6 +5,7 @@ using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
+using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
 
@@ -31,6 +32,7 @@ public sealed class CodexHistoryWriter
     private readonly GrokPaths? _grokPaths;
     private readonly ClaudePaths? _claudePaths;
     private readonly ContinuePaths? _continuePaths;
+    private readonly KimiPaths? _kimiPaths;
     private readonly string? _annotationsDirectory;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
@@ -40,7 +42,7 @@ public sealed class CodexHistoryWriter
 
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
         IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null,
-        ContinuePaths? continuePaths = null, string? annotationsDirectory = null)
+        ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null)
     {
         _annotationsDirectory = annotationsDirectory;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -50,12 +52,13 @@ public sealed class CodexHistoryWriter
         _grokPaths = grokPaths;
         _claudePaths = claudePaths;
         _continuePaths = continuePaths;
+        _kimiPaths = kimiPaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -67,7 +70,7 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         ct.ThrowIfCancellationRequested();
@@ -84,6 +87,9 @@ public sealed class CodexHistoryWriter
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.ContinueSession)
             return await ImportContinuePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.KimiSession)
+            return await ImportKimiPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.SessionAnnotations)
             return await ImportAnnotationAsync(incoming, plaintext, operationId, expected, destination, ct)
@@ -120,7 +126,7 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
@@ -136,6 +142,56 @@ public sealed class CodexHistoryWriter
             File.Delete(destination);
             var summary = Path.Combine(Path.GetDirectoryName(destination)!, "summary.json");
             if (File.Exists(summary)) File.Delete(summary);
+            return TombstoneApplyResult.Applied;
+        }
+
+        if (local.Kind == ObjectKind.KimiSession)
+        {
+            // Package hash is not the raw state.json hash. Every synchronizable file is backed up
+            // so a tombstone is fully recoverable from the backup store; automatic rollback
+            // restores the anchor state.json (journal granularity), as it does for Grok.
+            if (_kimiPaths is null) throw new InvalidOperationException("Kimi paths are not configured.");
+            if (File.Exists(destination))
+                await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+            var sessionDirectory = Path.GetDirectoryName(destination)!;
+            if (Directory.Exists(sessionDirectory))
+            {
+                foreach (var file in Directory.EnumerateFiles(sessionDirectory, "*",
+                             new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+                {
+                    await _backups.CreateAsync(file, operationId, ct).ConfigureAwait(false);
+                }
+            }
+            var indexPath = _kimiPaths.IndexFilePath;
+            if (File.Exists(indexPath))
+            {
+                await _backups.CreateAsync(indexPath, operationId, ct).ConfigureAwait(false);
+                var indexContent = await File.ReadAllTextAsync(indexPath, ct).ConfigureAwait(false);
+                var sessionName = Path.GetFileName(Path.TrimEndingDirectorySeparator(sessionDirectory));
+                var removed = KimiSessionIndex.Remove(indexContent, sessionName);
+                if (!string.Equals(indexContent, removed, StringComparison.Ordinal))
+                {
+                    var temporary = BackupStore.SiblingTemporaryPath(indexPath);
+                    try
+                    {
+                        await using (var staged = new MemoryStream(
+                            System.Text.Encoding.UTF8.GetBytes(removed), writable: false))
+                            await _fileSystem.WriteTemporaryAsync(temporary, staged, ct).ConfigureAwait(false);
+                        var stagedHash = await BackupStore.HashFileAsync(temporary, ct).ConfigureAwait(false);
+                        var currentHash = await BackupStore.HashFileAsync(indexPath, ct).ConfigureAwait(false);
+                        await _fileSystem.PublishAsync(temporary, indexPath, stagedHash, currentHash, null, ct)
+                            .ConfigureAwait(false);
+                    }
+                    finally { if (File.Exists(temporary)) File.Delete(temporary); }
+                }
+            }
+            if (Directory.Exists(sessionDirectory)) Directory.Delete(sessionDirectory, recursive: true);
+            var bucketDirectory = Path.GetDirectoryName(sessionDirectory);
+            if (bucketDirectory is not null && Directory.Exists(bucketDirectory) &&
+                !Directory.EnumerateFileSystemEntries(bucketDirectory).Any())
+            {
+                Directory.Delete(bucketDirectory);
+            }
             return TombstoneApplyResult.Applied;
         }
 
@@ -347,10 +403,66 @@ public sealed class CodexHistoryWriter
         }
     }
 
+    /// <summary>
+    /// Imports a Kimi Code session. Like Continue this touches a file the import does not own —
+    /// the shared session index — so the index is backed up alongside the session, and an index
+    /// that does not parse stops the import instead of being replaced.
+    /// </summary>
+    private async Task<ImportApplyResult> ImportKimiPackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_kimiPaths is null) throw new InvalidOperationException("Kimi paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = KimiSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        var package = KimiSessionPackage.Parse(packageBytes);
+        if (!string.Equals(KimiSessionPackage.ToLogicalId(package.SessionId), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Kimi session package id does not match the logical object id.");
+
+        // Read before writing anything: a malformed index must not be replaced, because it lists
+        // sessions this import has never heard of.
+        var indexPath = _kimiPaths.IndexFilePath;
+        if (File.Exists(indexPath))
+            KimiSessionIndex.Parse(await File.ReadAllTextAsync(indexPath, ct).ConfigureAwait(false));
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.KimiSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+        if (File.Exists(indexPath))
+            await _backups.CreateAsync(indexPath, operationId, ct).ConfigureAwait(false);
+
+        try
+        {
+            KimiSessionPackage.Materialize(package, _kimiPaths);
+            var after = await ContentHashAsync(destination, ObjectKind.KimiSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Kimi session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
     // The process detector cannot identify which Codex thread is open. Defer Codex mutations
     // conservatively, but never wait for a long-lived app-server or block other agents on it.
     internal bool IsMutationBlocked(ObjectKind kind) =>
         (kind is ObjectKind.ActiveSession or ObjectKind.ArchivedSession) && _processDetector.IsRunning();
+
+    /// <summary>
+    /// Kinds whose journal hash describes an assembled package rather than the anchor file the
+    /// backup holds. For those, the backup is validated against itself and the journal state is
+    /// re-read from disk through <see cref="ContentHashAsync"/> instead of being compared to the
+    /// raw file hash.
+    /// </summary>
+    private static bool IsPackageBackedKind(ObjectKind kind) =>
+        kind is ObjectKind.GrokSession or ObjectKind.ClaudeSession or ObjectKind.ClaudeMemory
+            or ObjectKind.ContinueSession or ObjectKind.KimiSession;
 
     private bool EnsureAgentInactive(ObjectKind kind)
     {
@@ -362,7 +474,7 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         ct.ThrowIfCancellationRequested();
         EnsureAgentInactive(plan.Target.Kind);
@@ -370,7 +482,11 @@ public sealed class CodexHistoryWriter
             throw new IOException("Local history changed before the mutation batch could be captured.");
         if (!plan.Before.Exists) return new RollbackCapture(destination, null);
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
-        if (!BackupStore.HashEquals(backup.ContentHash, plan.Before.ContentHash!.Value) ||
+        var backupIntact = BackupStore.HashEquals(
+            await BackupStore.HashFileAsync(backup.ContentPath, ct).ConfigureAwait(false), backup.ContentHash);
+        var backupMatchesJournal = IsPackageBackedKind(plan.Target.Kind) ||
+            BackupStore.HashEquals(backup.ContentHash, plan.Before.ContentHash!.Value);
+        if (!backupIntact || !backupMatchesJournal ||
             !await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
             throw new IOException("Local history changed while the mutation batch was being captured.");
         return new RollbackCapture(destination, backup.Id);
@@ -378,14 +494,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         ct.ThrowIfCancellationRequested();
@@ -402,9 +518,14 @@ public sealed class CodexHistoryWriter
         }
         if (backupId is null) throw new InvalidDataException("A rollback journal has no backup for prior history.");
         var backup = await _backups.LoadAsync(backupId, ct).ConfigureAwait(false);
+        var packageBacked = IsPackageBackedKind(kind);
+        // For package-backed kinds the journal hash describes the assembled package, not the
+        // anchor file the backup holds: the backup is validated against itself, and publication
+        // below expects the backup's own hash. (Restoring the anchor alone leaves an incomplete
+        // session on disk; the next run plans it again from the repository.)
         if (!StringComparer.OrdinalIgnoreCase.Equals(backup.OriginalPath, destination) ||
             !StringComparer.Ordinal.Equals(backup.OperationId, operationId) ||
-            !BackupStore.HashEquals(backup.ContentHash, before.ContentHash!.Value) ||
+            (!packageBacked && !BackupStore.HashEquals(backup.ContentHash, before.ContentHash!.Value)) ||
             !BackupStore.HashEquals(await BackupStore.HashFileAsync(backup.ContentPath, ct).ConfigureAwait(false), backup.ContentHash))
             throw new InvalidDataException("The rollback backup does not match its durable journal.");
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -414,7 +535,8 @@ public sealed class CodexHistoryWriter
             await using var content = new FileStream(backup.ContentPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81_920,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             await _fileSystem.WriteTemporaryAsync(temporary, content, ct).ConfigureAwait(false);
-            await _fileSystem.PublishAsync(temporary, destination, before.ContentHash.Value,
+            await _fileSystem.PublishAsync(temporary, destination,
+                packageBacked ? backup.ContentHash : before.ContentHash!.Value,
                 after.Exists ? after.ContentHash : null, () => EnsureAgentInactive(kind), ct).ConfigureAwait(false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -510,6 +632,27 @@ public sealed class CodexHistoryWriter
             {
                 var package = GrokSessionPackage.BuildFromDirectory(directory);
                 return GrokSessionPackage.HashPackage(package);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
+                                                  or JsonException or DecoderFallbackException or ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        if (kind == ObjectKind.KimiSession)
+        {
+            if (!File.Exists(destination)) return null;
+            var sessionDirectory = Path.GetDirectoryName(destination)
+                ?? throw new InvalidDataException("Kimi state.json path has no directory.");
+            var workDirKey = Path.GetFileName(Path.TrimEndingDirectorySeparator(
+                Path.GetDirectoryName(sessionDirectory)
+                ?? Path.GetPathRoot(sessionDirectory)
+                ?? sessionDirectory));
+            try
+            {
+                var package = KimiSessionPackage.BuildFromDirectory(sessionDirectory, workDirKey);
+                return KimiSessionPackage.HashPackage(package);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
                                                   or JsonException or DecoderFallbackException or ArgumentException)

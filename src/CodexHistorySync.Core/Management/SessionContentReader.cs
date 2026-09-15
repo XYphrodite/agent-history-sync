@@ -17,13 +17,15 @@ public sealed class SessionContentReader : ISessionContentReader
     private readonly IConversationReader grokReader;
     private readonly IConversationReader claudeReader;
     private readonly IConversationReader continueReader;
+    private readonly IConversationReader kimiReader;
 
     public SessionContentReader()
         : this(
             new CodexConversationReader(),
             new GrokConversationReader(),
             new ClaudeConversationReader(),
-            new ContinueConversationReader())
+            new ContinueConversationReader(),
+            new KimiConversationReader())
     {
     }
 
@@ -31,12 +33,14 @@ public sealed class SessionContentReader : ISessionContentReader
         IConversationReader codexReader,
         IConversationReader grokReader,
         IConversationReader claudeReader,
-        IConversationReader? continueReader = null)
+        IConversationReader? continueReader = null,
+        IConversationReader? kimiReader = null)
     {
         this.codexReader = codexReader ?? throw new ArgumentNullException(nameof(codexReader));
         this.grokReader = grokReader ?? throw new ArgumentNullException(nameof(grokReader));
         this.claudeReader = claudeReader ?? throw new ArgumentNullException(nameof(claudeReader));
         this.continueReader = continueReader ?? new ContinueConversationReader();
+        this.kimiReader = kimiReader ?? new KimiConversationReader();
     }
 
     public Task<PortableConversation> ReadAsync(ManagedSession session, CancellationToken cancellationToken)
@@ -58,6 +62,7 @@ public sealed class SessionContentReader : ISessionContentReader
         ManagedAgent.Grok => grokReader,
         ManagedAgent.Claude => claudeReader,
         ManagedAgent.Continue => continueReader,
+        ManagedAgent.Kimi => kimiReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 }

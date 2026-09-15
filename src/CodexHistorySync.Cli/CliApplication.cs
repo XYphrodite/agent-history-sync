@@ -28,6 +28,14 @@ public sealed record CliStatusReport(int Local, int Remote, int Pending, int Con
     /// <summary>True when the Continue scan could not confirm what it did not find.</summary>
     public bool ContinueUncertain { get; init; }
 
+    /// <summary>Resolved Kimi sessions directory, or null when no Kimi home was found.</summary>
+    public string? KimiHome { get; init; }
+
+    public int KimiSessions { get; init; }
+
+    /// <summary>True when the Kimi scan could not confirm what it did not find.</summary>
+    public bool KimiUncertain { get; init; }
+
     public int ClaudeSessions { get; init; }
 
     public int ClaudeMemory { get; init; }
@@ -360,6 +368,7 @@ public sealed class CliApplication
             ("codex", [ObjectKind.ActiveSession, ObjectKind.ArchivedSession, ObjectKind.Attachment]),
             ("grok", [ObjectKind.GrokSession]),
             ("claude", [ObjectKind.ClaudeSession, ObjectKind.ClaudeMemory]),
+            ("kimi", [ObjectKind.KimiSession]),
             ("annotations", [ObjectKind.SessionAnnotations]),
         };
         var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
@@ -421,6 +430,8 @@ public sealed class CliApplication
             $"claude-uncertain={(result.ClaudeUncertain ? "yes" : "no")}");
         console.WriteLine($"continue-home={(result.ContinueHome is null ? "none" : SafeToken(result.ContinueHome))} " +
             $"continue-sessions={result.ContinueSessions} continue-uncertain={(result.ContinueUncertain ? "yes" : "no")}");
+        console.WriteLine($"kimi-home={(result.KimiHome is null ? "none" : SafeToken(result.KimiHome))} " +
+            $"kimi-sessions={result.KimiSessions} kimi-uncertain={(result.KimiUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

@@ -6,6 +6,8 @@ internal static class ConversationTechnicalText
     [
         "<environment_context>", "<recommended_plugins>", "<user_info>", "<system-reminder>",
         "<permissions instructions>", "<skills_instructions>", "<apps_instructions>", "<plugins_instructions>",
+        // Injected by the Kimi Code CLI when a skill is loaded mid-turn; it is harness text, not a user turn.
+        "Skill tool loaded instructions",
         "# Files mentioned by the user:", "# Context from my IDE setup:",
         // Claude Code wraps editor and slash-command context in these before the user text.
         "<ide_opened_file>", "<ide_selection>", "<local-command-stdout>", "<command-name>", "<command-message>",

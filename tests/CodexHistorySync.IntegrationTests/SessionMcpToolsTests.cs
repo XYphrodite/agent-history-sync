@@ -20,7 +20,7 @@ public sealed class SessionMcpToolsTests : IDisposable
         using var tools = new SessionMcpTools(catalog, index, reader);
 
         var results = await tools.SearchAsync("conversation");
-        Assert.Equal(4, results.Sessions.Count);
+        Assert.Equal(5, results.Sessions.Count);
         foreach (var agent in ManagedAgents.All)
         {
             var page = await tools.GetAsync(agent.ToString().ToLowerInvariant(), "shared-id");
@@ -116,7 +116,8 @@ public sealed class SessionMcpToolsTests : IDisposable
             if (BeforeScan is not null) await BeforeScan(cancellationToken);
             var grouped = Sessions.ToLookup(session => session.Agent);
             return new SessionCatalogSnapshot(grouped[ManagedAgent.Codex].ToArray(), grouped[ManagedAgent.Grok].ToArray(),
-                grouped[ManagedAgent.Claude].ToArray(), grouped[ManagedAgent.Continue].ToArray()) { ConfiguredAgents = ManagedAgents.All };
+                grouped[ManagedAgent.Claude].ToArray(), grouped[ManagedAgent.Continue].ToArray(),
+                grouped[ManagedAgent.Kimi].ToArray()) { ConfiguredAgents = ManagedAgents.All };
         }
     }
 

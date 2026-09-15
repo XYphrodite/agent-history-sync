@@ -48,6 +48,7 @@ public sealed class SessionSearchCommand(
         ManagedAgent.Grok => "grok",
         ManagedAgent.Claude => "claude",
         ManagedAgent.Continue => "continue",
+        ManagedAgent.Kimi => "kimi",
         _ => "unknown"
     };
 

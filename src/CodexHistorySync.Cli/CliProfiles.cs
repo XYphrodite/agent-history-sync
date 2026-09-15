@@ -218,6 +218,7 @@ internal sealed class CliProfileEnvironment : IDisposable
             values["GROK_HOME"] = Path.Combine(sessions, "grok");
             values["CLAUDE_CONFIG_DIR"] = Path.Combine(sessions, "claude");
             values["CONTINUE_GLOBAL_DIR"] = Path.Combine(sessions, "continue");
+            values["KIMI_CODE_HOME"] = Path.Combine(sessions, "kimi");
         }
         try
         {

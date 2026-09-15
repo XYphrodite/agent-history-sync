@@ -32,7 +32,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
     public ObservableCollection<SessionNode> Sessions { get; } = [];
     public ObservableCollection<TraceEntryModel> Entries { get; } = [];
     public ObservableCollection<TraceSearchMatch> Matches { get; } = [];
-    public IReadOnlyList<string> Agents { get; } = ["All agents", "Codex", "Grok", "Claude", "Continue"];
+    public IReadOnlyList<string> Agents { get; } = ["All agents", "Codex", "Grok", "Claude", "Continue", "Kimi"];
     public string BuildLabel => services.BuildLabel;
     public string Agent { get => agent; set => Set(ref agent, value); }
     public string Filter { get => filter; set => Set(ref filter, value); }

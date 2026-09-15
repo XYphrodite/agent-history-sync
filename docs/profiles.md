@@ -67,7 +67,7 @@ agent-sync push --profile xeon
 ## Отдельная копия для чтения
 
 Отдельные настройки синхронизации сами по себе не отделяют историю агентов.
-Без `--sessions-dir` используются обычные папки Codex, Grok, Claude и Continue,
+Без `--sessions-dir` используются обычные папки Codex, Grok, Claude, Continue и Kimi,
 включая их переопределения через переменные окружения.
 
 Для отдельной копии укажите общий каталог её агентских папок:
@@ -86,7 +86,7 @@ agent-sync --sessions --profile reader
 ```
 
 Внутри `--sessions-dir` используются `codex\sessions`, `codex\archived_sessions`,
-`grok\sessions`, `claude\projects` и `continue\sessions`. При первом запуске
+`grok\sessions`, `claude\projects`, `continue\sessions` и `kimi\sessions`. При первом запуске
 синхронизации эти каталоги создаются. Каталог SQLite, аннотации, настройки
 названий и диагностика используют `--data-dir` выбранного профиля.
 Профиль задаёт папки и подключение; он не вводит отдельные права доступа на сервере.

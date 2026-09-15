@@ -1,6 +1,6 @@
 namespace CodexHistorySync.Core.Management;
 
-public enum ManagedAgent { Codex, Grok, Claude, Continue }
+public enum ManagedAgent { Codex, Grok, Claude, Continue, Kimi }
 
 /// <summary>
 /// Where <see cref="ManagedSession.Title"/> came from. An annotation may stand in for a title the
@@ -34,18 +34,27 @@ public sealed record SessionCatalogSnapshot(
     IReadOnlyList<ManagedSession> Codex,
     IReadOnlyList<ManagedSession> Grok,
     IReadOnlyList<ManagedSession> Claude,
-    IReadOnlyList<ManagedSession> Continue)
+    IReadOnlyList<ManagedSession> Continue,
+    IReadOnlyList<ManagedSession> Kimi)
 {
     /// <summary>Kept so the two-agent call sites that predate Claude still compile.</summary>
     public SessionCatalogSnapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok)
-        : this(codex, grok, [], []) { }
+        : this(codex, grok, [], [], []) { }
 
     /// <summary>Kept so the three-agent call sites that predate Continue still compile.</summary>
     public SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude)
-        : this(codex, grok, claude, []) { }
+        : this(codex, grok, claude, [], []) { }
+
+    /// <summary>Kept so the four-agent call sites that predate Kimi still compile.</summary>
+    public SessionCatalogSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude,
+        IReadOnlyList<ManagedSession> continueSessions)
+        : this(codex, grok, claude, continueSessions, []) { }
 
     /// <summary>
     /// Agents with a resolvable home, in panel order. An agent that is not installed gets no panel
@@ -53,7 +62,7 @@ public sealed record SessionCatalogSnapshot(
     /// the only thing that can tell "configured but empty" apart from "not configured", which the
     /// fallback below cannot, and which is why hand-built snapshots should set it explicitly.
     /// </summary>
-    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue);
+    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi);
 
     public IReadOnlyList<ManagedSession> For(ManagedAgent agent) => agent switch
     {
@@ -61,16 +70,19 @@ public sealed record SessionCatalogSnapshot(
         ManagedAgent.Grok => Grok,
         ManagedAgent.Claude => Claude,
         ManagedAgent.Continue => Continue,
+        ManagedAgent.Kimi => Kimi,
         _ => throw new ArgumentOutOfRangeException(nameof(agent))
     };
 
     private static IReadOnlyList<ManagedAgent> DefaultConfigured(
         IReadOnlyList<ManagedSession> claude,
-        IReadOnlyList<ManagedSession> continueSessions)
+        IReadOnlyList<ManagedSession> continueSessions,
+        IReadOnlyList<ManagedSession> kimi)
     {
         var agents = new List<ManagedAgent> { ManagedAgent.Codex, ManagedAgent.Grok };
         if (claude.Count != 0) agents.Add(ManagedAgent.Claude);
         if (continueSessions.Count != 0) agents.Add(ManagedAgent.Continue);
+        if (kimi.Count != 0) agents.Add(ManagedAgent.Kimi);
         return agents;
     }
 
@@ -82,7 +94,7 @@ public sealed record SessionCatalogSnapshot(
 public static class ManagedAgents
 {
     public static IReadOnlyList<ManagedAgent> All { get; } =
-        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude, ManagedAgent.Continue];
+        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude, ManagedAgent.Continue, ManagedAgent.Kimi];
 
     /// <summary>A session copied out of <paramref name="source"/> can land on any other agent.</summary>
     public static IReadOnlyList<ManagedAgent> Destinations(ManagedAgent source) =>

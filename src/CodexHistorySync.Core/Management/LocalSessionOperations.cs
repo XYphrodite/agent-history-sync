@@ -5,6 +5,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Kimi;
 
 namespace CodexHistorySync.Core.Management;
 
@@ -20,8 +21,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly GrokPaths? grokPaths;
     private readonly ClaudePaths? claudePaths;
     private readonly ContinuePaths? continuePaths;
+    private readonly KimiPaths? kimiPaths;
     private readonly IConversationWriter? continueWriter;
     private readonly IConversationReader continueReader;
+    private readonly IConversationWriter? kimiWriter;
+    private readonly IConversationReader kimiReader;
     private readonly IManagedSessionActiveState activeState;
     private readonly IManagedSessionDirectoryDeleter directoryDeleter;
     private readonly IConversationWriter? codexWriter;
@@ -71,6 +75,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         "The Continue session could not be read as a conversation.",
         "The staged Continue conversation failed validation.",
         "The Continue session index is not a JSON array.",
+        "The selected Kimi target is invalid.",
+        "The selected Kimi identity is invalid.",
+        "Kimi conversation is invalid.",
+        "The staged Kimi conversation failed validation.",
         "The selected Grok identity is invalid.",
         "The selected agent is invalid.",
         "The selected session identity changed.",
@@ -94,7 +102,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ClaudePaths? claudePaths = null,
         IConversationWriter? claudeWriter = null,
         ContinuePaths? continuePaths = null,
-        IConversationWriter? continueWriter = null)
+        IConversationWriter? continueWriter = null,
+        KimiPaths? kimiPaths = null,
+        IConversationWriter? kimiWriter = null)
         : this(
             codexPaths,
             grokPaths,
@@ -110,7 +120,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             new ClaudeConversationReader(),
             continuePaths,
             continueWriter,
-            new ContinueConversationReader())
+            new ContinueConversationReader(),
+            kimiPaths,
+            kimiWriter,
+            new KimiConversationReader())
     {
     }
 
@@ -129,7 +142,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationReader? claudeReader = null,
         ContinuePaths? continuePaths = null,
         IConversationWriter? continueWriter = null,
-        IConversationReader? continueReader = null)
+        IConversationReader? continueReader = null,
+        KimiPaths? kimiPaths = null,
+        IConversationWriter? kimiWriter = null,
+        IConversationReader? kimiReader = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -139,6 +155,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.continuePaths = continuePaths;
         this.continueWriter = continueWriter;
         this.continueReader = continueReader ?? new ContinueConversationReader();
+        this.kimiPaths = kimiPaths;
+        this.kimiWriter = kimiWriter;
+        this.kimiReader = kimiReader ?? new KimiConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
         this.codexWriter = codexWriter;
@@ -229,6 +248,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Grok => grokWriter,
         ManagedAgent.Claude => claudeWriter,
         ManagedAgent.Continue => continueWriter,
+        ManagedAgent.Kimi => kimiWriter,
         _ => null
     };
 
@@ -238,10 +258,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Grok => grokReader,
         ManagedAgent.Claude => claudeReader,
         ManagedAgent.Continue => continueReader,
+        ManagedAgent.Kimi => kimiReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 
-    /// <summary>Codex, Claude, and Continue keep one file per session; Grok keeps a directory.</summary>
+    /// <summary>Codex, Claude, and Continue keep one file per session; Grok and Kimi keep a directory.</summary>
     internal static bool IsFileBackedAgent(ManagedAgent agent) =>
         agent is ManagedAgent.Codex or ManagedAgent.Claude or ManagedAgent.Continue;
 
@@ -311,9 +332,20 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             return;
         }
 
-        var deleteTask = directoryDeleter.DeleteAsync(
+        if (source.Agent == ManagedAgent.Kimi && kimiPaths is not null)
+        {
+            var deleteTask = directoryDeleter.DeleteAsync(
+                validated.Root, validated.NativePath, cancellationToken);
+            await deleteTask.ConfigureAwait(false);
+            // The shared index lists every session Kimi can resume; the row for a deleted session
+            // would point at a directory that no longer exists.
+            RemoveFromKimiIndex(KimiPaths.SessionIdPrefix + source.SessionId);
+            return;
+        }
+
+        var directoryDeleteTask = directoryDeleter.DeleteAsync(
             validated.Root, validated.NativePath, cancellationToken);
-        await deleteTask.ConfigureAwait(false);
+        await directoryDeleteTask.ConfigureAwait(false);
     }
 
     private async Task RequireStableBeforeFinalActiveCheckAsync(
@@ -478,6 +510,29 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
                 nativePath);
         }
 
+        if (source.Agent == ManagedAgent.Kimi)
+        {
+            if (kimiPaths is null ||
+                !string.Equals(
+                    Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(source.NativePath))),
+                        KimiPaths.SessionIdPrefix + source.SessionId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                !ManagedSessionPathPolicy.TryResolveConcreteTarget(
+                    source.NativePath, kimiPaths.Sessions, expectDirectory: true, out var nativePath))
+                throw new InvalidDataException("The selected Kimi target is invalid.");
+            try
+            {
+                _ = KimiSessionPackage.ToLogicalId(source.SessionId);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException("The selected Kimi identity is invalid.", exception);
+            }
+            return new Target(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(kimiPaths.Sessions)),
+                nativePath);
+        }
+
         throw new InvalidDataException("The selected agent is invalid.");
     }
 
@@ -533,6 +588,37 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         }
     }
 
+    /// <summary>
+    /// Drops one session from Kimi's shared index. The session directory is already gone at this
+    /// point, so an index that cannot be parsed is left alone rather than replaced.
+    /// </summary>
+    private void RemoveFromKimiIndex(string sessionName)
+    {
+        var indexPath = kimiPaths!.IndexFilePath;
+        if (!File.Exists(indexPath)) return;
+
+        string merged;
+        try
+        {
+            merged = KimiSessionIndex.Remove(File.ReadAllText(indexPath), sessionName);
+        }
+        catch (InvalidDataException)
+        {
+            return;
+        }
+
+        var temporary = indexPath + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, merged);
+            File.Move(temporary, indexPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
     private static void ValidateConversationIdentity(ManagedSession source, PortableConversation conversation)
     {
         var expectedAgent = source.Agent switch
@@ -541,6 +627,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ManagedAgent.Grok => ConversationAgent.Grok,
             ManagedAgent.Claude => ConversationAgent.Claude,
             ManagedAgent.Continue => ConversationAgent.Continue,
+            ManagedAgent.Kimi => ConversationAgent.Kimi,
             _ => throw new InvalidDataException("The selected agent is invalid.")
         };
         if (conversation.SourceAgent != expectedAgent ||

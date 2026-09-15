@@ -10,6 +10,7 @@ using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
+using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
@@ -112,6 +113,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly ClaudeMemoryScanner? _claudeMemoryScanner;
     private readonly ContinuePaths? _continuePaths;
     private readonly ContinueSessionScanner? _continueScanner;
+    private readonly KimiPaths? _kimiPaths;
+    private readonly KimiSessionScanner? _kimiScanner;
     private readonly string? _annotationsDirectory;
     private readonly SessionAnnotationScanner? _annotationScanner;
     private readonly byte[] _masterKey;
@@ -135,10 +138,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null, Action<SyncProgress>? progress = null,
         ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null,
         ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null,
-        string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null)
+        string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null,
+        KimiPaths? kimiPaths = null, KimiSessionScanner? kimiScanner = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
             provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner, progress,
-            claudePaths, claudeScanner, continuePaths, continueScanner, annotationsDirectory, annotationScanner) { }
+            claudePaths, claudeScanner, continuePaths, continueScanner, annotationsDirectory, annotationScanner,
+            kimiPaths, kimiScanner) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
@@ -146,7 +151,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         IOperationDirectoryCleaner operationCleaner, GrokPaths? grokPaths = null, GrokSessionScanner? grokScanner = null,
         Action<SyncProgress>? progress = null, ClaudePaths? claudePaths = null, ClaudeSessionScanner? claudeScanner = null,
         ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null,
-        string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null)
+        string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null,
+        KimiPaths? kimiPaths = null, KimiSessionScanner? kimiScanner = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -162,6 +168,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _claudeMemoryScanner = claudePaths is null ? null : new ClaudeMemoryScanner();
         _continuePaths = continuePaths;
         _continueScanner = continueScanner ?? (continuePaths is null ? null : new ContinueSessionScanner());
+        _kimiPaths = kimiPaths;
+        _kimiScanner = kimiScanner ?? (kimiPaths is null ? null : new KimiSessionScanner());
         _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
         _annotationScanner = annotationScanner ?? (_annotationsDirectory is null ? null : new SessionAnnotationScanner());
         _masterKey = masterKey.ToArray();
@@ -173,7 +181,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
-        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths);
+        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths, kimiPaths);
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
         _progress = progress;
@@ -189,6 +197,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_claudePaths is not null && _claudeScanner is not null) extraTasks.Add(_claudeScanner.ScanDetailedAsync(_claudePaths, ct));
         if (_claudePaths is not null && _claudeMemoryScanner is not null) extraTasks.Add(_claudeMemoryScanner.ScanDetailedAsync(_claudePaths, ct));
         if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
+        if (_kimiPaths is not null && _kimiScanner is not null) extraTasks.Add(_kimiScanner.ScanDetailedAsync(_kimiPaths, ct));
         if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
         var unscanned = UnscannedKinds();
         if (extraTasks.Count == 0)
@@ -246,6 +255,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_claudePaths is null || _claudeScanner is null) unscanned.Add(ObjectKind.ClaudeSession);
         if (_claudePaths is null || _claudeMemoryScanner is null) unscanned.Add(ObjectKind.ClaudeMemory);
         if (_continuePaths is null || _continueScanner is null) unscanned.Add(ObjectKind.ContinueSession);
+        if (_kimiPaths is null || _kimiScanner is null) unscanned.Add(ObjectKind.KimiSession);
         if (_annotationsDirectory is null || _annotationScanner is null) unscanned.Add(ObjectKind.SessionAnnotations);
         return unscanned;
     }
@@ -388,7 +398,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                     exception.Message.Contains("changed after stable scanning", StringComparison.Ordinal) ||
                                     exception.Message.Contains("Grok session", StringComparison.OrdinalIgnoreCase) ||
                                     exception.Message.Contains("Claude session", StringComparison.OrdinalIgnoreCase) ||
-                                    exception.Message.Contains("Continue session", StringComparison.OrdinalIgnoreCase))
+                                    exception.Message.Contains("Continue session", StringComparison.OrdinalIgnoreCase) ||
+                                    exception.Message.Contains("Kimi session", StringComparison.OrdinalIgnoreCase))
                                 {
                                     // A live session of any agent can mutate between scan and stage; defer it.
                                     deferred.Add(action.ObjectId);
@@ -724,6 +735,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             ? ResolveClaudeMemoryDestination(id, plaintext)
                             : kind == ObjectKind.ContinueSession
                             ? ResolveContinueDestination(id, plaintext)
+                            : kind == ObjectKind.KimiSession
+                            ? ResolveKimiDestination(id, plaintext)
                             : Path.Combine(kind switch
                     {
                         ObjectKind.ActiveSession => _paths.Sessions,
@@ -973,6 +986,16 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (!string.Equals(GrokSessionPackage.ToLogicalId(package.SessionId), id.Value, StringComparison.Ordinal))
             throw new InvalidDataException("Grok conflict payload id does not match the logical object id.");
         return GrokSessionPackage.ChatHistoryPath(_grokPaths.SessionDirectory(package.Cwd, package.SessionId));
+    }
+
+    private string ResolveKimiDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_kimiPaths is null) throw new InvalidOperationException("Kimi paths are not configured.");
+        var package = KimiSessionPackage.Parse(plaintext);
+        if (!string.Equals(KimiSessionPackage.ToLogicalId(package.SessionId), id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Kimi conflict payload id does not match the logical object id.");
+        return KimiSessionPackage.StateFilePath(
+            _kimiPaths.SessionDirectory(package.WorkDirKey, KimiPaths.SessionIdPrefix + package.SessionId));
     }
 
     private async Task<ObjectVersion> PublishResolvedRemoteAsync(RemoteSnapshot snapshot,
@@ -1348,6 +1371,18 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             else if (existing is not null)
                 path = existing.SourcePath;
         }
+        else if (version.Kind == ObjectKind.KimiSession)
+        {
+            if (_kimiPaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "Kimi paths are not configured.");
+            var package = KimiSessionPackage.Parse(plaintext);
+            path = KimiSessionPackage.StateFilePath(
+                _kimiPaths.SessionDirectory(package.WorkDirKey, KimiPaths.SessionIdPrefix + package.SessionId));
+            if (existing is not null && existing.Kind != ObjectKind.KimiSession)
+                relocateFrom = existing;
+            else if (existing is not null)
+                path = existing.SourcePath;
+        }
         else
         {
             var root = version.Kind switch
@@ -1378,6 +1413,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 ObjectKind.ClaudeSession => ".claudepkg",
                 ObjectKind.ClaudeMemory => ".clmempkg",
                 ObjectKind.ContinueSession => ".continuepkg",
+                ObjectKind.KimiSession => ".kimipkg",
                 ObjectKind.SessionAnnotations => ".annotation.json",
                 _ => ".jsonl"
             });
@@ -1458,6 +1494,14 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             return;
         }
 
+        if (kind == ObjectKind.KimiSession)
+        {
+            var package = KimiSessionPackage.Parse(bytes);
+            if (!string.Equals(KimiSessionPackage.ToLogicalId(package.SessionId), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Kimi session package id does not match its logical object ID.");
+            return;
+        }
+
         ValidateSessionJsonl(bytes, expectedId, ct);
     }
 
@@ -1531,6 +1575,16 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             var sessionDirectory = Path.GetDirectoryName(sourcePath)
                 ?? throw new InvalidDataException("Grok chat_history path has no directory.");
             return GrokSessionPackage.BuildFromDirectory(sessionDirectory);
+        }
+
+        if (kind == ObjectKind.KimiSession)
+        {
+            var sessionDirectory = Path.GetDirectoryName(sourcePath)
+                ?? throw new InvalidDataException("Kimi state.json path has no directory.");
+            var workDirKey = Path.GetFileName(Path.TrimEndingDirectorySeparator(
+                Path.GetDirectoryName(sessionDirectory)
+                ?? throw new InvalidDataException("Kimi session path has no workDir bucket.")));
+            return KimiSessionPackage.BuildFromDirectory(sessionDirectory, workDirKey);
         }
 
         var raw = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);

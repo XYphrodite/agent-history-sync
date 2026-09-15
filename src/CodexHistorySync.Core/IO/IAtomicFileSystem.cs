@@ -257,7 +257,7 @@ internal static class PathSafety
     }
 
     public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null,
-        Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null)
+        Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null, Kimi.KimiPaths? kimiPaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
@@ -280,11 +280,17 @@ internal static class PathSafety
                 if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
                     throw new ArgumentException("The storage path must not overlap synchronized Continue paths.", parameterName);
         }
+        if (kimiPaths is not null)
+        {
+            foreach (var synchronizedPath in new[] { kimiPaths.Home, kimiPaths.Sessions })
+                if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
+                    throw new ArgumentException("The storage path must not overlap synchronized Kimi paths.", parameterName);
+        }
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
         Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null,
-        string? annotationsDirectory = null)
+        string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
         if (kind == ObjectKind.SessionAnnotations)
@@ -373,6 +379,19 @@ internal static class PathSafety
                 throw new ArgumentException("The destination is outside the synchronized Grok sessions directory.", parameterName);
             if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetFileName(canonical), "chat_history.jsonl"))
                 throw new ArgumentException("Grok session destinations must be chat_history.jsonl.", parameterName);
+            return canonical;
+        }
+
+        if (kind == ObjectKind.KimiSession)
+        {
+            if (kimiPaths is null) throw new ArgumentException("Kimi paths are required for Kimi session destinations.", parameterName);
+            if (!CodexPaths.IsPathWithin(canonical, kimiPaths.Sessions) ||
+                StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(kimiPaths.Sessions)))
+                throw new ArgumentException("The destination is outside the synchronized Kimi sessions directory.", parameterName);
+            if (Kimi.KimiPaths.IsIndexFile(canonical))
+                throw new ArgumentException("The Kimi session index is not a session destination.", parameterName);
+            if (!kimiPaths.IsSynchronizedSessionFile(canonical))
+                throw new ArgumentException("Kimi session destinations must be state.json, a wire.jsonl, or a plan file inside one session directory.", parameterName);
             return canonical;
         }
 

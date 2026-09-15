@@ -135,7 +135,8 @@ internal sealed class SessionMcpTools(
         "grok" => ManagedAgent.Grok,
         "claude" => ManagedAgent.Claude,
         "continue" => ManagedAgent.Continue,
-        _ => throw new McpException("agent must be codex, grok, claude, or continue.")
+        "kimi" => ManagedAgent.Kimi,
+        _ => throw new McpException("agent must be codex, grok, claude, continue, or kimi.")
     };
 
     private static string AgentToken(ManagedAgent agent) => agent.ToString().ToLowerInvariant();
