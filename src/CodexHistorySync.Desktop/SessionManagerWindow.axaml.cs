@@ -2,11 +2,13 @@ using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Viewing;
 
 namespace CodexHistorySync.Desktop;
 
