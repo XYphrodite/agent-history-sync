@@ -48,7 +48,7 @@
                         <TextBlock Text="● Active" Foreground="#E8A46A" FontSize="10" />
                       </Border>
                       <TextBlock Grid.Column="1" Text="{Binding Agent}" Classes="muted" FontSize="10" Margin="6,0" VerticalAlignment="Center" />
-                      <TextBlock Grid.Column="2" Text="{Binding LastModifiedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Classes="muted" FontSize="10" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="2" Text="{Binding LastModifiedAt}" Classes="muted" FontSize="10" VerticalAlignment="Center" />
                     </Grid>
                   </StackPanel>
                 </Border>
