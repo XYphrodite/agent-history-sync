@@ -111,9 +111,10 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
             await FilterAsync(debounce: false);
             var replacement = previous is null ? Sessions.FirstOrDefault()
                 : Sessions.FirstOrDefault(s => s.Agent == previous.Agent && s.SessionId == previous.SessionId);
+            var statusBeforeSelect = Status;
             await SelectAsync(replacement);
-            if (replacement is not null) Status = $"{FilteredCount} of {SessionCount} sessions";
-            else Status = $"{SessionCount} local sessions — no match for filter";
+            if (replacement is null) Status = $"{SessionCount} local sessions — no match for filter";
+            else if (Status == "Reading conversation…" || Status == statusBeforeSelect) Status = $"{FilteredCount} of {SessionCount} sessions";
             if (services.SearchIndex is not null)
             {
                 try
@@ -200,8 +201,8 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
         {
             Status = $"Copying to {target}…";
             var newId = await services.Operations.CopyAsync(source, target, lifetime.Token);
-            Status = $"Copied to {target} ({newId}).";
             await RefreshAsync();
+            Status = $"Copied to {target} ({newId}).";
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (ManagedSessionOperationException ex)
@@ -229,8 +230,8 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
             await services.Operations.DeleteAsync(target, lifetime.Token);
             try { await services.Annotations.DeleteAsync(new SessionAnnotationKey(target.Agent, target.SessionId), lifetime.Token); }
             catch { }
-            Status = "Deleted.";
             await RefreshAsync();
+            Status = "Deleted.";
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (Exception ex) when (ReadFailure(ex) || ex is ManagedSessionOperationException) { Status = "Could not delete session: " + ex.Message; }
