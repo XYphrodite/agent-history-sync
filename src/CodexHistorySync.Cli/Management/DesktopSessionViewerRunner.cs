@@ -12,6 +12,15 @@ internal sealed class DesktopSessionViewerRunner(DesktopSessionServices services
     }
 }
 
+internal sealed class DesktopSessionManagerRunner(DesktopSessionServices services) : ISessionManagerRunner
+{
+    public Task RunAsync(CancellationToken cancellationToken)
+    {
+        SessionManagerApp.Run(services, cancellationToken);
+        return Task.CompletedTask;
+    }
+}
+
 // Non-Windows viewing never exposes delete or copy; active-state detection is not needed for reading.
 internal sealed class ReadOnlySessionActiveState : IManagedSessionActiveState
 {

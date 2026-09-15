@@ -1,0 +1,146 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:CodexHistorySync.Desktop"
+        x:Class="CodexHistorySync.Desktop.SessionManagerWindow"
+        Title="Agent Sync — Manager" Width="1320" Height="860" MinWidth="900" MinHeight="600"
+        Background="#17191C" FontFamily="Inter" FontSize="14" Foreground="#E8E6E0">
+  <Window.Styles>
+    <Style Selector="Button"><Setter Property="CornerRadius" Value="6" /><Setter Property="Padding" Value="12,7" /></Style>
+    <Style Selector="TextBox"><Setter Property="CornerRadius" Value="6" /></Style>
+    <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="#A5A8AF" /></Style>
+    <Style Selector="Button.accent"><Setter Property="Background" Value="#D6B979" /><Setter Property="Foreground" Value="#24221B" /></Style>
+    <Style Selector="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="Padding" Value="0" /></Style>
+    <Style Selector="ListBoxItem:selected /template/ ContentPresenter"><Setter Property="Background" Value="#2A2E34" /></Style>
+  </Window.Styles>
+  <Grid RowDefinitions="68,*,38">
+    <Border Grid.Row="0" Background="#1D2024" BorderBrush="#34373C" BorderThickness="0,0,0,1" Padding="24,12">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+          <Border Background="#D6B979" CornerRadius="7" Width="32" Height="32">
+            <TextBlock Text="a" FontWeight="Bold" FontSize="24" Foreground="#24221B" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Border>
+          <TextBlock Text="Agent Sync" FontSize="19" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <TextBlock Text="/  Manager" Classes="muted" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+          <TextBlock Text="{Binding BuildLabel}" Classes="muted" FontSize="11" VerticalAlignment="Center" />
+          <TextBlock Text="LOCAL SESSIONS" Classes="muted" FontSize="11" LetterSpacing="1.6" VerticalAlignment="Center" />
+          <Button Content="Refresh" Click="OnRefresh" ToolTip.Tip="Refresh local sessions (F5)" />
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="1" ColumnDefinitions="320,5,*">
+      <Border Background="#1D2024" Padding="12,18,10,8">
+        <Grid RowDefinitions="Auto,Auto,Auto,*">
+          <ComboBox ItemsSource="{Binding Agents}" SelectedItem="{Binding Agent, Mode=TwoWay}"
+                    HorizontalAlignment="Stretch" Margin="0,0,0,10" SelectionChanged="OnAgentChanged" />
+          <TextBox Grid.Row="1" Watermark="Find by title or id…" Text="{Binding Filter, Mode=TwoWay}"
+                   TextChanged="OnFilterChanged" Margin="0,0,0,10" />
+          <TextBlock Grid.Row="2" Text="{Binding FilteredLabel}" Classes="muted" FontSize="11" Margin="0,0,0,8" />
+          <ListBox Grid.Row="3" x:Name="SessionList" ItemsSource="{Binding Sessions}" SelectionChanged="OnSelectionChanged" Background="Transparent">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <Border Padding="10,8" CornerRadius="6">
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxLines="2" FontSize="13" />
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                      <Border Background="#2A2E34" CornerRadius="4" Padding="6,2" IsVisible="{Binding IsActive}">
+                        <TextBlock Text="● Active" Foreground="#E8A46A" FontSize="10" />
+                      </Border>
+                      <TextBlock Grid.Column="1" Text="{Binding Agent}" Classes="muted" FontSize="10" Margin="6,0" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="2" Text="{Binding LastModifiedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Classes="muted" FontSize="10" VerticalAlignment="Center" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+      <GridSplitter Grid.Column="1" Background="#34373C" ResizeDirection="Columns" />
+      <Grid Grid.Column="2" RowDefinitions="Auto,Auto,Auto,*" Margin="26,22,26,12">
+        <StackPanel Spacing="8" Margin="0,0,0,18">
+          <TextBlock Text="{Binding Subtitle}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="{Binding Title}" FontSize="24" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" />
+          <StackPanel Orientation="Horizontal" Spacing="10" IsVisible="{Binding HasSelection}">
+            <Border Background="#2A2E34" CornerRadius="4" Padding="8,3" IsVisible="{Binding IsSelectedActive}">
+              <TextBlock Text="{Binding ActiveBadge}" Foreground="#E8A46A" FontSize="11" />
+            </Border>
+            <Border Background="#3A2323" CornerRadius="4" Padding="8,3" IsVisible="{Binding IsSelectedUnreadable}">
+              <TextBlock Text="Unreadable — cannot copy or delete" Foreground="#E57373" FontSize="11" />
+            </Border>
+          </StackPanel>
+        </StackPanel>
+        <WrapPanel Grid.Row="1" Margin="0,0,0,14">
+          <Button Content="{Binding CopyLabel}" Classes="accent" Click="OnCopy" IsEnabled="{Binding CanCopy}" Margin="0,0,8,6" ToolTip.Tip="Copy conversation to another agent (C)" />
+          <Button Content="Delete…" Click="OnDelete" IsEnabled="{Binding CanDelete}" Margin="0,0,8,6" ToolTip.Tip="Delete local session only (Del)" />
+        </WrapPanel>
+        <StackPanel Grid.Row="2" Spacing="8" Margin="0,0,0,14">
+          <Grid ColumnDefinitions="*,Auto,Auto,Auto" IsEnabled="{Binding HasSelection}">
+            <TextBox x:Name="SearchBox" Watermark="Search messages and tool input/output… (Ctrl+F)"
+                     Text="{Binding Query, Mode=TwoWay}" KeyDown="OnSearchKey" />
+            <Button Grid.Column="1" Content="Find" Click="OnSearch" Margin="8,0,0,0" />
+            <Button Grid.Column="2" Content="↑" Click="OnPreviousMatch" Margin="5,0,0,0" ToolTip.Tip="Previous match" />
+            <Button Grid.Column="3" Content="↓" Click="OnNextMatch" Margin="5,0,0,0" ToolTip.Tip="Next match (F3)" />
+          </Grid>
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Preview of the selected conversation — copy keeps only user and assistant text." Classes="muted" FontSize="11" TextWrapping="Wrap" />
+            <TextBlock Grid.Column="1" Text="{Binding MatchCount}" Classes="muted" VerticalAlignment="Center" IsVisible="{Binding HasMatches}" Margin="12,0,0,0" />
+          </Grid>
+          <ListBox x:Name="SearchResults" ItemsSource="{Binding Matches}" IsVisible="{Binding HasMatches}" MaxHeight="120"
+                   SelectionChanged="OnMatchSelected" Background="#22262B">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Spacing="3" Margin="10,6">
+                  <TextBlock Text="{Binding Preview}" TextTrimming="CharacterEllipsis" FontSize="12" />
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsLoading}" Height="2" />
+        </StackPanel>
+        <Grid Grid.Row="3">
+          <StackPanel IsVisible="{Binding !HasSelection}" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12" MaxWidth="420">
+            <TextBlock Text="Manage your local sessions." FontSize="23" TextAlignment="Center" />
+            <TextBlock Text="Copy a conversation into another agent, or delete the local copy. Deleting never publishes a tombstone — a later sync may restore it." Classes="muted" TextWrapping="Wrap" TextAlignment="Center" />
+          </StackPanel>
+          <ListBox x:Name="Transcript" ItemsSource="{Binding Entries}" Background="Transparent" SelectionMode="Single"
+                   IsVisible="{Binding HasSelection}"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListBox.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+            <ListBox.ItemTemplate>
+              <DataTemplate DataType="local:TraceEntryModel">
+                <Border Margin="0,0,0,14" Padding="18,14" CornerRadius="8" Background="#22262B" BorderBrush="#343A41" BorderThickness="1">
+                  <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto,Auto">
+                      <TextBlock Text="{Binding Label}" Foreground="#D6B979" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1" Text="{Binding Time}" Classes="muted" FontSize="11" VerticalAlignment="Center" Margin="12,0" />
+                      <Button Grid.Column="2" Content="Copy" Click="OnCopyEntry" FontSize="11" Padding="8,3" ToolTip.Tip="Copy this record" />
+                    </Grid>
+                    <SelectableTextBlock Text="{Binding Text}" IsVisible="{Binding IsMessage}" TextWrapping="Wrap"
+                                         SelectionStart="{Binding SelectionStart}" SelectionEnd="{Binding SelectionEnd}" FontSize="14" />
+                    <Expander Header="View details" IsVisible="{Binding IsTechnical}" IsExpanded="{Binding IsExpanded, Mode=TwoWay}" HorizontalAlignment="Stretch">
+                      <StackPanel Spacing="10">
+                        <TextBlock Text="{Binding CallId}" Classes="muted" FontSize="10" />
+                        <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" FontFamily="Cascadia Code,Consolas,monospace" FontSize="12"
+                                             SelectionStart="{Binding SelectionStart}" SelectionEnd="{Binding SelectionEnd}" />
+                      </StackPanel>
+                    </Expander>
+                    <StackPanel Orientation="Horizontal" Spacing="10" IsVisible="{Binding HasPages}">
+                      <Button Content="Previous part" Click="OnPreviousPage" IsEnabled="{Binding HasPrevious}" FontSize="11" />
+                      <TextBlock Text="{Binding PageLabel}" Classes="muted" VerticalAlignment="Center" />
+                      <Button Content="Next part" Click="OnNextPage" IsEnabled="{Binding HasNext}" FontSize="11" />
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Grid>
+    </Grid>
+    <Border Grid.Row="2" Background="#1D2024" BorderBrush="#34373C" BorderThickness="0,1,0,0" Padding="20,9">
+      <SelectableTextBlock Text="{Binding Status}" FontSize="11" Foreground="#A5A8AF" TextTrimming="CharacterEllipsis" />
+    </Border>
+  </Grid>
+</Window>

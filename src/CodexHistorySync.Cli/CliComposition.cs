@@ -232,9 +232,37 @@ public static class CliComposition
             continueWriter,
             kimiPaths,
             kimiWriter);
-        var ansiConsole = AnsiConsole.Console;
-        var view = new SpectreSessionManagerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
-        return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog, operations, view));
+        var annotationStore = new SessionAnnotationStore();
+        var annotatedCatalog = new AnnotatedSessionCatalog(catalog, annotationStore);
+        var conversations = new CodexHistorySync.Core.Management.SessionContentReader();
+        return new DesktopSessionManagerRunner(new Desktop.DesktopSessionServices(annotatedCatalog,
+            new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.CodexSessionFamilyReader(codexPaths),
+            conversations, annotationStore, operations, null, new SessionSearchIndex(),
+            $"{CliBuildInfo.Version} · {CliBuildInfo.Commit}"));
+    }
+
+    // Kept for existing TUI tests; no longer wired to --manage.
+    private static ISessionManagerRunner CreateTerminalSessionManagerRunner()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Agent History Sync currently requires Windows.");
+        var codexPaths2 = TryResolveCodexPaths();
+        var grokPaths2 = GrokPaths.TryResolve();
+        var claudePaths2 = ClaudePaths.TryResolve();
+        var continuePaths2 = ContinuePaths.TryResolve();
+        var kimiPaths2 = KimiPaths.TryResolve();
+        var resolution2 = new CodexExecutableLocator().ResolveWithSource();
+        var executable2 = ToCodexExecutableOption(resolution2);
+        var activeState2 = new WindowsManagedSessionActiveState(codexPaths2, grokPaths2, claudePaths2, kimiPaths2);
+        var catalog2 = new LocalSessionCatalog(codexPaths2, grokPaths2, activeState2, claudePaths2, continuePaths2, kimiPaths2);
+        var codexWriter2 = codexPaths2 is null ? null : new CodexConversationWriter(codexPaths2, executable2, new CodexCompatibilityProbe());
+        var grokWriter2 = grokPaths2 is null ? null : new GrokConversationWriter(grokPaths2);
+        var claudeWriter2 = claudePaths2 is null ? null : new ClaudeConversationWriter(claudePaths2);
+        var continueWriter2 = continuePaths2 is null ? null : new ContinueConversationWriter(continuePaths2);
+        var kimiWriter2 = kimiPaths2 is null ? null : new KimiConversationWriter(kimiPaths2);
+        var operations2 = new LocalSessionOperations(codexPaths2, grokPaths2, activeState2, new WindowsManagedSessionDirectoryDeleter(), codexWriter2, grokWriter2, claudePaths2, claudeWriter2, continuePaths2, continueWriter2, kimiPaths2, kimiWriter2);
+        var ansiConsole2 = AnsiConsole.Console;
+        var view2 = new SpectreSessionManagerView(ansiConsole2, new SpectreSessionManagerInput(ansiConsole2));
+        return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog2, operations2, view2));
     }
 
     internal static CodexPaths? TryResolveCodexPaths(string? configuredHome = null)
