@@ -148,6 +148,40 @@ public sealed class SessionManagerStateTests
     }
 
     [Fact]
+    public void Five_agent_snapshot_keeps_kimi_sessions_through_copy_and_title_filter()
+    {
+        var state = new SessionManagerState(FiveAgentSnapshot(
+        [
+            Session(ManagedAgent.Kimi, "kimi-keep", "unique kimi title"),
+            Session(ManagedAgent.Kimi, "kimi-drop", "unrelated title")
+        ]));
+
+        Assert.Equal(["kimi-keep", "kimi-drop"], state.Snapshot.Kimi.Select(session => session.SessionId));
+
+        var filtered = state.WithSearchQuery("unique");
+
+        Assert.Equal(["kimi-keep"], filtered.Snapshot.Kimi.Select(session => session.SessionId));
+    }
+
+    [Fact]
+    public void Five_agent_snapshot_keeps_kimi_sessions_through_refresh_replacement()
+    {
+        var state = new SessionManagerState(FiveAgentSnapshot(
+            [Session(ManagedAgent.Kimi, "kimi-1"), Session(ManagedAgent.Kimi, "kimi-2")]));
+
+        state = state
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.FocusRight)
+            .ApplyNavigation(SessionManagerCommand.MoveDown)
+            .ReplaceSnapshot(FiveAgentSnapshot([Session(ManagedAgent.Kimi, "kimi-1")]));
+
+        Assert.Equal("kimi-1", state.SelectedSession!.SessionId);
+        Assert.Single(state.Snapshot.Kimi);
+    }
+
+    [Fact]
     public void Search_filters_both_panels_by_title_only_ignoring_case_and_resets_selection()
     {
         var state = new SessionManagerState(Snapshot(
@@ -320,6 +354,10 @@ public sealed class SessionManagerStateTests
         IReadOnlyList<ManagedSession> claude,
         IReadOnlyList<ManagedSession> continueSessions) =>
         new(codex, grok, claude, continueSessions) { ConfiguredAgents = ManagedAgents.All };
+
+    private static SessionCatalogSnapshot FiveAgentSnapshot(
+        IReadOnlyList<ManagedSession> kimi) =>
+        new([], [], [Session(ManagedAgent.Claude, "claude-one")], [], kimi) { ConfiguredAgents = ManagedAgents.All };
 
     private static ManagedSession Session(ManagedAgent agent, string id, string? title = null) =>
         new(agent, id, $"C:\\injected\\{id}", title ?? id, DateTimeOffset.UnixEpoch, false, true);

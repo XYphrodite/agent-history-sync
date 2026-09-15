@@ -296,6 +296,8 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         ManagedAgent.Codex => "Codex",
         ManagedAgent.Grok => "Grok",
         ManagedAgent.Claude => "Claude",
+        ManagedAgent.Continue => "Continue",
+        ManagedAgent.Kimi => "Kimi",
         _ => agent.ToString()
     };
 

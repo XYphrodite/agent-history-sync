@@ -126,7 +126,8 @@ public sealed class SessionManagerState
         Array.AsReadOnly(snapshot.Codex.ToArray()),
         Array.AsReadOnly(snapshot.Grok.ToArray()),
         Array.AsReadOnly(snapshot.Claude.ToArray()),
-        Array.AsReadOnly(snapshot.Continue.ToArray()))
+        Array.AsReadOnly(snapshot.Continue.ToArray()),
+        Array.AsReadOnly(snapshot.Kimi.ToArray()))
     {
         ConfiguredAgents = Array.AsReadOnly(snapshot.ConfiguredAgents.ToArray())
     };
@@ -139,7 +140,8 @@ public sealed class SessionManagerState
             Match(snapshot.Codex, query),
             Match(snapshot.Grok, query),
             Match(snapshot.Claude, query),
-            Match(snapshot.Continue, query))
+            Match(snapshot.Continue, query),
+            Match(snapshot.Kimi, query))
         {
             ConfiguredAgents = Array.AsReadOnly(snapshot.ConfiguredAgents.ToArray())
         };
