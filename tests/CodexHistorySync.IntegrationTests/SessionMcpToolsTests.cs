@@ -20,7 +20,7 @@ public sealed class SessionMcpToolsTests : IDisposable
         using var tools = new SessionMcpTools(catalog, index, reader);
 
         var results = await tools.SearchAsync("conversation");
-        Assert.Equal(5, results.Sessions.Count);
+        Assert.Equal(6, results.Sessions.Count);
         foreach (var agent in ManagedAgents.All)
         {
             var page = await tools.GetAsync(agent.ToString().ToLowerInvariant(), "shared-id");
