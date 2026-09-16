@@ -138,7 +138,7 @@ public sealed class ContinueManagementTests : IDisposable
         Assert.Contains(ManagedAgent.Continue, ManagedAgents.Destinations(ManagedAgent.Claude));
         Assert.Contains(ManagedAgent.Continue, ManagedAgents.Destinations(ManagedAgent.Codex));
         Assert.DoesNotContain(ManagedAgent.Continue, ManagedAgents.Destinations(ManagedAgent.Continue));
-        Assert.Equal(5, ManagedAgents.All.Count);
+        Assert.Equal(6, ManagedAgents.All.Count);
     }
 
     public void Dispose()
