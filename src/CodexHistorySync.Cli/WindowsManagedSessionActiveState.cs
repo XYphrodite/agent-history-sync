@@ -16,6 +16,7 @@ using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Kimi;
+using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Search;
 using CodexHistorySync.Core.Model;

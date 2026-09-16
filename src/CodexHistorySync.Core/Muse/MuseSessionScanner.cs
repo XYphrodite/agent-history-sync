@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Model;
 
 namespace CodexHistorySync.Core.Muse;

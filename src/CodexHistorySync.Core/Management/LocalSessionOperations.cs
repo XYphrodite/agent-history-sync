@@ -112,7 +112,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ContinuePaths? continuePaths = null,
         IConversationWriter? continueWriter = null,
         KimiPaths? kimiPaths = null,
-        IConversationWriter? kimiWriter = null)
+        IConversationWriter? kimiWriter = null,
+        MusePaths? musePaths = null,
+        IConversationWriter? museWriter = null)
         : this(
             codexPaths,
             grokPaths,
@@ -156,7 +158,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationReader? continueReader = null,
         KimiPaths? kimiPaths = null,
         IConversationWriter? kimiWriter = null,
-        IConversationReader? kimiReader = null)
+        IConversationReader? kimiReader = null,
+        MusePaths? musePaths = null,
+        IConversationWriter? museWriter = null,
+        IConversationReader? museReader = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -167,10 +172,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.continueWriter = continueWriter;
         this.continueReader = continueReader ?? new ContinueConversationReader();
         this.kimiPaths = kimiPaths;
-        this.musePaths = musePaths;
         this.kimiWriter = kimiWriter;
-        this.museWriter = museWriter;
         this.kimiReader = kimiReader ?? new KimiConversationReader();
+        this.musePaths = musePaths;
+        this.museWriter = museWriter;
         this.museReader = museReader ?? new MuseConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
@@ -539,11 +544,6 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             try
             {
                 _ = KimiSessionPackage.ToLogicalId(source.SessionId);
-                if (source.Agent == ManagedAgent.Muse)
-                {
-                    if (!Guid.TryParse(source.SessionId, out _)) throw new InvalidDataException("The selected Muse identity is invalid.");
-                    _ = MuseSessionPackage.ToLogicalId(source.SessionId);
-                }
             }
             catch (ArgumentException exception)
             {

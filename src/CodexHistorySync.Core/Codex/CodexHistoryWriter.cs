@@ -153,7 +153,20 @@ public sealed class CodexHistoryWriter
         if (local.Kind == ObjectKind.MuseSession)
         {
             if (_musePaths is null) throw new InvalidOperationException("Muse paths are not configured.");
-            return await ContentHashAsync(local.SourcePath, ObjectKind.MuseSession, cancellationToken).ConfigureAwait(false);
+            if (File.Exists(destination))
+                await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+            var museSessionDirectory = Path.GetDirectoryName(destination)!;
+            if (Directory.Exists(museSessionDirectory))
+            {
+                foreach (var file in Directory.EnumerateFiles(museSessionDirectory, "*",
+                             new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+                {
+                    await _backups.CreateAsync(file, operationId, ct).ConfigureAwait(false);
+                }
+            }
+            if (Directory.Exists(museSessionDirectory))
+                Directory.Delete(museSessionDirectory, recursive: true);
+            return TombstoneApplyResult.Applied;
         }
         if (local.Kind == ObjectKind.KimiSession)
         {
@@ -447,7 +460,7 @@ public sealed class CodexHistoryWriter
 
         try
         {
-            KimiSessionPackage.Materialize(package, _kimiPaths, _musePaths);
+            KimiSessionPackage.Materialize(package, _kimiPaths);
             var after = await ContentHashAsync(destination, ObjectKind.KimiSession, ct).ConfigureAwait(false);
             if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
                 throw new IOException("Kimi session materialization did not produce the authenticated package hash.");

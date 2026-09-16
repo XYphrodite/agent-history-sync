@@ -6,6 +6,9 @@ namespace CodexHistorySync.Core.Management;
 
 internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogIo io) : ILocalSessionCatalogSource
 {
+    private const int MaximumMetadataBytes = 64 * 1024;
+    private const int MaximumTitleLength = 80;
+
     public ManagedAgent Agent => ManagedAgent.Muse;
 
     public async Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(SessionCatalogReadLimiter limiter, CancellationToken cancellationToken)
@@ -48,7 +51,7 @@ internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogI
         try
         {
             var result = new List<(string, string)>();
-            foreach (var file in io.EnumerateFiles(paths.Sessions, MusePaths.SessionFileName, SearchOption.AllDirectories))
+            foreach (var file in io.EnumerateFiles(paths.Sessions, MusePaths.SessionFileName))
             {
                 var dir = Path.GetDirectoryName(file);
                 if (dir is null) continue;
@@ -69,16 +72,22 @@ internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogI
         var sessionFile = Path.Combine(directory, MusePaths.SessionFileName);
         try
         {
-            using var _ = await limiter.AcquireAsync(ct).ConfigureAwait(false);
-            var text = await File.ReadAllTextAsync(sessionFile, Encoding.UTF8, ct).ConfigureAwait(false);
-            // Try to extract first user message as title
-            var title = ExtractTitle(text);
-            var lastWrite = File.GetLastWriteTimeUtc(sessionFile);
-            return new Metadata(title, title is not null, lastWrite != default ? new DateTimeOffset(lastWrite, TimeSpan.Zero) : null, true);
+            if (!io.FileExists(sessionFile))
+                return new Metadata(null, null, false, false);
+
+            var prefix = await limiter.RunAsync(token => io.ReadPrefixAsync(sessionFile, MaximumMetadataBytes, token), ct).ConfigureAwait(false);
+            var title = ExtractTitle(prefix.Text);
+            var lastWrite = io.LastWriteTime(sessionFile);
+            var canRead = prefix.IsComplete;
+            return new Metadata(title, title is not null ? lastWrite : null, canRead, title is not null);
         }
-        catch
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            return new Metadata(null, false, null, false);
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DecoderFallbackException or ArgumentException)
+        {
+            return new Metadata(null, null, false, false);
         }
     }
 
@@ -86,36 +95,20 @@ internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogI
     {
         try
         {
-            // Look for first user prompt in the jsonl
             foreach (var line in content.Split('\n'))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
-                if (line.Contains("\"text\":\"") && line.Contains("Explore"))
-                {
-                    var idx = line.IndexOf("\"text\":\"", StringComparison.Ordinal);
-                    if (idx >= 0)
-                    {
-                        var start = idx + 8;
-                        var end = line.IndexOf("\"", start, StringComparison.Ordinal);
-                        if (end > start)
-                        {
-                            var text = line[start..end];
-                            if (!string.IsNullOrWhiteSpace(text))
-                                return text.Length > 80 ? text[..80] : text;
-                        }
-                    }
-                }
-                // Also try to parse as json and look for payload
                 try
                 {
                     using var doc = JsonDocument.Parse(line);
-                    // Check for different payload structures
                     var root = doc.RootElement;
                     if (root.TryGetProperty("payload", out var payload) && payload.TryGetProperty("record", out var record))
                     {
                         if (record.TryGetProperty("prompt", out var prompt) && prompt.ValueKind == JsonValueKind.String)
-                            return prompt.GetString();
+                            return NormalizeTitle(prompt.GetString());
                     }
+                    if (root.TryGetProperty("role", out var role) && role.GetString() == "user" && root.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+                        return NormalizeTitle(text.GetString());
                 }
                 catch { }
             }
@@ -127,14 +120,14 @@ internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogI
     private static string DisplayTitle(string? title, string sessionId) =>
         string.IsNullOrWhiteSpace(title) ? sessionId : title.Length > 80 ? title[..80] : title;
 
-    private static string? NormalizeTitle(string? title) => string.IsNullOrWhiteSpace(title) ? null : title.Trim();
+    private static string? NormalizeTitle(string? title) => string.IsNullOrWhiteSpace(title) ? null : string.Join(' ', title.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-    private static DateTimeOffset LastWriteTime(string path)
+    private DateTimeOffset LastWriteTime(string path)
     {
-        try { return new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero); }
-        catch { return DateTimeOffset.UtcNow; }
+        try { return io.LastWriteTime(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return DateTimeOffset.MinValue; }
     }
 
     private sealed record CandidateResult(string SessionId, string NativePath, Metadata Metadata);
-    private sealed record Metadata(string? Title, bool TitleIsOfficial, DateTimeOffset? LastModifiedAt, bool CanRead);
+    private sealed record Metadata(string? Title, DateTimeOffset? LastModifiedAt, bool CanRead, bool TitleIsOfficial);
 }

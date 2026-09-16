@@ -40,7 +40,8 @@ public sealed class AnnotatedSessionCatalog(
             Overlay(snapshot.Grok, stored),
             Overlay(snapshot.Claude, stored),
             Overlay(snapshot.Continue, stored),
-            Overlay(snapshot.Kimi, stored))
+            Overlay(snapshot.Kimi, stored),
+            Overlay(snapshot.Muse, stored))
         {
             ConfiguredAgents = snapshot.ConfiguredAgents
         };

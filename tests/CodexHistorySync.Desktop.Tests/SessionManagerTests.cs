@@ -146,7 +146,7 @@ public sealed class SessionManagerTests
             new SessionCatalogSnapshot(
                 [Session("first", "First session", isActive: activeId == "first", canRead: unreadableId != "first"),
                  Session("second", "Second session", isActive: activeId == "second", canRead: unreadableId != "second")],
-                [], [], [], []));
+                [], [], [], [], []));
     }
 
     private sealed class FakeTraces(string? unreadableId) : ISessionTraceReader

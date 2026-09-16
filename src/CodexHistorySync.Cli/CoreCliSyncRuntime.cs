@@ -44,6 +44,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly string? claudeHome;
     private readonly string? continueHome;
     private readonly string? kimiHome;
+    private readonly string? museHome;
     private readonly Action<SyncProgress>? syncProgress;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
@@ -75,7 +76,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         Action<SyncProgress>? syncProgress = null,
         string? claudeHome = null,
         string? continueHome = null,
-        string? kimiHome = null)
+        string? kimiHome = null,
+        string? museHome = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -89,6 +91,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.claudeHome = claudeHome;
         this.continueHome = continueHome;
         this.kimiHome = kimiHome;
+        this.museHome = museHome;
         this.syncProgress = syncProgress;
     }
 
@@ -209,7 +212,6 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         // at all, which is what tells the user why no Claude panel or sessions appear.
         checks.Add(new("claude-paths", ClaudePaths.TryResolve(claudeHome) is not null));
         checks.Add(new("continue-paths", ContinuePaths.TryResolve(continueHome) is not null));
-        checks.Add(new("muse-paths", MusePaths.TryResolve(museHome) is not null));
         checks.Add(new("kimi-paths", KimiPaths.TryResolve(kimiHome) is not null));
         checks.Add(new("muse-paths", MusePaths.TryResolve(museHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));

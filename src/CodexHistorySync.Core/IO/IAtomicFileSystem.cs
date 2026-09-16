@@ -290,7 +290,7 @@ internal static class PathSafety
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
         Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null,
-        string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null)
+        string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null, Muse.MusePaths? musePaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
         if (kind == ObjectKind.SessionAnnotations)
@@ -392,6 +392,17 @@ internal static class PathSafety
                 throw new ArgumentException("The Kimi session index is not a session destination.", parameterName);
             if (!kimiPaths.IsSynchronizedSessionFile(canonical))
                 throw new ArgumentException("Kimi session destinations must be state.json, a wire.jsonl, or a plan file inside one session directory.", parameterName);
+            return canonical;
+        }
+
+        if (kind == ObjectKind.MuseSession)
+        {
+            if (musePaths is null) throw new ArgumentException("Muse paths are required for Muse session destinations.", parameterName);
+            if (!CodexPaths.IsPathWithin(canonical, musePaths.Sessions) ||
+                StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(musePaths.Sessions)))
+                throw new ArgumentException("The destination is outside the synchronized Muse sessions directory.", parameterName);
+            if (!musePaths.IsSynchronizedSessionFile(canonical))
+                throw new ArgumentException("Muse session destinations must be session.jsonl inside one session directory.", parameterName);
             return canonical;
         }
 

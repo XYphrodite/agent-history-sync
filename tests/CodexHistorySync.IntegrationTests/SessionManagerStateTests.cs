@@ -357,7 +357,7 @@ public sealed class SessionManagerStateTests
 
     private static SessionCatalogSnapshot FiveAgentSnapshot(
         IReadOnlyList<ManagedSession> kimi) =>
-        new([], [], [Session(ManagedAgent.Claude, "claude-one")], [], kimi) { ConfiguredAgents = ManagedAgents.All };
+        new([], [], [Session(ManagedAgent.Claude, "claude-one")], [], kimi, []) { ConfiguredAgents = ManagedAgents.All };
 
     private static ManagedSession Session(ManagedAgent agent, string id, string? title = null) =>
         new(agent, id, $"C:\\injected\\{id}", title ?? id, DateTimeOffset.UnixEpoch, false, true);

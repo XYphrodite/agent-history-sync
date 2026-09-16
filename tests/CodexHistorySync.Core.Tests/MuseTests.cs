@@ -44,7 +44,8 @@ public sealed class MuseTests
     public void MuseSessionPackage_BuildAndParseRoundTrips()
     {
         var sessionId = Guid.NewGuid().ToString();
-        var dir = Path.Combine(Path.GetTempPath(), "muse-pack-" + sessionId);
+        var parent = Path.Combine(Path.GetTempPath(), "muse-pack-" + Guid.NewGuid().ToString("N"));
+        var dir = Path.Combine(parent, sessionId);
         Directory.CreateDirectory(dir);
         try
         {
@@ -78,7 +79,7 @@ public sealed class MuseTests
         }
         finally
         {
-            try { Directory.Delete(dir, true); } catch { }
+            try { Directory.Delete(parent, true); } catch { }
         }
     }
 

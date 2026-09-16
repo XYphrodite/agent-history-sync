@@ -52,6 +52,8 @@ public sealed class AnnotatedSessionCatalogTests
                 [Session("shared-id", "shared-id", ManagedTitleSource.SessionId, ManagedAgent.Codex)],
                 [],
                 [Session("shared-id", "shared-id", ManagedTitleSource.SessionId)],
+                [],
+                [],
                 [])),
             new StubStore(new Dictionary<SessionAnnotationKey, SessionAnnotation>
             {
@@ -75,7 +77,8 @@ public sealed class AnnotatedSessionCatalogTests
                 [],
                 [],
                 [],
-                [Session("kimi-one", "kimi-one", ManagedTitleSource.SessionId, ManagedAgent.Kimi)])
+                [Session("kimi-one", "kimi-one", ManagedTitleSource.SessionId, ManagedAgent.Kimi)],
+                [])
             {
                 ConfiguredAgents = [ManagedAgent.Kimi]
             }),
@@ -108,7 +111,7 @@ public sealed class AnnotatedSessionCatalogTests
     public async Task ScanAsync_ReturnsTheInnerSnapshotWhenNothingIsAnnotated()
     {
         var inner = new SessionCatalogSnapshot(
-            [], [], [Session("claude-one", "claude-one", ManagedTitleSource.SessionId)], []);
+            [], [], [Session("claude-one", "claude-one", ManagedTitleSource.SessionId)], [], [], []);
 
         var snapshot = await new AnnotatedSessionCatalog(
             new StubCatalog(inner),
@@ -136,7 +139,7 @@ public sealed class AnnotatedSessionCatalogTests
     public async Task ScanAsync_KeepsTheConfiguredAgentsOfTheInnerSnapshot()
     {
         var inner = new SessionCatalogSnapshot(
-            [], [], [Session("claude-one", "claude-one", ManagedTitleSource.SessionId)], [])
+            [], [], [Session("claude-one", "claude-one", ManagedTitleSource.SessionId)], [], [], [])
         {
             ConfiguredAgents = [ManagedAgent.Claude]
         };
@@ -173,7 +176,7 @@ public sealed class AnnotatedSessionCatalogTests
         ManagedSession[] claude,
         params (ManagedAgent Agent, string SessionId, SessionAnnotation Annotation)[] annotations) =>
         new(
-            new StubCatalog(new SessionCatalogSnapshot([], [], claude, [])),
+            new StubCatalog(new SessionCatalogSnapshot([], [], claude, [], [], [])),
             new StubStore(annotations.ToDictionary(
                 entry => new SessionAnnotationKey(entry.Agent, entry.SessionId),
                 entry => entry.Annotation)));

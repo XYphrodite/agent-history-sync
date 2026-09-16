@@ -117,7 +117,7 @@ public sealed class SessionMcpToolsTests : IDisposable
             var grouped = Sessions.ToLookup(session => session.Agent);
             return new SessionCatalogSnapshot(grouped[ManagedAgent.Codex].ToArray(), grouped[ManagedAgent.Grok].ToArray(),
                 grouped[ManagedAgent.Claude].ToArray(), grouped[ManagedAgent.Continue].ToArray(),
-                grouped[ManagedAgent.Kimi].ToArray()) { ConfiguredAgents = ManagedAgents.All };
+                grouped[ManagedAgent.Kimi].ToArray(), grouped[ManagedAgent.Muse].ToArray()) { ConfiguredAgents = ManagedAgents.All };
         }
     }
 
