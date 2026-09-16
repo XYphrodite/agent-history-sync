@@ -17,6 +17,7 @@ using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Kimi;
+using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Search;
 using CodexHistorySync.Core.Model;
@@ -189,7 +190,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             ContinueSessions = preview.LocalByKind.TryGetValue(ObjectKind.ContinueSession, out var continueCount) ? continueCount : 0,
             ContinueUncertain = preview.UncertainKinds.Contains(ObjectKind.ContinueSession),
             KimiHome = KimiPaths.TryResolve(kimiHome)?.Sessions,
+            MuseHome = MusePaths.TryResolve(museHome)?.Sessions,
+            MuseSessions = preview.LocalByKind.TryGetValue(ObjectKind.MuseSession, out var museCount) ? museCount : 0,
             KimiSessions = preview.LocalByKind.TryGetValue(ObjectKind.KimiSession, out var kimiCount) ? kimiCount : 0,
+            MuseUncertain = preview.UncertainKinds.Contains(ObjectKind.MuseSession),
             KimiUncertain = preview.UncertainKinds.Contains(ObjectKind.KimiSession)
         };
     }
@@ -205,7 +209,9 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         // at all, which is what tells the user why no Claude panel or sessions appear.
         checks.Add(new("claude-paths", ClaudePaths.TryResolve(claudeHome) is not null));
         checks.Add(new("continue-paths", ContinuePaths.TryResolve(continueHome) is not null));
+        checks.Add(new("muse-paths", MusePaths.TryResolve(museHome) is not null));
         checks.Add(new("kimi-paths", KimiPaths.TryResolve(kimiHome) is not null));
+        checks.Add(new("muse-paths", MusePaths.TryResolve(museHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));
         var serverStorage = configuration is not null && StoreEndpoint.IsServerUrl(configuration.RemoteUrl);
         if (!serverStorage) checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
@@ -262,6 +268,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var claudePaths = ClaudePaths.TryResolve(claudeHome);
         var continuePaths = ContinuePaths.TryResolve(continueHome);
         var kimiPaths = KimiPaths.TryResolve(kimiHome);
+        var musePaths = MusePaths.TryResolve(museHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
         var annotationsDirectory = new SessionAnnotationStore(localAppData).Directory;

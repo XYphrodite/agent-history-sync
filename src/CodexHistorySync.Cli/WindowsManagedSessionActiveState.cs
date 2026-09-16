@@ -39,6 +39,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     private readonly GrokPaths? grokPaths;
     private readonly ClaudePaths? claudePaths;
     private readonly KimiPaths? kimiPaths;
+    private readonly MusePaths? musePaths;
     private readonly Func<int, string, bool> isNamedProcessRunning;
     private readonly Func<string, bool> isExclusiveLockHeld;
     private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
@@ -48,7 +49,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     private readonly Func<DateTime> utcNow;
 
     public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths, ClaudePaths? claudePaths = null,
-        KimiPaths? kimiPaths = null)
+        KimiPaths? kimiPaths = null,
+        MusePaths? musePaths = null)
         : this(
             codexPaths,
             grokPaths,
@@ -75,12 +77,14 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         Func<string, bool>? isAnyNamedProcessRunning = null,
         Func<string, DateTime?>? lastWriteTimeUtc = null,
         Func<DateTime>? utcNow = null,
-        KimiPaths? kimiPaths = null)
+        KimiPaths? kimiPaths = null,
+        MusePaths? musePaths = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
         this.claudePaths = claudePaths;
         this.kimiPaths = kimiPaths;
+        this.musePaths = musePaths;
         this.isAnyNamedProcessRunning = isAnyNamedProcessRunning ?? IsAnyNamedProcessRunning;
         this.lastWriteTimeUtc = lastWriteTimeUtc ?? (path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null);
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -117,6 +121,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ManagedAgent.Grok => ReadGrokActiveIds(),
         ManagedAgent.Claude => ReadClaudeActiveIds(),
         ManagedAgent.Kimi => ReadKimiActiveIds(),
+        ManagedAgent.Muse => ReadMuseActiveIds(),
         _ => EmptyIds
     };
 
@@ -142,6 +147,24 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
                     (wireWrite is { } wire && wire >= activeSince))
                     ids.Add(sessionName[KimiPaths.SessionIdPrefix.Length..]);
             }
+
+        return ids;
+    }
+
+    private IReadOnlySet<string> ReadMuseActiveIds()
+    {
+        if (musePaths is null || !isAnyNamedProcessRunning("muse")) return EmptyIds;
+
+        var activeSince = utcNow() - MuseSessionScanner.DefaultActivityWindow;
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in EnumerateFiles(musePaths.Sessions, MusePaths.SessionFileName))
+        {
+            var dir = Path.GetDirectoryName(file);
+            if (dir is null) continue;
+            var sessionId = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (!Guid.TryParse(sessionId, out _)) continue;
+            if (lastWriteTimeUtc(file) is { } written && written >= activeSince) ids.Add(sessionId);
+        }
 
         return ids;
     }

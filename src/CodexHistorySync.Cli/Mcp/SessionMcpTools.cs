@@ -136,6 +136,7 @@ internal sealed class SessionMcpTools(
         "claude" => ManagedAgent.Claude,
         "continue" => ManagedAgent.Continue,
         "kimi" => ManagedAgent.Kimi,
+        "muse" => ManagedAgent.Muse,
         _ => throw new McpException("agent must be codex, grok, claude, continue, or kimi.")
     };
 

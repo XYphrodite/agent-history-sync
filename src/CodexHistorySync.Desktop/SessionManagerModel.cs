@@ -35,7 +35,7 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
     public ObservableCollection<ManagedSession> Sessions { get; } = [];
     public ObservableCollection<TraceEntryModel> Entries { get; } = [];
     public ObservableCollection<TraceSearchMatch> Matches { get; } = [];
-    public IReadOnlyList<string> Agents { get; } = ["All agents", "Codex", "Grok", "Claude", "Continue", "Kimi"];
+    public IReadOnlyList<string> Agents { get; } = ["All agents", "Codex", "Grok", "Claude", "Continue", "Kimi", "Muse"];
 
     public string BuildLabel => services.BuildLabel;
     public string Agent { get => agent; set => Set(ref agent, value); }

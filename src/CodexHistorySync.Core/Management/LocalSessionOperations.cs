@@ -6,6 +6,7 @@ using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Kimi;
+using CodexHistorySync.Core.Muse;
 
 namespace CodexHistorySync.Core.Management;
 
@@ -22,10 +23,13 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly ClaudePaths? claudePaths;
     private readonly ContinuePaths? continuePaths;
     private readonly KimiPaths? kimiPaths;
+    private readonly MusePaths? musePaths;
     private readonly IConversationWriter? continueWriter;
     private readonly IConversationReader continueReader;
     private readonly IConversationWriter? kimiWriter;
+    private readonly IConversationWriter? museWriter;
     private readonly IConversationReader kimiReader;
+    private readonly IConversationReader museReader;
     private readonly IManagedSessionActiveState activeState;
     private readonly IManagedSessionDirectoryDeleter directoryDeleter;
     private readonly IConversationWriter? codexWriter;
@@ -78,6 +82,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         "The selected Kimi target is invalid.",
         "The selected Kimi identity is invalid.",
         "Kimi conversation is invalid.",
+        "Muse conversation is invalid.",
+        "The staged Muse conversation failed validation.",
+        "The selected Muse target is invalid.",
+        "The selected Muse identity is invalid.",
         "The staged Kimi conversation failed validation.",
         "The selected Grok identity is invalid.",
         "The selected agent is invalid.",
@@ -123,7 +131,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             new ContinueConversationReader(),
             kimiPaths,
             kimiWriter,
-            new KimiConversationReader())
+            new KimiConversationReader(),
+            musePaths,
+            museWriter,
+            new MuseConversationReader())
     {
     }
 
@@ -156,8 +167,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.continueWriter = continueWriter;
         this.continueReader = continueReader ?? new ContinueConversationReader();
         this.kimiPaths = kimiPaths;
+        this.musePaths = musePaths;
         this.kimiWriter = kimiWriter;
+        this.museWriter = museWriter;
         this.kimiReader = kimiReader ?? new KimiConversationReader();
+        this.museReader = museReader ?? new MuseConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
         this.codexWriter = codexWriter;
@@ -249,6 +263,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Claude => claudeWriter,
         ManagedAgent.Continue => continueWriter,
         ManagedAgent.Kimi => kimiWriter,
+        ManagedAgent.Muse => museWriter,
         _ => null
     };
 
@@ -259,6 +274,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Claude => claudeReader,
         ManagedAgent.Continue => continueReader,
         ManagedAgent.Kimi => kimiReader,
+        ManagedAgent.Muse => museReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 
@@ -523,6 +539,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             try
             {
                 _ = KimiSessionPackage.ToLogicalId(source.SessionId);
+                if (source.Agent == ManagedAgent.Muse)
+                {
+                    if (!Guid.TryParse(source.SessionId, out _)) throw new InvalidDataException("The selected Muse identity is invalid.");
+                    _ = MuseSessionPackage.ToLogicalId(source.SessionId);
+                }
             }
             catch (ArgumentException exception)
             {
@@ -628,6 +649,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ManagedAgent.Claude => ConversationAgent.Claude,
             ManagedAgent.Continue => ConversationAgent.Continue,
             ManagedAgent.Kimi => ConversationAgent.Kimi,
+            ManagedAgent.Muse => ConversationAgent.Muse,
             _ => throw new InvalidDataException("The selected agent is invalid.")
         };
         if (conversation.SourceAgent != expectedAgent ||

@@ -6,6 +6,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Kimi;
+using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
 
@@ -33,6 +34,7 @@ public sealed class CodexHistoryWriter
     private readonly ClaudePaths? _claudePaths;
     private readonly ContinuePaths? _continuePaths;
     private readonly KimiPaths? _kimiPaths;
+    private readonly MusePaths? _musePaths;
     private readonly string? _annotationsDirectory;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
@@ -42,7 +44,7 @@ public sealed class CodexHistoryWriter
 
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
         IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null,
-        ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null)
+        ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, MusePaths? musePaths = null)
     {
         _annotationsDirectory = annotationsDirectory;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -53,12 +55,13 @@ public sealed class CodexHistoryWriter
         _claudePaths = claudePaths;
         _continuePaths = continuePaths;
         _kimiPaths = kimiPaths;
+        _musePaths = musePaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -70,7 +73,7 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         ct.ThrowIfCancellationRequested();
@@ -88,6 +91,8 @@ public sealed class CodexHistoryWriter
         if (incoming.Kind == ObjectKind.ContinueSession)
             return await ImportContinuePackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.MuseSession)
+            return await ImportMusePackageAsync(incoming, plaintext, operationId, expected, destination, ct);
         if (incoming.Kind == ObjectKind.KimiSession)
             return await ImportKimiPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
@@ -126,7 +131,7 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
@@ -145,6 +150,11 @@ public sealed class CodexHistoryWriter
             return TombstoneApplyResult.Applied;
         }
 
+        if (local.Kind == ObjectKind.MuseSession)
+        {
+            if (_musePaths is null) throw new InvalidOperationException("Muse paths are not configured.");
+            return await ContentHashAsync(local.SourcePath, ObjectKind.MuseSession, cancellationToken).ConfigureAwait(false);
+        }
         if (local.Kind == ObjectKind.KimiSession)
         {
             // Package hash is not the raw state.json hash. Every synchronizable file is backed up
@@ -437,7 +447,7 @@ public sealed class CodexHistoryWriter
 
         try
         {
-            KimiSessionPackage.Materialize(package, _kimiPaths);
+            KimiSessionPackage.Materialize(package, _kimiPaths, _musePaths);
             var after = await ContentHashAsync(destination, ObjectKind.KimiSession, ct).ConfigureAwait(false);
             if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
                 throw new IOException("Kimi session materialization did not produce the authenticated package hash.");
@@ -462,7 +472,7 @@ public sealed class CodexHistoryWriter
     /// </summary>
     private static bool IsPackageBackedKind(ObjectKind kind) =>
         kind is ObjectKind.GrokSession or ObjectKind.ClaudeSession or ObjectKind.ClaudeMemory
-            or ObjectKind.ContinueSession or ObjectKind.KimiSession;
+            or ObjectKind.ContinueSession or ObjectKind.KimiSession or ObjectKind.MuseSession;
 
     private bool EnsureAgentInactive(ObjectKind kind)
     {
@@ -474,7 +484,7 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         ct.ThrowIfCancellationRequested();
         EnsureAgentInactive(plan.Target.Kind);
@@ -494,14 +504,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         ct.ThrowIfCancellationRequested();
@@ -696,4 +706,37 @@ public sealed class CodexHistoryWriter
         catch (JsonException exception) { throw new InvalidDataException("Session JSONL contains malformed JSON.", exception); }
         if (found is null || found.Value != expectedId) throw new InvalidDataException("Session JSONL ID does not match its logical object ID.");
     }
+    private async Task<ImportApplyResult> ImportMusePackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_musePaths is null) throw new InvalidOperationException("Muse paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = MuseSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        var package = MuseSessionPackage.Parse(packageBytes);
+        if (!string.Equals(MuseSessionPackage.ToLogicalId(package.SessionId), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Muse session package id does not match the logical object id.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.MuseSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists && File.Exists(destination))
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+
+        try
+        {
+            MuseSessionPackage.Materialize(package, _musePaths);
+            var after = await ContentHashAsync(destination, ObjectKind.MuseSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Muse session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
 }

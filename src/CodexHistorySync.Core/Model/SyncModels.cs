@@ -46,7 +46,15 @@ public enum ObjectKind
     /// appended last, and carrying the same obligation: upgrade every machine before the first
     /// push that includes one.
     /// </summary>
-    KimiSession
+    KimiSession,
+
+    /// <summary>
+    /// Muse session package (session.jsonl plus subagent sessions under
+    /// ~/.local/share/muse/sessions). Appended after KimiSession for the same reason that one was
+    /// appended last, and carrying the same obligation: upgrade every machine before the first
+    /// push that includes one.
+    /// </summary>
+    MuseSession
 }
 
 public readonly record struct LogicalObjectId(string Value);
