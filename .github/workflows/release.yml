@@ -23,6 +23,11 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: XYphrodite/self-update-kit
+          ref: v0.3.0
+          path: ../self-update-kit
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
@@ -47,7 +52,7 @@ jobs:
         with:
           repository: XYphrodite/self-update-kit
           ref: v0.3.0
-          path: self-update-kit
+          path: ../self-update-kit
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
