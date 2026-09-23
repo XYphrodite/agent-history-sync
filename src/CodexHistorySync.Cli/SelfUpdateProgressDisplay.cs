@@ -1,4 +1,4 @@
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -73,10 +73,11 @@ internal sealed class SelfUpdateProgressDisplay(IAnsiConsole console)
                         {
                             // A chunked response may carry no length; keep an indeterminate bar
                             // until we know the total, rather than inventing a percentage or ETA.
+                            var received = progress.ReceivedBytes ?? 0;
                             task.MaxValue = progress.TotalBytes is > 0
-                                ? Math.Max(progress.TotalBytes.Value, progress.ReceivedBytes)
-                                : Math.Max(1, (double)progress.ReceivedBytes + 1);
-                            task.Value = progress.ReceivedBytes;
+                                ? Math.Max(progress.TotalBytes.Value, received)
+                                : Math.Max(1, (double)received + 1);
+                            task.Value = received;
                         }
                     }).ConfigureAwait(false);
                 }

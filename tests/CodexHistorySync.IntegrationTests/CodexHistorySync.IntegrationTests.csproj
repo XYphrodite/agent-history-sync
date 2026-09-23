@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\src\CodexHistorySync.Cli\CodexHistorySync.Cli.csproj" />
     <ProjectReference Include="..\..\src\CodexHistorySync.Core\CodexHistorySync.Core.csproj" />
     <ProjectReference Include="..\..\src\CodexHistorySync.Git\CodexHistorySync.Git.csproj" />
+    <ProjectReference Include="..\..\..\self-update-kit\src\SelfUpdateKit\SelfUpdateKit.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,5 +1,6 @@
 using System.Net;
 using CodexHistorySync.Cli;
+using SelfUpdateKit;
 
 namespace CodexHistorySync.IntegrationTests;
 
@@ -14,7 +15,7 @@ public sealed class GitHubReleaseSourceTests
     [InlineData(null, null)]
     public async Task ReadsOptionalNotesAndBuildsALinkToTheTrustedRepository(string? bodyJson, string? expected)
     {
-        using var source = new GitHubReleaseSource(new ReleaseHandler(bodyJson));
+        using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), new ReleaseHandler(bodyJson));
 
         var release = await source.ResolveAsync(null, CancellationToken.None);
 

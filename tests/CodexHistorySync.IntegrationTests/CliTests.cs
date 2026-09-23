@@ -8,7 +8,7 @@ using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 using CodexHistorySync.Windows;
 
 namespace CodexHistorySync.IntegrationTests;

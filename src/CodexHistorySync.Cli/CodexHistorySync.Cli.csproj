@@ -8,6 +8,7 @@
     <ProjectReference Include="..\CodexHistorySync.Remote\CodexHistorySync.Remote.csproj" />
     <ProjectReference Include="..\CodexHistorySync.Windows\CodexHistorySync.Windows.csproj" />
     <ProjectReference Include="..\CodexHistorySync.Desktop\CodexHistorySync.Desktop.csproj" />
+    <ProjectReference Include="..\..\..\self-update-kit\src\SelfUpdateKit\SelfUpdateKit.csproj" />
   </ItemGroup>
 
   <ItemGroup>

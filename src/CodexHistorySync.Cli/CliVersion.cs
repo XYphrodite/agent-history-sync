@@ -1,5 +1,5 @@
 using System.Reflection;
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 
 namespace CodexHistorySync.Cli;
 

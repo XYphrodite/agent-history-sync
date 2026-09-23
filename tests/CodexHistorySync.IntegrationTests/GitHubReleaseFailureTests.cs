@@ -1,82 +1,100 @@
 using System.Net;
 using System.Net.Http.Headers;
 using CodexHistorySync.Cli;
+using SelfUpdateKit;
 
 namespace CodexHistorySync.IntegrationTests;
 
 /// <summary>
 /// Every refusal used to read "The release could not be read from GitHub", which sent the reader
-/// to look at a release that was published and intact. These pin the four causes apart.
+/// to look at a release that was published and intact. These pin the four causes apart, through
+/// the wired agent-sync source rather than the kit internals.
 /// </summary>
 public sealed class GitHubReleaseFailureTests
 {
-    private const string Subject = "The release could not be read from GitHub";
-
-    // 2026-09-03 16:40:24 UTC, with a rate limit that resets at 16:42:19 - the real refusal this
-    // was written for, kept as an absolute instant so the wait does not depend on the test clock.
-    private static readonly DateTimeOffset Now = new(2026, 9, 3, 16, 40, 24, TimeSpan.Zero);
-    private const string ResetsAt164219 = "1788453739";
-
     [Fact]
-    public void AUsedUpRateLimitSaysSoAndSaysHowLongTheWaitIs()
+    public async Task AUsedUpRateLimitSaysSoAndSaysHowLongTheWaitIs()
     {
-        var headers = Headers(("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", ResetsAt164219));
+        var reset = DateTimeOffset.UtcNow.AddSeconds(119);
+        using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), Refused(HttpStatusCode.Forbidden,
+            ("X-RateLimit-Remaining", "0"),
+            ("X-RateLimit-Reset", reset.ToUnixTimeSeconds().ToString())));
 
-        var message = GitHubReleaseSource.DescribeFailure(Subject, HttpStatusCode.Forbidden, headers, Now);
+        var failure = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            source.ResolveAsync(null, CancellationToken.None));
 
-        Assert.Contains("rate limit", message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("2 minutes from now", message, StringComparison.Ordinal);
-        Assert.Contains("60 requests an hour", message, StringComparison.Ordinal);
+        Assert.Contains("rate limit", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("2 minutes from now", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("60 requests an hour", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void AForbiddenWithBudgetLeftIsNotReportedAsARateLimit()
+    public async Task AForbiddenWithBudgetLeftIsNotReportedAsARateLimit()
     {
         // 403 is also how GitHub refuses things no amount of waiting will fix. Telling the
         // operator to wait for a limit that is not spent is worse than saying nothing.
-        var headers = Headers(("X-RateLimit-Remaining", "57"));
+        using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), Refused(HttpStatusCode.Forbidden,
+            ("X-RateLimit-Remaining", "57")));
 
-        var message = GitHubReleaseSource.DescribeFailure(Subject, HttpStatusCode.Forbidden, headers, Now);
+        var failure = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            source.ResolveAsync(null, CancellationToken.None));
 
-        Assert.DoesNotContain("rate limit", message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("403", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("rate limit", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("403", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ASecondaryLimitIsARateLimitEvenWithNoBudgetHeaders()
+    public async Task ASecondaryLimitIsARateLimitEvenWithNoBudgetHeaders()
     {
         // A secondary limit answers 429 and carries Retry-After instead of a budget.
-        var headers = Headers();
-        headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromMinutes(4));
+        var refused = new HttpResponseMessage((HttpStatusCode)429);
+        refused.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromMinutes(4));
+        using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), Fixed(refused));
 
-        var message = GitHubReleaseSource.DescribeFailure(Subject, HttpStatusCode.TooManyRequests, headers, Now);
+        var failure = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            source.ResolveAsync(null, CancellationToken.None));
 
-        Assert.Contains("rate limit", message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("4 minutes from now", message, StringComparison.Ordinal);
+        Assert.Contains("rate limit", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("4 minutes from now", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void AMissingReleaseNamesTheOtherThingsThatLookTheSame()
+    public async Task AMissingReleaseNamesTheOtherThingsThatLookTheSame()
     {
-        var message = GitHubReleaseSource.DescribeFailure(Subject, HttpStatusCode.NotFound, Headers(), Now);
+        using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), Fixed(new HttpResponseMessage(HttpStatusCode.NotFound)));
 
-        Assert.DoesNotContain("rate limit", message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("renamed or made private", message, StringComparison.Ordinal);
+        var failure = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            source.ResolveAsync(null, CancellationToken.None));
+
+        Assert.DoesNotContain("rate limit", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("renamed or made private", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void AnythingElseCarriesTheStatusGitHubAnswered()
+    public async Task AnythingElseCarriesTheStatusGitHubAnswered()
     {
-        var message = GitHubReleaseSource.DescribeFailure(Subject, HttpStatusCode.BadGateway, Headers(), Now);
+        using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), Fixed(new HttpResponseMessage(HttpStatusCode.BadGateway)));
 
-        Assert.Contains("502", message, StringComparison.Ordinal);
-        Assert.StartsWith(Subject, message, StringComparison.Ordinal);
+        var failure = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            source.ResolveAsync(null, CancellationToken.None));
+
+        Assert.Contains("502", failure.Message, StringComparison.Ordinal);
+        Assert.StartsWith("The release could not be read from GitHub", failure.Message, StringComparison.Ordinal);
     }
 
-    private static HttpResponseHeaders Headers(params (string Name, string Value)[] values)
+    private static HttpMessageHandler Refused(HttpStatusCode status, params (string Name, string Value)[] headers)
     {
-        using var response = new HttpResponseMessage();
-        foreach (var (name, value) in values) response.Headers.Add(name, value);
-        return response.Headers;
+        var refused = new HttpResponseMessage(status);
+        foreach (var (name, value) in headers) refused.Headers.Add(name, value);
+        return Fixed(refused);
+    }
+
+    private static HttpMessageHandler Fixed(HttpResponseMessage response) =>
+        new FixedHandler(response);
+
+    private sealed class FixedHandler(HttpResponseMessage response) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(response);
     }
 }

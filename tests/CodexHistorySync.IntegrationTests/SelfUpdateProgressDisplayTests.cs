@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Cli;
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 using Spectre.Console;
 
 namespace CodexHistorySync.IntegrationTests;
@@ -176,7 +176,7 @@ public sealed class SelfUpdateProgressDisplayTests
         await Assert.ThrowsAsync<InvalidDataException>(() => fixture.RunAsync(interactive: true));
 
         Assert.Equal("installed", File.ReadAllText(fixture.Installed));
-        Assert.Empty(Directory.GetDirectories(fixture.DirectoryPath, ".agent-sync-update-*"));
+        Assert.Empty(Directory.GetDirectories(fixture.DirectoryPath, ".self-update-*"));
         // A failed live display must release the console so the command can print its error.
         await fixture.Console!.Status().StartAsync("Next operation", _ => Task.CompletedTask);
         Assert.DoesNotContain("Installing and checking", fixture.Output.ToString());
@@ -208,7 +208,7 @@ public sealed class SelfUpdateProgressDisplayTests
                 ColorSystem = ColorSystemSupport.NoColors,
                 Out = new ConsoleOutput(Output, interactive, Width)
             });
-            using var source = new GitHubReleaseSource(Handler);
+            using var source = new GitHubReleaseSource(AgentSyncUpdate.Options(), Handler);
             var service = new SelfUpdateService(Installed, InstalledVersion, source,
                 probe: async (_, ct) =>
                 {

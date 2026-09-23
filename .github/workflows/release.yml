@@ -42,6 +42,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout shared self-update-kit
+        uses: actions/checkout@v4
+        with:
+          repository: XYphrodite/self-update-kit
+          ref: v0.3.0
+          path: self-update-kit
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:

@@ -6,7 +6,7 @@ using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 
 namespace CodexHistorySync.Cli;
 

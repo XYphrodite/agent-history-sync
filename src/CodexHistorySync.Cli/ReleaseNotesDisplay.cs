@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text;
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 using Spectre.Console;
 
 namespace CodexHistorySync.Cli;

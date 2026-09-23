@@ -1,5 +1,4 @@
-using System.Diagnostics;
-using CodexHistorySync.Core.Update;
+using SelfUpdateKit;
 using Spectre.Console;
 
 namespace CodexHistorySync.Cli;
@@ -7,12 +6,12 @@ namespace CodexHistorySync.Cli;
 /// <summary>
 /// Wires the update service to this process: the binary it replaces is the one running, and
 /// the probe that decides whether the replacement worked is that binary answering
-/// <c>--help</c>, a switch every published release answers.
+/// <c>--help</c>, a switch every published release answers. The probe and the install rules
+/// come from the shared kit; this class only fixes the repository and the display.
 /// </summary>
 internal sealed class DefaultSelfUpdateOperations : ISelfUpdateOperations
 {
     private const string InstalledExecutable = "agent-sync.exe";
-    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(30);
 
     private readonly Func<string?> resolveExecutablePath;
 
@@ -30,39 +29,10 @@ internal sealed class DefaultSelfUpdateOperations : ISelfUpdateOperations
             !string.Equals(Path.GetFileName(path), InstalledExecutable, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Self-update is only available for an installed agent-sync.exe.");
 
-        using var source = new GitHubReleaseSource();
-        var service = new SelfUpdateService(path, CliVersion.Current, source, probe: ProbeAsync);
+        var options = AgentSyncUpdate.Options();
+        using var source = new GitHubReleaseSource(options);
+        var service = new SelfUpdateService(path, CliVersion.Current, source, options);
         var display = new SelfUpdateProgressDisplay(AnsiConsole.Console);
         return await display.RunAsync(service, request, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<bool> ProbeAsync(string executablePath, CancellationToken cancellationToken)
-    {
-        var start = new ProcessStartInfo(executablePath)
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        start.ArgumentList.Add("--help");
-
-        using var process = Process.Start(start);
-        if (process is null) return false;
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(ProbeTimeout);
-        try
-        {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            // A new binary that cannot answer --help in half a minute is not one to keep.
-            try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-            return false;
-        }
-
-        return process.ExitCode == 0;
     }
 }
