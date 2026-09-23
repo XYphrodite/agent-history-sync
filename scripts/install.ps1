@@ -8,6 +8,11 @@
   https://github.com/XYphrodite/agent-history-sync/releases
   and installs it under %LOCALAPPDATA%\Programs\CodexHistorySync by default.
 
+  When the .NET runtime is installed, the smaller framework-dependent
+  agent-sync-light.exe is used instead; -Variant overrides the choice.
+  The chosen variant is recorded next to the executable so
+  `agent-sync update` keeps installing the same kind of build.
+
 .PARAMETER Version
   Release tag without or with leading v, e.g. 0.5.2 or v0.5.2. Default: latest.
 
@@ -23,6 +28,11 @@
 .PARAMETER NoPath
   Do not add InstallDir to PATH and do not ask.
 
+.PARAMETER Variant
+  auto (default) picks the light package when the .NET runtime is
+  installed, full always installs the self-contained package, light always
+  installs the framework-dependent package (and fails fast without the runtime).
+
 .PARAMETER SkipHash
   Do not require/verify the .sha256 asset (not recommended).
 
@@ -32,12 +42,17 @@
 
 .EXAMPLE
   .\scripts\install.ps1 -Version v0.5.2 -AddToPath
+
+.EXAMPLE
+  .\scripts\install.ps1 -Variant full
 #>
 [CmdletBinding()]
 param(
     [string] $Version = "latest",
     [string] $InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\CodexHistorySync"),
     [string] $Repo = "XYphrodite/agent-history-sync",
+    [ValidateSet("auto", "full", "light")]
+    [string] $Variant = "auto",
     [switch] $AddToPath,
     [switch] $NoPath,
     [switch] $SkipHash
@@ -52,6 +67,45 @@ $ErrorActionPreference = "Stop"
 
 function Write-Step([string] $Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+$ExeAssetName = "agent-sync.exe"
+$LightExeAssetName = "agent-sync-light.exe"
+$VariantMarker = ".agent-sync-variant"
+# Major of the .NET runtime the light package targets. Bump together
+# with the app's target framework; must match AgentSyncUpdate in the source.
+$RuntimeMajor = "10"
+
+function Test-DotNetRuntimeLine {
+    param([string] $Line, [string] $Major = $RuntimeMajor)
+    # Console apps run on the shared framework: Microsoft.NETCore.App qualifies.
+    # A machine with Microsoft.WindowsDesktop.App also qualifies, the desktop
+    # bundle includes the base runtime.
+    return [bool]($Line -match "^Microsoft\.(NETCore|WindowsDesktop)\.App\s+$Major\.")
+}
+
+function Test-DotNetRuntime {
+    try {
+        $runtimes = & dotnet --list-runtimes 2>$null
+    } catch {
+        return $false
+    }
+    foreach ($line in @($runtimes)) {
+        if (Test-DotNetRuntimeLine -Line ([string]$line)) { return $true }
+    }
+    return $false
+}
+
+function Select-AgentSyncAsset {
+    param(
+        [ValidateSet("auto", "full", "light")]
+        [string] $Variant = "auto",
+        [bool] $HasRuntime = $false
+    )
+    if ($Variant -eq "light") { return $LightExeAssetName }
+    if ($Variant -eq "full") { return $ExeAssetName }
+    if ($HasRuntime) { return $LightExeAssetName }
+    return $ExeAssetName
 }
 
 function Get-GitHubRelease {
@@ -104,18 +158,27 @@ try {
     $tag = $release.tag_name
     Write-Step "Using release $tag"
 
-    $exeUrl = Get-AssetUrl -Release $release -Name "agent-sync.exe"
+    $hasRuntime = Test-DotNetRuntime
+    if ($Variant -eq "light" -and -not $hasRuntime) {
+        throw "The light package needs the .NET $RuntimeMajor runtime, which was not found. Install the runtime or use -Variant full."
+    }
+    $assetName = Select-AgentSyncAsset -Variant $Variant -HasRuntime $hasRuntime
+    $variantName = if ($assetName -eq $LightExeAssetName) { "light" } else { "full" }
+    $shaName = "$assetName.sha256"
+    Write-Step "Using $variantName package $assetName"
+
+    $exeUrl = Get-AssetUrl -Release $release -Name $assetName
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("agent-history-sync-install-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
-    $tempExe = Join-Path $tempRoot "agent-sync.exe"
-    $tempSha = Join-Path $tempRoot "agent-sync.exe.sha256"
+    $tempExe = Join-Path $tempRoot $assetName
+    $tempSha = Join-Path $tempRoot $shaName
 
-    Write-Step "Downloading agent-sync.exe"
+    Write-Step "Downloading $assetName"
     Invoke-WebRequest -Uri $exeUrl -OutFile $tempExe -UseBasicParsing
 
     if (-not $SkipHash) {
         try {
-            $shaUrl = Get-AssetUrl -Release $release -Name "agent-sync.exe.sha256"
+            $shaUrl = Get-AssetUrl -Release $release -Name $shaName
             Write-Step "Downloading and verifying SHA-256"
             Invoke-WebRequest -Uri $shaUrl -OutFile $tempSha -UseBasicParsing
             $expected = Expand-Sha256File -Path $tempSha
@@ -128,7 +191,7 @@ try {
         catch {
             if ($SkipHash) { throw }
             Write-Warning "Checksum asset missing or invalid: $($_.Exception.Message)"
-            throw "Refusing to install without a valid agent-sync.exe.sha256 (pass -SkipHash to override)."
+            throw "Refusing to install without a valid $shaName (pass -SkipHash to override)."
         }
     }
     else {
@@ -149,6 +212,8 @@ try {
     Write-Step "Installing to $InstallDir"
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item -LiteralPath $tempExe -Destination $existing -Force
+    # Records which kind of build this is, so `agent-sync update` keeps the variant.
+    [IO.File]::WriteAllText((Join-Path $InstallDir $VariantMarker), $variantName)
 
     $shouldAddToPath = $false
     if ($AddToPath) {
@@ -210,7 +275,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Installed Agent History Sync $tag" -ForegroundColor Green
+    Write-Host "Installed Agent History Sync $tag ($variantName)" -ForegroundColor Green
     Write-Host "  Binary: $existing"
     if ($shouldAddToPath) {
         Write-Host "  PATH:   user PATH includes install dir (new terminals)"

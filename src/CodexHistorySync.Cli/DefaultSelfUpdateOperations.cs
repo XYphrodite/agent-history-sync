@@ -29,7 +29,7 @@ internal sealed class DefaultSelfUpdateOperations : ISelfUpdateOperations
             !string.Equals(Path.GetFileName(path), InstalledExecutable, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Self-update is only available for an installed agent-sync.exe.");
 
-        var options = AgentSyncUpdate.Options();
+        var options = AgentSyncUpdate.Options(AgentSyncUpdate.InstalledVariant(path));
         using var source = new GitHubReleaseSource(options);
         var service = new SelfUpdateService(path, CliVersion.Current, source, options);
         var display = new SelfUpdateProgressDisplay(AnsiConsole.Console);

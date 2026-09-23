@@ -89,6 +89,21 @@ jobs:
             throw "Publish output missing agent-sync.exe"
           }
 
+      - name: Publish win-x64 single-file (light, framework-dependent)
+        shell: pwsh
+        run: |
+          dotnet publish src/CodexHistorySync.Cli `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -p:PublishSingleFile=true `
+            -p:PublishTrimmed=false `
+            -o src/CodexHistorySync.Cli/bin/Release/net10.0/win-x64/publish-light
+          if ($LASTEXITCODE -ne 0) { throw "Publish (light) failed" }
+          if (-not (Test-Path "src/CodexHistorySync.Cli/bin/Release/net10.0/win-x64/publish-light/agent-sync.exe")) {
+            throw "Publish output missing light agent-sync.exe"
+          }
+
       - name: Test including published executable
         shell: pwsh
         run: dotnet test CodexHistorySync.sln -c Release --nologo
@@ -103,6 +118,12 @@ jobs:
           "$hash  agent-sync.exe" | Set-Content -Path "artifacts/win-x64/agent-sync.exe.sha256" -Encoding ascii
           Write-Host "SHA256=$hash"
           Get-Item $exe | Format-List FullName, Length
+          Copy-Item src/CodexHistorySync.Cli/bin/Release/net10.0/win-x64/publish-light/agent-sync.exe artifacts/win-x64/agent-sync-light.exe
+          $light = "artifacts/win-x64/agent-sync-light.exe"
+          $lightHash = (Get-FileHash -Algorithm SHA256 -Path $light).Hash.ToLowerInvariant()
+          "$lightHash  agent-sync-light.exe" | Set-Content -Path "artifacts/win-x64/agent-sync-light.exe.sha256" -Encoding ascii
+          Write-Host "SHA256(light)=$lightHash"
+          Get-Item $light | Format-List FullName, Length
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -111,5 +132,7 @@ jobs:
           files: |
             artifacts/win-x64/agent-sync.exe
             artifacts/win-x64/agent-sync.exe.sha256
+            artifacts/win-x64/agent-sync-light.exe
+            artifacts/win-x64/agent-sync-light.exe.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
