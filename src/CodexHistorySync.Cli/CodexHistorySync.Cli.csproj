@@ -23,6 +23,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>agent-sync</AssemblyName>
+    <ApplicationIcon>..\CodexHistorySync.Desktop\Assets\agent-sync.ico</ApplicationIcon>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">

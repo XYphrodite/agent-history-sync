@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="using:CodexHistorySync.Desktop"
         x:Class="CodexHistorySync.Desktop.SessionManagerWindow"
+        Icon="avares://CodexHistorySync.Desktop/Assets/agent-sync.png"
         Title="Agent Sync — Manager" Width="1320" Height="860" MinWidth="900" MinHeight="600"
         Background="#17191C" FontFamily="Inter" FontSize="14" Foreground="#E8E6E0">
   <Window.Styles>
