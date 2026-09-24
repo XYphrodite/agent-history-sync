@@ -104,17 +104,27 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
         try
         {
             Status = "Reading local session catalog…";
-            var snapshot = await Task.Run(() => services.Catalog.ScanAsync(lifetime.Token), lifetime.Token);
+            SessionCatalogSnapshot? snapshot = null;
             traceCache.Clear();
-            allSessions = snapshot.ConfiguredAgents.SelectMany(snapshot.For)
-                .OrderByDescending(s => s.LastModifiedAt).ThenBy(s => s.SessionId, StringComparer.OrdinalIgnoreCase).ToList();
-            await FilterAsync(debounce: false);
+            await foreach (var update in services.Catalog.ScanIncrementallyAsync(lifetime.Token))
+            {
+                snapshot = update;
+                var pendingRows = allSessions.Where(session => update.PendingAgents.Contains(session.Agent));
+                allSessions = update.ConfiguredAgents.SelectMany(update.For).Concat(pendingRows)
+                    .OrderByDescending(s => s.LastModifiedAt).ThenBy(s => s.SessionId, StringComparer.OrdinalIgnoreCase).ToList();
+                await FilterAsync(debounce: false);
+                Changed(nameof(SessionCount)); Changed(nameof(FilteredCount)); Changed(nameof(FilteredLabel));
+                Status = update.LoadingMessage ?? $"{FilteredCount} of {SessionCount} sessions";
+            }
+            if (snapshot is null) return;
+            previous = selected ?? previous;
             var replacement = previous is null ? Sessions.FirstOrDefault()
                 : Sessions.FirstOrDefault(s => s.Agent == previous.Agent && s.SessionId == previous.SessionId);
             var statusBeforeSelect = Status;
             await SelectAsync(replacement);
             if (replacement is null) Status = $"{SessionCount} local sessions — no match for filter";
             else if (Status == "Reading conversation…" || Status == statusBeforeSelect) Status = $"{FilteredCount} of {SessionCount} sessions";
+            if (snapshot.LoadingMessage is { } message) Status = message;
             if (services.SearchIndex is not null)
             {
                 try

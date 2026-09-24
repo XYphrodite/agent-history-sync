@@ -127,7 +127,7 @@ public static class CliComposition
         var kimiPaths = KimiPaths.TryResolve();
         var musePaths = MusePaths.TryResolve();
         IManagedSessionActiveState activeState = OperatingSystem.IsWindows()
-            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths)
+            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths)
             : new ReadOnlySessionActiveState();
         var annotations = new SessionAnnotationStore();
         var catalog = new AnnotatedSessionCatalog(
@@ -139,7 +139,7 @@ public static class CliComposition
                 null, null, claudePaths, null, continuePaths, null, kimiPaths, null)
             : null;
         return new DesktopSessionViewerRunner(new Desktop.DesktopSessionServices(catalog,
-            new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.CodexSessionFamilyReader(codexPaths),
+            new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.LocalSessionFamilyReader(codexPaths, musePaths),
             conversations, annotations, operations,
             titling.IsConfigured ? new OllamaSessionTitleSuggester(titling.Options) : null, new SessionSearchIndex(),
             $"{CliBuildInfo.Version} · {CliBuildInfo.Commit}"));
@@ -242,7 +242,7 @@ public static class CliComposition
         var annotatedCatalog = new AnnotatedSessionCatalog(catalog, annotationStore);
         var conversations = new CodexHistorySync.Core.Management.SessionContentReader();
         return new DesktopSessionManagerRunner(new Desktop.DesktopSessionServices(annotatedCatalog,
-            new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.CodexSessionFamilyReader(codexPaths),
+            new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.LocalSessionFamilyReader(codexPaths, musePaths),
             conversations, annotationStore, operations, null, new SessionSearchIndex(),
             $"{CliBuildInfo.Version} · {CliBuildInfo.Commit}"));
     }

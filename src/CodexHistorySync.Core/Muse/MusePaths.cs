@@ -1,4 +1,4 @@
-using System.Text;
+using System.Diagnostics;
 using CodexHistorySync.Core.IO;
 
 namespace CodexHistorySync.Core.Muse;
@@ -30,74 +30,64 @@ public sealed record MusePaths(string Home, string Sessions)
 
     private static string GetDefaultHome()
     {
-        // Check UserProfile/.local/share/muse (Linux/WSL)
-        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (!string.IsNullOrWhiteSpace(userProfile))
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var candidates = new[]
         {
-            var linuxPath = Path.Combine(userProfile, ".local", "share", "muse");
-            if (Directory.Exists(linuxPath)) return linuxPath;
-
-            // Check WSL path when running on Windows: \\wsl$\Ubuntu\home\<user>\.local\share\muse
-            // Try to resolve WSL home via wsl$ if on Windows
-            if (OperatingSystem.IsWindows())
-            {
-                var wslPath = TryResolveWslHome(userProfile);
-                if (wslPath is not null && Directory.Exists(wslPath)) return wslPath;
-            }
-        }
-
-        // Fallback: check LOCALAPPDATA/muse
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (!string.IsNullOrWhiteSpace(localAppData))
+            string.IsNullOrWhiteSpace(profile) ? null : Path.Combine(profile, ".local", "share", "muse"),
+            string.IsNullOrWhiteSpace(local) ? null : Path.Combine(local, "muse"),
+            string.IsNullOrWhiteSpace(profile) ? null : Path.Combine(profile, ".muse")
+        };
+        foreach (var candidate in candidates)
+            if (candidate is not null && Directory.Exists(Path.Combine(candidate, "sessions"))) return candidate;
+        if (OperatingSystem.IsWindows())
         {
-            var localPath = Path.Combine(localAppData, "muse");
-            if (Directory.Exists(localPath)) return localPath;
+            foreach (var candidate in RunningWslHomes(RunWsl))
+                if (Directory.Exists(Path.Combine(candidate, "sessions"))) return candidate;
         }
-
-        // Final fallback: UserProfile/.muse
-        if (!string.IsNullOrWhiteSpace(userProfile))
-        {
-            var dotMuse = Path.Combine(userProfile, ".muse");
-            if (Directory.Exists(dotMuse))
-            {
-                var dotMuseSessions = Path.Combine(dotMuse, "sessions");
-                if (Directory.Exists(dotMuseSessions)) return dotMuse;
-            }
-        }
-
-        // If nothing exists, return the Linux default for new installations
-        if (!string.IsNullOrWhiteSpace(userProfile))
-        {
-            return Path.Combine(userProfile, ".local", "share", "muse");
-        }
-
         return string.Empty;
     }
 
-    private static string? TryResolveWslHome(string windowsUserProfile)
+    // Query the Linux account, preserving case. Never start a stopped distribution just to show a list.
+    internal static IEnumerable<string> RunningWslHomes(Func<string[], string?> run)
+    {
+        var distributions = run(["--list", "--running", "--quiet"]);
+        if (distributions is null) yield break;
+        foreach (var distro in distributions.Replace("\0", string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var name = distro.Trim();
+            if (name.Length == 0 || name.IndexOfAny(['/', '\\']) >= 0) continue;
+            var home = run(["--distribution", name, "--exec", "printenv", "HOME"])?.Trim();
+            if (home is null || !home.StartsWith('/') || home.IndexOfAny(['\r', '\n', '\\']) >= 0) continue;
+            var segments = home.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Any(segment => segment is "." or "..")) continue;
+            yield return @"\\wsl$\" + name + home.Replace('/', '\\') + @"\.local\share\muse";
+        }
+    }
+
+    private static string? RunWsl(string[] arguments)
     {
         try
         {
-            var userName = Path.GetFileName(windowsUserProfile.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            if (string.IsNullOrWhiteSpace(userName)) return null;
-            var wslHome = $@"\\wsl$\Ubuntu\home\{userName}\.local\share\muse";
-            // Also try with different distro names
-            var candidates = new[]
+            var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wsl.exe"))
             {
-                wslHome,
-                $@"\\wsl$\Ubuntu-22.04\home\{userName}\.local\share\muse",
-                $@"\\wsl$\Ubuntu-24.04\home\{userName}\.local\share\muse",
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                StandardOutputEncoding = arguments[0] == "--list" ? System.Text.Encoding.Unicode : System.Text.Encoding.UTF8
             };
-            foreach (var candidate in candidates)
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var process = Process.Start(start);
+            if (process is null) return null;
+            var output = process.StandardOutput.ReadToEndAsync();
+            _ = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(1500))
             {
-                if (Directory.Exists(candidate)) return candidate;
+                process.Kill(entireProcessTree: true);
+                return null;
             }
-            // Also try via /mnt/c path if running in WSL itself, check /home
-            var wslHomeLinux = $"/home/{userName}/.local/share/muse";
-            if (Directory.Exists(wslHomeLinux)) return wslHomeLinux;
-            return null;
+            return process.ExitCode == 0 && output.Wait(200) ? output.Result : null;
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             return null;
         }

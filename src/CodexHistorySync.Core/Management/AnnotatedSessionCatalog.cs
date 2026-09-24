@@ -33,19 +33,28 @@ public sealed class AnnotatedSessionCatalog(
             return snapshot;
         }
 
-        if (stored.Count == 0) return snapshot;
-
-        return new SessionCatalogSnapshot(
-            Overlay(snapshot.Codex, stored),
-            Overlay(snapshot.Grok, stored),
-            Overlay(snapshot.Claude, stored),
-            Overlay(snapshot.Continue, stored),
-            Overlay(snapshot.Kimi, stored),
-            Overlay(snapshot.Muse, stored))
-        {
-            ConfiguredAgents = snapshot.ConfiguredAgents
-        };
+        return Apply(snapshot, stored);
     }
+
+    public async IAsyncEnumerable<SessionCatalogSnapshot> ScanIncrementallyAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        IReadOnlyDictionary<SessionAnnotationKey, SessionAnnotation> stored;
+        try { stored = await _annotations.LoadAsync(cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        { stored = new Dictionary<SessionAnnotationKey, SessionAnnotation>(); }
+        await foreach (var snapshot in _catalog.ScanIncrementallyAsync(cancellationToken).ConfigureAwait(false))
+            yield return Apply(snapshot, stored);
+    }
+
+    private static SessionCatalogSnapshot Apply(SessionCatalogSnapshot snapshot,
+        IReadOnlyDictionary<SessionAnnotationKey, SessionAnnotation> stored) => stored.Count == 0 ? snapshot :
+        snapshot with
+        {
+            Codex = Overlay(snapshot.Codex, stored), Grok = Overlay(snapshot.Grok, stored),
+            Claude = Overlay(snapshot.Claude, stored), Continue = Overlay(snapshot.Continue, stored),
+            Kimi = Overlay(snapshot.Kimi, stored), Muse = Overlay(snapshot.Muse, stored)
+        };
 
     private static IReadOnlyList<ManagedSession> Overlay(
         IReadOnlyList<ManagedSession> sessions,

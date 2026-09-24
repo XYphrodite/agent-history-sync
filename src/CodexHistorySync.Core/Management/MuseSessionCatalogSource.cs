@@ -1,3 +1,4 @@
+﻿using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Core.Muse;
@@ -7,127 +8,103 @@ namespace CodexHistorySync.Core.Management;
 internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogIo io) : ILocalSessionCatalogSource
 {
     private const int MaximumMetadataBytes = 64 * 1024;
-    private const int MaximumTitleLength = 80;
-
+    private readonly ConcurrentDictionary<string, CachedTitle> cache = new(StringComparer.Ordinal);
     public ManagedAgent Agent => ManagedAgent.Muse;
 
     public async Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(SessionCatalogReadLimiter limiter, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(limiter);
-        var candidates = EnumerateCandidates();
-        var collected = new CandidateResult?[candidates.Count];
+        var directories = MuseSessionDiscovery.MainDirectories(paths.Sessions, cancellationToken);
+        var indexed = MuseSessionIndex.Read(paths.Home, cancellationToken);
+        var candidates = await ReadDirectoriesAsync(directories, paths.Sessions, indexed, limiter, cancellationToken).ConfigureAwait(false);
+        var live = directories.ToHashSet(StringComparer.Ordinal);
+        foreach (var key in cache.Keys)
+            if (!live.Contains(key)) cache.TryRemove(key, out _);
+        return candidates;
+    }
 
-        await Parallel.ForEachAsync(Enumerable.Range(0, candidates.Count), new ParallelOptions
+    internal async Task<IReadOnlyList<SessionCatalogCandidate>> ReadDirectoriesAsync(
+        IReadOnlyList<string> directories, string root, IReadOnlyDictionary<string, MuseIndexedTitle> indexed,
+        SessionCatalogReadLimiter limiter, CancellationToken ct)
+    {
+        var rows = new SessionCatalogCandidate?[directories.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0, directories.Count), new ParallelOptions
         {
-            CancellationToken = cancellationToken,
-            MaxDegreeOfParallelism = 8
+            CancellationToken = ct, MaxDegreeOfParallelism = 8
         }, async (index, token) =>
         {
-            var (candidate, sessionId) = candidates[index];
-            if (!ManagedSessionPathPolicy.TryResolveConcreteTarget(candidate, paths.Sessions, expectDirectory: true, out var nativePath))
-                return;
-            var metadata = await ReadMetadataAsync(nativePath, sessionId, limiter, token).ConfigureAwait(false);
-            collected[index] = new CandidateResult(sessionId, nativePath, metadata);
-        }).ConfigureAwait(false);
-
-        var rows = collected.Where(r => r is not null).Select(r => r!).Select(r =>
-        {
-            var m = r.Metadata;
-            return new SessionCatalogCandidate(
-                r.SessionId,
-                r.NativePath,
-                DisplayTitle(m.Title, r.SessionId),
-                m.LastModifiedAt ?? LastWriteTime(r.NativePath),
-                m.CanRead,
-                NormalizeTitle(m.Title) is null ? ManagedTitleSource.SessionId : m.TitleIsOfficial ? ManagedTitleSource.Official : ManagedTitleSource.Fallback);
-        }).ToArray();
-
-        var duplicates = rows.GroupBy(r => r.SessionId, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return rows.Select(r => duplicates.Contains(r.SessionId) ? r with { CanRead = false } : r).ToArray();
-    }
-
-    private List<(string Candidate, string SessionId)> EnumerateCandidates()
-    {
-        try
-        {
-            var result = new List<(string, string)>();
-            foreach (var file in io.EnumerateFiles(paths.Sessions, MusePaths.SessionFileName))
+            var directory = directories[index];
+            if (!ManagedSessionPathPolicy.TryResolveConcreteTarget(directory, root, true, out var nativePath)) return;
+            var id = Path.GetFileName(nativePath);
+            var file = Path.Combine(nativePath, MusePaths.SessionFileName);
+            try
             {
-                var dir = Path.GetDirectoryName(file);
-                if (dir is null) continue;
-                var dirName = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                if (!Guid.TryParse(dirName, out _)) continue;
-                result.Add((dir, dirName));
-            }
-            return result;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            return [];
-        }
-    }
-
-    private async Task<Metadata> ReadMetadataAsync(string directory, string sessionId, SessionCatalogReadLimiter limiter, CancellationToken ct)
-    {
-        var sessionFile = Path.Combine(directory, MusePaths.SessionFileName);
-        try
-        {
-            if (!io.FileExists(sessionFile))
-                return new Metadata(null, null, false, false);
-
-            var prefix = await limiter.RunAsync(token => io.ReadPrefixAsync(sessionFile, MaximumMetadataBytes, token), ct).ConfigureAwait(false);
-            var title = ExtractTitle(prefix.Text);
-            var lastWrite = io.LastWriteTime(sessionFile);
-            var canRead = prefix.IsComplete;
-            return new Metadata(title, title is not null ? lastWrite : null, canRead, title is not null);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DecoderFallbackException or ArgumentException)
-        {
-            return new Metadata(null, null, false, false);
-        }
-    }
-
-    private static string? ExtractTitle(string content)
-    {
-        try
-        {
-            foreach (var line in content.Split('\n'))
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                try
+                var info = new FileInfo(file);
+                info.Refresh();
+                if (!info.Exists || info.Attributes.HasFlag(FileAttributes.ReparsePoint)) return;
+                var stamp = (info.Length, info.LastWriteTimeUtc);
+                var title = indexed.GetValueOrDefault(id);
+                if (string.IsNullOrWhiteSpace(title?.Title))
                 {
-                    using var doc = JsonDocument.Parse(line);
-                    var root = doc.RootElement;
-                    if (root.TryGetProperty("payload", out var payload) && payload.TryGetProperty("record", out var record))
+                    if (cache.TryGetValue(nativePath, out var cached) && cached.Stamp == stamp) title = cached.Title;
+                    else
                     {
-                        if (record.TryGetProperty("prompt", out var prompt) && prompt.ValueKind == JsonValueKind.String)
-                            return NormalizeTitle(prompt.GetString());
+                        var prefix = await limiter.RunAsync(t => io.ReadPrefixAsync(file, MaximumMetadataBytes, t), token).ConfigureAwait(false);
+                        title = ExtractTitle(prefix.Text);
+                        cache[nativePath] = new CachedTitle(stamp, title);
                     }
-                    if (root.TryGetProperty("role", out var role) && role.GetString() == "user" && root.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
-                        return NormalizeTitle(text.GetString());
                 }
-                catch { }
+                var normalized = NormalizeTitle(title?.Title);
+                rows[index] = new SessionCatalogCandidate(id, nativePath, normalized ?? id,
+                    new DateTimeOffset(info.LastWriteTimeUtc), info.Length > 0,
+                    normalized is null ? ManagedTitleSource.SessionId : title!.Official ? ManagedTitleSource.Official : ManagedTitleSource.Fallback);
             }
-        }
-        catch { }
-        return null;
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DecoderFallbackException or ArgumentException)
+            {
+                rows[index] = new SessionCatalogCandidate(id, nativePath, id, DateTimeOffset.MinValue, false, ManagedTitleSource.SessionId);
+            }
+        }).ConfigureAwait(false);
+        var result = rows.OfType<SessionCatalogCandidate>().ToArray();
+        var duplicates = result.GroupBy(r => r.SessionId, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return result.Select(r => duplicates.Contains(r.SessionId) ? r with { CanRead = false } : r).ToArray();
     }
 
-    private static string DisplayTitle(string? title, string sessionId) =>
-        string.IsNullOrWhiteSpace(title) ? sessionId : title.Length > 80 ? title[..80] : title;
-
-    private static string? NormalizeTitle(string? title) => string.IsNullOrWhiteSpace(title) ? null : string.Join(' ', title.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-
-    private DateTimeOffset LastWriteTime(string path)
+    private static MuseIndexedTitle? ExtractTitle(string text)
     {
-        try { return io.LastWriteTime(path); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return DateTimeOffset.MinValue; }
+        MuseIndexedTitle? fallback = null;
+        foreach (var line in text.Split('\n'))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line.TrimStart('\uFEFF'));
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) continue;
+                if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
+                {
+                    if (String(payload, "new_name") is { } name) return new MuseIndexedTitle(name, true);
+                    if (payload.TryGetProperty("record", out var record) && String(record, "prompt") is { } prompt)
+                        fallback ??= new MuseIndexedTitle(prompt, false);
+                }
+                if (String(root, "role") == "user" && String(root, "text") is { } message)
+                    fallback ??= new MuseIndexedTitle(message, false);
+                if (Conversion.MuseConversationReader.ExtractTurn(root) is { Role: Conversion.ConversationRole.User } turn)
+                    fallback ??= new MuseIndexedTitle(turn.Text, false);
+            }
+            catch (JsonException) { }
+        }
+        return fallback;
     }
 
-    private sealed record CandidateResult(string SessionId, string NativePath, Metadata Metadata);
-    private sealed record Metadata(string? Title, DateTimeOffset? LastModifiedAt, bool CanRead, bool TitleIsOfficial);
+    private static string? String(JsonElement node, string name) => node.ValueKind == JsonValueKind.Object &&
+        node.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static string? NormalizeTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return null;
+        var normalized = string.Join(' ', title.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length > 80 ? normalized[..80] : normalized;
+    }
+
+    private sealed record CachedTitle((long Length, DateTime Modified) Stamp, MuseIndexedTitle? Title);
 }

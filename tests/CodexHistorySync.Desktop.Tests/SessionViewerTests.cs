@@ -23,6 +23,33 @@ public static class TestAppBuilder
 public sealed class SessionViewerTests
 {
     [AvaloniaFact]
+    public async Task SlowMuseDoesNotKeepTheViewerListEmpty()
+    {
+        var catalog = new IncrementalDesktopCatalog();
+        using var model = CreateModel(catalog: catalog);
+        var refresh = model.RefreshAsync();
+        for (var i = 0; i < 200 && model.Sessions.Count == 0; i++)
+        { Dispatcher.UIThread.RunJobs(); await Task.Delay(10); }
+        Assert.Single(model.Sessions);
+        Assert.True(model.IsRefreshing);
+        Assert.Contains("Muse", model.Status);
+        catalog.Release.TrySetResult();
+        await refresh;
+        Assert.Equal(2, model.Sessions.Count);
+        await model.SelectAsync(model.Sessions.Single(node => node.Session.Agent == ManagedAgent.Muse));
+        Assert.True(model.CanShowSubagents);
+    }
+
+    [AvaloniaFact]
+    public async Task EmptyViewerExplainsThatNoHistoriesWereFound()
+    {
+        using var model = CreateModel(catalog: new EmptyDesktopCatalog());
+        await model.RefreshAsync();
+        Assert.Empty(model.Sessions);
+        Assert.Equal("No local agent histories found.", model.Status);
+    }
+
+    [AvaloniaFact]
     public async Task UnreadableFirstSessionShowsErrorAndAnotherConversationCanBeOpened()
     {
         using var model = CreateModel(catalog: new FakeCatalog(unreadableParent: true));

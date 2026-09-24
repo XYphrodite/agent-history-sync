@@ -64,6 +64,13 @@ public sealed record SessionCatalogSnapshot(
     /// fallback below cannot, and which is why hand-built snapshots should set it explicitly.
     /// </summary>
     public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi, Muse);
+    public IReadOnlyList<ManagedAgent> PendingAgents { get; init; } = [];
+    public IReadOnlyList<ManagedAgent> UnavailableAgents { get; init; } = [];
+
+    public string? LoadingMessage => PendingAgents.Count > 0
+        ? "Loading sessions: " + string.Join(", ", PendingAgents) + "…"
+        : UnavailableAgents.Count > 0 ? "Could not read sessions: " + string.Join(", ", UnavailableAgents) + ". Other sessions are available."
+        : ConfiguredAgents.Count == 0 ? "No local agent histories found." : null;
 
     public IReadOnlyList<ManagedSession> For(ManagedAgent agent) => agent switch
     {
@@ -108,6 +115,12 @@ public static class ManagedAgents
 public interface ILocalSessionCatalog
 {
     Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken);
+
+    async IAsyncEnumerable<SessionCatalogSnapshot> ScanIncrementallyAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        yield return await ScanAsync(cancellationToken).ConfigureAwait(false);
+    }
 }
 
 public interface ILocalSessionOperations

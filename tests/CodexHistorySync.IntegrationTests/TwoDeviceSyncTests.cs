@@ -254,6 +254,21 @@ public sealed class TwoDeviceSyncTests : IDisposable
     }
 
     [Fact]
+    public async Task UninstalledAgentsAreUncertainInSyncPreview()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var device = CreateDevice("without-agents", remote, key, withClaudeHome: false, withKimiHome: false);
+        var preview = await device.Engine.PreviewAsync(SyncMode.Bidirectional, CancellationToken.None);
+        foreach (var kind in new[] { ObjectKind.GrokSession, ObjectKind.ClaudeSession, ObjectKind.ContinueSession,
+            ObjectKind.KimiSession, ObjectKind.MuseSession })
+            Assert.Contains(kind, preview.UncertainKinds);
+        Assert.DoesNotContain(ObjectKind.ActiveSession, preview.UncertainKinds);
+    }
+
+    [Fact]
     public async Task ClaudeMemory_SynchronizesAsItsOwnObject()
     {
         Directory.CreateDirectory(_root);

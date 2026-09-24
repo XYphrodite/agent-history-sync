@@ -28,7 +28,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null)
         : this(
-            codexPaths is null
+            codexPaths is null || !Directory.Exists(codexPaths.Home)
                 ? null
                 : new CodexSessionCatalogSource(codexPaths, new SystemSessionCatalogIo()),
             grokPaths is null
@@ -70,30 +70,56 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
 
     public async Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken)
     {
-        using var limiter = new SessionCatalogReadLimiter(MaximumConcurrentReads);
-        var codexTask = ScanAgentAsync(
-            codexSource, ManagedAgent.Codex, limiter, cancellationToken);
-        var grokTask = ScanAgentAsync(
-            grokSource, ManagedAgent.Grok, limiter, cancellationToken);
-        var claudeTask = ScanAgentAsync(
-            claudeSource, ManagedAgent.Claude, limiter, cancellationToken);
-        var continueTask = ScanAgentAsync(
-            continueSource, ManagedAgent.Continue, limiter, cancellationToken);
-        var kimiTask = ScanAgentAsync(
-            kimiSource, ManagedAgent.Kimi, limiter, cancellationToken);
-        var museTask = ScanAgentAsync(
-            museSource, ManagedAgent.Muse, limiter, cancellationToken);
+        SessionCatalogSnapshot? result = null;
+        await foreach (var snapshot in ScanIncrementallyAsync(cancellationToken).ConfigureAwait(false)) result = snapshot;
+        return result!;
+    }
 
-        await Task.WhenAll(codexTask, grokTask, claudeTask, continueTask, kimiTask, museTask).ConfigureAwait(false);
-        return new SessionCatalogSnapshot(
-            Order(codexTask.Result),
-            Order(grokTask.Result),
-            Order(claudeTask.Result),
-            Order(continueTask.Result),
-            Order(kimiTask.Result),
-            Order(museTask.Result))
+    public async IAsyncEnumerable<SessionCatalogSnapshot> ScanIncrementallyAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var limiter = new SessionCatalogReadLimiter(MaximumConcurrentReads);
+        var configured = ManagedAgents.All.Where(IsConfigured).ToArray();
+        var pending = configured.ToDictionary(agent => agent,
+            agent => ScanAgentAsync(SourceFor(agent), agent, limiter, lifetime.Token));
+        var rows = new Dictionary<ManagedAgent, IReadOnlyList<ManagedSession>>();
+        var unavailable = new List<ManagedAgent>();
+        try
         {
-            ConfiguredAgents = ManagedAgents.All.Where(IsConfigured).ToArray()
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return Snapshot();
+            while (pending.Count > 0)
+            {
+                await Task.WhenAny(pending.Values).ConfigureAwait(false);
+                foreach (var (agent, task) in pending.Where(pair => pair.Value.IsCompleted).ToArray())
+                {
+                    try { rows[agent] = Order(await task.ConfigureAwait(false)); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+                    {
+                        unavailable.Add(agent);
+                    }
+                    pending.Remove(agent);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return Snapshot();
+            }
+        }
+        finally
+        {
+            lifetime.Cancel();
+            try { await Task.WhenAll(pending.Values).ConfigureAwait(false); }
+            catch (Exception) { /* Observe outstanding tasks when a consumer cancels or leaves early. */ }
+        }
+
+        SessionCatalogSnapshot Snapshot() => new(
+            rows.GetValueOrDefault(ManagedAgent.Codex) ?? [], rows.GetValueOrDefault(ManagedAgent.Grok) ?? [],
+            rows.GetValueOrDefault(ManagedAgent.Claude) ?? [], rows.GetValueOrDefault(ManagedAgent.Continue) ?? [],
+            rows.GetValueOrDefault(ManagedAgent.Kimi) ?? [], rows.GetValueOrDefault(ManagedAgent.Muse) ?? [])
+        {
+            ConfiguredAgents = configured,
+            PendingAgents = configured.Where(pending.ContainsKey).ToArray(),
+            UnavailableAgents = unavailable.ToArray()
         };
     }
 

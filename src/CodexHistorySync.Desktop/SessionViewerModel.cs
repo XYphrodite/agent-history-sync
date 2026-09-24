@@ -53,7 +53,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
     public string Description => selected?.Session.Annotation?.Description ?? string.Empty;
     public bool HasSelection => selected is not null;
     public bool HasTrace => trace is not null;
-    public bool CanShowSubagents => selected?.Session.Agent == ManagedAgent.Codex;
+    public bool CanShowSubagents => selected?.Session.Agent is ManagedAgent.Codex or ManagedAgent.Muse;
     public bool CanDelete => selected?.Parent is null && selected is not null && services.Operations is not null;
     public bool CanGenerateTitle => services.TitleSuggester?.IsConfigured == true && selected is not null;
     public bool HasMatches => Matches.Count > 0;
@@ -73,12 +73,20 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
         try
         {
             Status = "Reading local session catalog…";
-            var snapshot = await Task.Run(() => services.Catalog.ScanAsync(lifetime.Token), lifetime.Token);
+            SessionCatalogSnapshot? snapshot = null;
             traceCache.Clear();
             family = null;
-            allSessions = snapshot.ConfiguredAgents.SelectMany(snapshot.For)
-                .OrderByDescending(session => session.LastModifiedAt).Select(session => new SessionNode(session)).ToList();
-            await FilterAsync(debounce: false);
+            await foreach (var update in services.Catalog.ScanIncrementallyAsync(lifetime.Token))
+            {
+                snapshot = update;
+                var pendingRows = allSessions.Where(node => update.PendingAgents.Contains(node.Session.Agent));
+                allSessions = update.ConfiguredAgents.SelectMany(update.For).Select(session => new SessionNode(session))
+                    .Concat(pendingRows).OrderByDescending(node => node.Session.LastModifiedAt).ToList();
+                await FilterAsync(debounce: false);
+                Status = update.LoadingMessage ?? $"{allSessions.Count} local conversations";
+            }
+            if (snapshot is null) return;
+            previous = selected?.Root.Session ?? previous;
             var replacement = previous is null ? Sessions.FirstOrDefault()
                 : Sessions.FirstOrDefault(node => Same(node.Session, previous));
             await SelectAsync(replacement);
@@ -90,6 +98,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
             }
             if (replacement is not null) RevealNode?.Invoke(replacement);
             else Status = $"{allSessions.Count} local conversations";
+            if (snapshot.LoadingMessage is { } message) Status = message;
             if (services.SearchIndex is not null)
             {
                 await Task.Run(() => services.SearchIndex.EnsureCurrentAsync(snapshot, services.Conversations, lifetime.Token), lifetime.Token);

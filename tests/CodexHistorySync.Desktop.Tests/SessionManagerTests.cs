@@ -13,6 +13,32 @@ namespace CodexHistorySync.Desktop.Tests;
 public sealed class SessionManagerTests
 {
     [AvaloniaFact]
+    public async Task SlowMuseDoesNotKeepTheManagerListEmpty()
+    {
+        var catalog = new IncrementalDesktopCatalog();
+        using var model = CreateModel(suppliedCatalog: catalog);
+        var refresh = model.RefreshAsync();
+        await UntilAsync(() => model.Sessions.Count == 1);
+        Assert.True(model.IsRefreshing);
+        Assert.Contains("Muse", model.Status);
+        await model.SelectAsync(model.Sessions[0]);
+        catalog.Release.TrySetResult();
+        await refresh;
+        Assert.Equal(2, model.Sessions.Count);
+        Assert.Equal("ready", model.Selected!.SessionId);
+        Assert.False(model.IsRefreshing);
+    }
+
+    [AvaloniaFact]
+    public async Task EmptyManagerExplainsThatNoHistoriesWereFound()
+    {
+        using var model = CreateModel(suppliedCatalog: new EmptyDesktopCatalog());
+        await model.RefreshAsync();
+        Assert.Empty(model.Sessions);
+        Assert.Equal("No local agent histories found.", model.Status);
+    }
+
+    [AvaloniaFact]
     public async Task RefreshLoadsSessionsAndKeepsSelectionAfterFilter()
     {
         using var model = CreateModel();
@@ -127,9 +153,9 @@ public sealed class SessionManagerTests
         Assert.True(predicate(), "Window did not reach expected state.");
     }
 
-    private static SessionManagerModel CreateModel(FakeOperations? operations = null, string? activeId = null, string? unreadableId = null)
+    private static SessionManagerModel CreateModel(FakeOperations? operations = null, string? activeId = null, string? unreadableId = null, ILocalSessionCatalog? suppliedCatalog = null)
     {
-        var catalog = new FakeCatalog(activeId, unreadableId);
+        var catalog = suppliedCatalog ?? new FakeCatalog(activeId, unreadableId);
         var traces = new FakeTraces(unreadableId);
         var ops = operations ?? new FakeOperations();
         var annotations = new FakeAnnotations();

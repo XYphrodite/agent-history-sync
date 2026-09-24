@@ -78,6 +78,8 @@ internal sealed class McpProcessFixture : IAsyncDisposable
         start.Environment["GROK_HOME"] = Path.Combine(root, "missing-grok");
         start.Environment["CLAUDE_CONFIG_DIR"] = Path.Combine(root, "missing-claude");
         start.Environment["CONTINUE_GLOBAL_DIR"] = Path.Combine(historyRoot, "continue");
+        start.Environment["KIMI_CODE_HOME"] = Path.Combine(root, "missing-kimi");
+        start.Environment["MUSE_HOME"] = Path.Combine(root, "missing-muse");
         var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start MCP process.");
         var fixture = new McpProcessFixture(root, process, dataRoot, historyRoot);
         await fixture.WriteSessionAsync("Local example");

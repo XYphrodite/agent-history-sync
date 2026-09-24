@@ -22,7 +22,7 @@ public sealed class MuseConversationReader : IConversationReader
             if (!Guid.TryParse(sessionId, out _))
                 throw InvalidConversation();
 
-            var turns = await Task.Run(() => ReadTurns(sessionFile), cancellationToken).ConfigureAwait(false);
+            var turns = await Task.Run(() => ReadTurns(sessionFile, cancellationToken), cancellationToken).ConfigureAwait(false);
             if (turns.Count == 0) throw InvalidConversation();
 
             var title = turns.FirstOrDefault(t => t.Role == ConversationRole.User)?.Text ?? sessionId;
@@ -46,72 +46,85 @@ public sealed class MuseConversationReader : IConversationReader
         }
     }
 
-    private static List<PortableTurn> ReadTurns(string sessionFile)
+    private static List<PortableTurn> ReadTurns(string sessionFile, CancellationToken ct)
     {
         var turns = new List<PortableTurn>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var line in File.ReadLines(sessionFile, Encoding.UTF8))
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            try
+            ct.ThrowIfCancellationRequested();
+            using var document = ParseRecord(line);
+            if (document is null) continue;
+            foreach (var root in Records(document.RootElement, 0))
             {
-                using var doc = JsonDocument.Parse(line);
-                var root = doc.RootElement;
-                // Try to find user/assistant messages in various payload structures
-                if (TryExtractTurn(root, out var turn) && turn is not null)
-                {
-                    if (turn.Role == ConversationRole.User && ConversationTechnicalText.IsWrapper(turn.Text)) continue;
-                    turns.Add(turn);
-                }
+                ct.ThrowIfCancellationRequested();
+                if (Text(root, "id") is { } id && !seen.Add(id)) continue;
+                var turn = ExtractTurn(root);
+                if (turn is null || turn.Role == ConversationRole.User && ConversationTechnicalText.IsWrapper(turn.Text)) continue;
+                turns.Add(turn);
             }
-            catch { }
         }
         return turns;
     }
 
-    private static bool TryExtractTurn(JsonElement root, out PortableTurn? turn)
+    // Current Muse journals may retain events inside a transaction frame as serialized records.
+    private static IEnumerable<JsonElement> Records(JsonElement root, int depth)
     {
-        turn = null;
-        try
+        if (root.ValueKind != JsonValueKind.Object || depth > 8) yield break;
+        if (!root.TryGetProperty("retained_frame", out _)) { yield return root; yield break; }
+        if (!root.TryGetProperty("children", out var children) || children.ValueKind != JsonValueKind.Array) yield break;
+        foreach (var child in children.EnumerateArray())
         {
-            // Check for direct payload with text
-            if (root.TryGetProperty("payload", out var payload))
+            using var document = ParseRecord(Text(child, "record_json"));
+            if (document is null) continue;
+            foreach (var record in Records(document.RootElement, depth + 1)) yield return record;
+        }
+    }
+
+    internal static PortableTurn? ExtractTurn(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
+        {
+            if (Text(root, "payload_type") == "runtime.session" && Text(payload, "kind") == "run" &&
+                payload.TryGetProperty("event", out var runEvent))
             {
-                if (payload.TryGetProperty("record", out var record))
+                // Use committed visible messages only: deltas, reasoning and task/tool diagnostics are not dialogue.
+                return Text(runEvent, "kind") switch
                 {
-                    if (record.TryGetProperty("prompt", out var prompt) && prompt.ValueKind == JsonValueKind.String)
-                    {
-                        var text = prompt.GetString();
-                        if (!string.IsNullOrWhiteSpace(text))
-                        {
-                            turn = new PortableTurn(ConversationRole.User, text!);
-                            return true;
-                        }
-                    }
-                    if (record.TryGetProperty("text", out var textProp) && textProp.ValueKind == JsonValueKind.String)
-                    {
-                        var text = textProp.GetString();
-                        var role = record.TryGetProperty("role", out var roleProp) && roleProp.GetString() == "assistant" ? ConversationRole.Assistant : ConversationRole.User;
-                        if (!string.IsNullOrWhiteSpace(text))
-                        {
-                            turn = new PortableTurn(role, text!);
-                            return true;
-                        }
-                    }
-                }
+                    "started" => Turn(ConversationRole.User, Text(runEvent, "prompt")),
+                    "assistant_message_committed" => Turn(ConversationRole.Assistant, Text(runEvent, "text")),
+                    _ => null
+                };
             }
-            // Fallback: look for any text field
-            if (root.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+            if (Text(root, "payload_type") is not null) return null;
+            if (payload.TryGetProperty("record", out var record))
             {
-                var text = t.GetString();
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    turn = new PortableTurn(ConversationRole.User, text!);
-                    return true;
-                }
+                if (Text(record, "prompt") is { } prompt) return Turn(ConversationRole.User, prompt);
+                return RoleTurn(Text(record, "role"), Text(record, "text"));
             }
         }
-        catch { }
-        return false;
+        return RoleTurn(Text(root, "role"), Text(root, "text"));
+    }
+
+    private static PortableTurn? RoleTurn(string? role, string? text) => role switch
+    {
+        "assistant" => Turn(ConversationRole.Assistant, text),
+        "user" or null => Turn(ConversationRole.User, text),
+        _ => null
+    };
+
+    private static PortableTurn? Turn(ConversationRole role, string? text) =>
+        string.IsNullOrWhiteSpace(text) ? null : new PortableTurn(role, text);
+
+    private static string? Text(JsonElement node, string key) => node.ValueKind == JsonValueKind.Object &&
+        node.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static JsonDocument? ParseRecord(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        try { return JsonDocument.Parse(text); }
+        catch (JsonException) { return null; }
     }
 
     private static InvalidDataException InvalidConversation() => new("Muse conversation is invalid.");

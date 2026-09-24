@@ -108,6 +108,12 @@ It touches this machine's mirror only. The remote keeps exactly the snapshot it 
 
 ## Session viewer
 
+The desktop manager and viewer load each agent independently. Ready histories appear while other agents are still loading; the status line names pending or unavailable sources. An agent with no local history is skipped. Reading retained history does not require its executable to be installed. With no histories, the window displays an empty-state message. This local catalog does not publish deletions when an agent disappears.
+
+Muse's main list includes the flat or dated main session directories, excluding nested `subagent` and tool-output directories. Titles come from the optional native `session-index.db`, opened read-only. Missing, incompatible or corrupt indexes fall back to bounded transcript metadata reads, cached until the transcript size or modification time changes. Large transcripts are not marked unreadable merely because they exceed the metadata read limit. In the viewer, **Show subagents** reads only the selected Muse conversation's descendants.
+
+Muse can be located with `MUSE_HOME` (or `MUSE_CODE_HOME`). Automatic discovery checks native homes, then running WSL distributions using their actual Linux home directory; it does not assume the Windows account name or start stopped distributions. If WSL is not installed or no distribution is running, Windows histories still load. For a stopped Muse distribution, start it before launching Agent Sync, or explicitly configure an accessible Muse home.
+
 Read what is inside a session without opening its native file:
 
 ```powershell

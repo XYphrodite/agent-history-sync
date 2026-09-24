@@ -256,6 +256,9 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_claudePaths is null || _claudeMemoryScanner is null) unscanned.Add(ObjectKind.ClaudeMemory);
         if (_continuePaths is null || _continueScanner is null) unscanned.Add(ObjectKind.ContinueSession);
         if (_kimiPaths is null || _kimiScanner is null) unscanned.Add(ObjectKind.KimiSession);
+        // Muse is currently available to the local catalog, but no Muse scanner is wired into
+        // this engine. Its absence can never authorize a repository-wide tombstone.
+        unscanned.Add(ObjectKind.MuseSession);
         if (_annotationsDirectory is null || _annotationScanner is null) unscanned.Add(ObjectKind.SessionAnnotations);
         return unscanned;
     }

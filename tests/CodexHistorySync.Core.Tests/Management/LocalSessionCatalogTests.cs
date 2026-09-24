@@ -10,6 +10,95 @@ namespace CodexHistorySync.Core.Tests.Management;
 public sealed class LocalSessionCatalogTests
 {
     [Fact]
+    public async Task IncrementalScanPublishesReadyAgentWhileMuseIsStillLoading()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var catalog = new LocalSessionCatalog(new FixedCatalogSource(ManagedAgent.Codex), null,
+            new FakeActiveState(), museSource: new GatedCatalogSource(release.Task));
+        await using var iterator = catalog.ScanIncrementallyAsync(CancellationToken.None).GetAsyncEnumerator();
+        try
+        {
+            Assert.True(await iterator.MoveNextAsync());
+            Assert.Contains(ManagedAgent.Muse, iterator.Current.PendingAgents);
+            Assert.True(await iterator.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Single(iterator.Current.Codex);
+            Assert.Empty(iterator.Current.Muse);
+            Assert.Equal([ManagedAgent.Muse], iterator.Current.PendingAgents);
+            release.SetResult();
+            Assert.True(await iterator.MoveNextAsync());
+            Assert.Single(iterator.Current.Muse);
+            Assert.Empty(iterator.Current.PendingAgents);
+            Assert.False(await iterator.MoveNextAsync());
+        }
+        finally { release.TrySetResult(); }
+    }
+
+    [Fact]
+    public async Task UnavailableSourceDoesNotHideOtherAgents()
+    {
+        var catalog = new LocalSessionCatalog(new FixedCatalogSource(ManagedAgent.Codex), null,
+            new FakeActiveState(), museSource: new ThrowingCatalogSource(ManagedAgent.Muse, new UnauthorizedAccessException()));
+        var snapshot = await catalog.ScanAsync(CancellationToken.None);
+        Assert.Single(snapshot.Codex);
+        Assert.Empty(snapshot.Muse);
+        Assert.Equal([ManagedAgent.Muse], snapshot.UnavailableAgents);
+        Assert.Contains("Muse", snapshot.LoadingMessage!);
+    }
+
+    [Theory]
+    [InlineData(ManagedAgent.Codex)]
+    [InlineData(ManagedAgent.Grok)]
+    [InlineData(ManagedAgent.Claude)]
+    [InlineData(ManagedAgent.Continue)]
+    [InlineData(ManagedAgent.Kimi)]
+    [InlineData(ManagedAgent.Muse)]
+    public async Task AnyMissingAgentLeavesAllOtherSourcesUsable(ManagedAgent missing)
+    {
+        var sources = ManagedAgents.All.Select(agent => agent == missing ? null : new FixedCatalogSource(agent)).ToArray();
+        var activity = new FakeActiveState();
+        var catalog = new LocalSessionCatalog(sources[0], sources[1], activity, sources[2], sources[3], sources[4], sources[5]);
+        var snapshot = await catalog.ScanAsync(CancellationToken.None);
+        Assert.DoesNotContain(missing, snapshot.ConfiguredAgents);
+        Assert.False(activity.TotalQueries.ContainsKey(missing));
+        Assert.Equal(5, snapshot.ConfiguredAgents.Count);
+        Assert.All(snapshot.ConfiguredAgents, agent => Assert.Single(snapshot.For(agent)));
+    }
+
+    [Fact]
+    public async Task NoInstalledAgentsReturnsExplicitEmptyStateWithoutActivityQueries()
+    {
+        var activity = new FakeActiveState();
+        var catalog = new LocalSessionCatalog((ILocalSessionCatalogSource?)null, null, activity);
+        var snapshot = await catalog.ScanAsync(CancellationToken.None);
+        Assert.Empty(snapshot.ConfiguredAgents);
+        Assert.Empty(snapshot.PendingAgents);
+        Assert.Empty(activity.TotalQueries);
+        Assert.Equal("No local agent histories found.", snapshot.LoadingMessage);
+    }
+
+    [Fact]
+    public async Task UncreatedCodexLayoutDoesNotInventAnInstalledAgent()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "absent-codex-" + Guid.NewGuid().ToString("N"));
+        var paths = new CodexPaths(home, Path.Combine(home, "sessions"), Path.Combine(home, "archived_sessions"), Path.Combine(home, "attachments"));
+        var activity = new FakeActiveState();
+        var snapshot = await new LocalSessionCatalog(paths, null, activity).ScanAsync(CancellationToken.None);
+        Assert.Empty(snapshot.ConfiguredAgents);
+        Assert.Empty(activity.TotalQueries);
+        Assert.False(Directory.Exists(home));
+    }
+
+    private sealed class GatedCatalogSource(Task release) : ILocalSessionCatalogSource
+    {
+        public ManagedAgent Agent => ManagedAgent.Muse;
+        public async Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(SessionCatalogReadLimiter limiter, CancellationToken ct)
+        {
+            await release.WaitAsync(ct);
+            return [Candidate("muse-ready", DateTimeOffset.UtcNow)];
+        }
+    }
+
+    [Fact]
     public async Task CodexSourceUsesOneEnumerationAndBoundedMetadata()
     {
         // Replacing the bounded metadata read with an unbounded read must make the recording IO observe a >64 KiB budget.
