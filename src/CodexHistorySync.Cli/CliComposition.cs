@@ -15,6 +15,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Management;
@@ -126,17 +127,18 @@ public static class CliComposition
         var continuePaths = ContinuePaths.TryResolve();
         var kimiPaths = KimiPaths.TryResolve();
         var musePaths = MusePaths.TryResolve();
+        var hermesPaths = HermesPaths.TryResolve();
         IManagedSessionActiveState activeState = OperatingSystem.IsWindows()
-            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths)
+            ? new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths, hermesPaths)
             : new ReadOnlySessionActiveState();
         var annotations = new SessionAnnotationStore();
         var catalog = new AnnotatedSessionCatalog(
-            new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths), annotations);
+            new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths, hermesPaths), annotations);
         var conversations = new SessionContentReader();
         var titling = SessionTitleConfiguration.Load(Environment.GetEnvironmentVariable("LOCALAPPDATA"));
         ILocalSessionOperations? operations = OperatingSystem.IsWindows()
             ? new LocalSessionOperations(codexPaths, grokPaths, activeState, new WindowsManagedSessionDirectoryDeleter(),
-                null, null, claudePaths, null, continuePaths, null, kimiPaths, null)
+                null, null, claudePaths, null, continuePaths, null, kimiPaths, null, musePaths, null, hermesPaths, null)
             : null;
         return new DesktopSessionViewerRunner(new Desktop.DesktopSessionServices(catalog,
             new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.LocalSessionFamilyReader(codexPaths, musePaths),
@@ -155,8 +157,9 @@ public static class CliComposition
         var continuePaths = ContinuePaths.TryResolve();
         var kimiPaths = KimiPaths.TryResolve();
         var musePaths = MusePaths.TryResolve();
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths);
+        var hermesPaths = HermesPaths.TryResolve();
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths, hermesPaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths, hermesPaths);
         // Only the viewer wears this machine's own titles; --manage stays exactly as it was.
         var annotationStore = new SessionAnnotationStore();
         var annotated = new AnnotatedSessionCatalog(catalog, annotationStore);
@@ -176,6 +179,10 @@ public static class CliComposition
             continuePaths,
             null,
             kimiPaths,
+            null,
+            musePaths,
+            null,
+            hermesPaths,
             null);
         var ansiConsole = AnsiConsole.Console;
         var view = new SpectreSessionViewerView(ansiConsole, new SpectreSessionManagerInput(ansiConsole));
@@ -198,8 +205,9 @@ public static class CliComposition
         var continuePaths = ContinuePaths.TryResolve();
         var kimiPaths = KimiPaths.TryResolve();
         var musePaths = MusePaths.TryResolve();
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths);
+        var hermesPaths = HermesPaths.TryResolve();
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths, hermesPaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths, hermesPaths);
         var annotationStore = new SessionAnnotationStore();
         return new AnnotatedSessionCatalog(catalog, annotationStore);
     }
@@ -213,10 +221,11 @@ public static class CliComposition
         var continuePaths = ContinuePaths.TryResolve();
         var kimiPaths = KimiPaths.TryResolve();
         var musePaths = MusePaths.TryResolve();
+        var hermesPaths = HermesPaths.TryResolve();
         var resolution = new CodexExecutableLocator().ResolveWithSource();
         var executable = ToCodexExecutableOption(resolution);
-        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths);
-        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths);
+        var activeState = new WindowsManagedSessionActiveState(codexPaths, grokPaths, claudePaths, kimiPaths, musePaths, hermesPaths);
+        var catalog = new LocalSessionCatalog(codexPaths, grokPaths, activeState, claudePaths, continuePaths, kimiPaths, musePaths, hermesPaths);
         var codexWriter = codexPaths is null
             ? null
             : new CodexConversationWriter(codexPaths, executable, new CodexCompatibilityProbe());
@@ -225,6 +234,7 @@ public static class CliComposition
         var continueWriter = continuePaths is null ? null : new ContinueConversationWriter(continuePaths);
         var kimiWriter = kimiPaths is null ? null : new KimiConversationWriter(kimiPaths);
         var museWriter = musePaths is null || musePaths.IsReadOnly ? null : new MuseConversationWriter(musePaths);
+        var hermesWriter = hermesPaths is null ? null : new HermesConversationWriter(hermesPaths);
         var operations = new LocalSessionOperations(
             codexPaths,
             grokPaths,
@@ -237,7 +247,11 @@ public static class CliComposition
             continuePaths,
             continueWriter,
             kimiPaths,
-            kimiWriter);
+            kimiWriter,
+            musePaths,
+            museWriter,
+            hermesPaths,
+            hermesWriter);
         var annotationStore = new SessionAnnotationStore();
         var annotatedCatalog = new AnnotatedSessionCatalog(catalog, annotationStore);
         var conversations = new CodexHistorySync.Core.Management.SessionContentReader();
@@ -257,17 +271,19 @@ public static class CliComposition
         var continuePaths2 = ContinuePaths.TryResolve();
         var kimiPaths2 = KimiPaths.TryResolve();
         var musePaths2 = MusePaths.TryResolve();
+        var hermesPaths2 = HermesPaths.TryResolve();
         var resolution2 = new CodexExecutableLocator().ResolveWithSource();
         var executable2 = ToCodexExecutableOption(resolution2);
-        var activeState2 = new WindowsManagedSessionActiveState(codexPaths2, grokPaths2, claudePaths2, kimiPaths2, musePaths2);
-        var catalog2 = new LocalSessionCatalog(codexPaths2, grokPaths2, activeState2, claudePaths2, continuePaths2, kimiPaths2, musePaths2);
+        var activeState2 = new WindowsManagedSessionActiveState(codexPaths2, grokPaths2, claudePaths2, kimiPaths2, musePaths2, hermesPaths2);
+        var catalog2 = new LocalSessionCatalog(codexPaths2, grokPaths2, activeState2, claudePaths2, continuePaths2, kimiPaths2, musePaths2, hermesPaths2);
         var codexWriter2 = codexPaths2 is null ? null : new CodexConversationWriter(codexPaths2, executable2, new CodexCompatibilityProbe());
         var grokWriter2 = grokPaths2 is null ? null : new GrokConversationWriter(grokPaths2);
         var claudeWriter2 = claudePaths2 is null ? null : new ClaudeConversationWriter(claudePaths2);
         var continueWriter2 = continuePaths2 is null ? null : new ContinueConversationWriter(continuePaths2);
         var kimiWriter2 = kimiPaths2 is null ? null : new KimiConversationWriter(kimiPaths2);
         var museWriter2 = musePaths2 is null || musePaths2.IsReadOnly ? null : new MuseConversationWriter(musePaths2);
-        var operations2 = new LocalSessionOperations(codexPaths2, grokPaths2, activeState2, new WindowsManagedSessionDirectoryDeleter(), codexWriter2, grokWriter2, claudePaths2, claudeWriter2, continuePaths2, continueWriter2, kimiPaths2, kimiWriter2);
+        var hermesWriter2 = hermesPaths2 is null ? null : new HermesConversationWriter(hermesPaths2);
+        var operations2 = new LocalSessionOperations(codexPaths2, grokPaths2, activeState2, new WindowsManagedSessionDirectoryDeleter(), codexWriter2, grokWriter2, claudePaths2, claudeWriter2, continuePaths2, continueWriter2, kimiPaths2, kimiWriter2, musePaths2, museWriter2, hermesPaths2, hermesWriter2);
         var ansiConsole2 = AnsiConsole.Console;
         var view2 = new SpectreSessionManagerView(ansiConsole2, new SpectreSessionManagerInput(ansiConsole2));
         return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog2, operations2, view2));

@@ -39,6 +39,14 @@ public sealed record CliStatusReport(int Local, int Remote, int Pending, int Con
     public bool KimiUncertain { get; init; }
     public bool MuseUncertain { get; init; }
 
+    /// <summary>Resolved Hermes home, or null when no Hermes home was found.</summary>
+    public string? HermesHome { get; init; }
+
+    public int HermesSessions { get; init; }
+
+    /// <summary>True when the Hermes scan could not confirm what it did not find.</summary>
+    public bool HermesUncertain { get; init; }
+
     public int ClaudeSessions { get; init; }
 
     public int ClaudeMemory { get; init; }
@@ -373,6 +381,7 @@ public sealed class CliApplication
             ("claude", [ObjectKind.ClaudeSession, ObjectKind.ClaudeMemory]),
             ("kimi", [ObjectKind.KimiSession]),
             ("muse", [ObjectKind.MuseSession]),
+            ("hermes", [ObjectKind.HermesSession]),
             ("annotations", [ObjectKind.SessionAnnotations]),
         };
         var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
@@ -438,6 +447,8 @@ public sealed class CliApplication
             $"muse-sessions={result.MuseSessions} muse-uncertain={(result.MuseUncertain ? "yes" : "no")}");
         console.WriteLine($"kimi-home={(result.KimiHome is null ? "none" : SafeToken(result.KimiHome))} " +
             $"kimi-sessions={result.KimiSessions} kimi-uncertain={(result.KimiUncertain ? "yes" : "no")}");
+        console.WriteLine($"hermes-home={(result.HermesHome is null ? "none" : SafeToken(result.HermesHome))} " +
+            $"hermes-sessions={result.HermesSessions} hermes-uncertain={(result.HermesUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

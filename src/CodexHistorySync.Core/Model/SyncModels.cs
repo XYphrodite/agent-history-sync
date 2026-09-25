@@ -54,7 +54,14 @@ public enum ObjectKind
     /// appended last, and carrying the same obligation: upgrade every machine before the first
     /// push that includes one.
     /// </summary>
-    MuseSession
+    MuseSession,
+
+    /// <summary>
+    /// Hermes Agent session package (one <c>sessions</c> row and its <c>messages</c> from
+    /// state.db). Appended after MuseSession for the same reason that one was appended last, and
+    /// carrying the same obligation: upgrade every machine before the first push that includes one.
+    /// </summary>
+    HermesSession
 }
 
 public readonly record struct LogicalObjectId(string Value);

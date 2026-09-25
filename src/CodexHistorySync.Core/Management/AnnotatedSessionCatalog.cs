@@ -53,7 +53,8 @@ public sealed class AnnotatedSessionCatalog(
         {
             Codex = Overlay(snapshot.Codex, stored), Grok = Overlay(snapshot.Grok, stored),
             Claude = Overlay(snapshot.Claude, stored), Continue = Overlay(snapshot.Continue, stored),
-            Kimi = Overlay(snapshot.Kimi, stored), Muse = Overlay(snapshot.Muse, stored)
+            Kimi = Overlay(snapshot.Kimi, stored), Muse = Overlay(snapshot.Muse, stored),
+            Hermes = Overlay(snapshot.Hermes, stored)
         };
 
     private static IReadOnlyList<ManagedSession> Overlay(

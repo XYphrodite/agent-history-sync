@@ -80,6 +80,7 @@ internal static class CliEntryPoint
         foreach (var (agent, directory) in new[] { ("codex", "sessions"), ("codex", "archived_sessions"),
             ("grok", "sessions"), ("claude", "projects"), ("continue", "sessions"), ("kimi", "sessions") })
             Directory.CreateDirectory(Path.Combine(root, agent, directory));
+        Directory.CreateDirectory(Path.Combine(root, "hermes"));
     }
 
     private static async Task<int> ManageAsync(string[] args, CliProfileStore store, ICliConsole console, CancellationToken ct)

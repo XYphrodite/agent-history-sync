@@ -1,6 +1,6 @@
 namespace CodexHistorySync.Core.Management;
 
-public enum ManagedAgent { Codex, Grok, Claude, Continue, Kimi, Muse }
+public enum ManagedAgent { Codex, Grok, Claude, Continue, Kimi, Muse, Hermes }
 
 /// <summary>
 /// Where <see cref="ManagedSession.Title"/> came from. An annotation may stand in for a title the
@@ -40,18 +40,19 @@ public sealed record SessionCatalogSnapshot(
     IReadOnlyList<ManagedSession> Claude,
     IReadOnlyList<ManagedSession> Continue,
     IReadOnlyList<ManagedSession> Kimi,
-    IReadOnlyList<ManagedSession> Muse)
+    IReadOnlyList<ManagedSession> Muse,
+    IReadOnlyList<ManagedSession> Hermes)
 {
     /// <summary>Kept so the two-agent call sites that predate Claude still compile.</summary>
     public SessionCatalogSnapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok)
-        : this(codex, grok, [], [], [], []) { }
+        : this(codex, grok, [], [], [], [], []) { }
 
     /// <summary>Kept so the three-agent call sites that predate Continue still compile.</summary>
     public SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude)
-        : this(codex, grok, claude, [], [], []) { }
+        : this(codex, grok, claude, [], [], [], []) { }
 
     /// <summary>Kept so the four-agent call sites that predate Kimi still compile.</summary>
     public SessionCatalogSnapshot(
@@ -59,7 +60,17 @@ public sealed record SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude,
         IReadOnlyList<ManagedSession> continueSessions)
-        : this(codex, grok, claude, continueSessions, [], []) { }
+        : this(codex, grok, claude, continueSessions, [], [], []) { }
+
+    /// <summary>Kept so the six-agent call sites that predate Hermes still compile.</summary>
+    public SessionCatalogSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude,
+        IReadOnlyList<ManagedSession> continueSessions,
+        IReadOnlyList<ManagedSession> kimi,
+        IReadOnlyList<ManagedSession> muse)
+        : this(codex, grok, claude, continueSessions, kimi, muse, []) { }
 
     /// <summary>
     /// Agents with a resolvable home, in panel order. An agent that is not installed gets no panel
@@ -67,7 +78,7 @@ public sealed record SessionCatalogSnapshot(
     /// the only thing that can tell "configured but empty" apart from "not configured", which the
     /// fallback below cannot, and which is why hand-built snapshots should set it explicitly.
     /// </summary>
-    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi, Muse);
+    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi, Muse, Hermes);
     public IReadOnlyList<ManagedAgent> PendingAgents { get; init; } = [];
     public IReadOnlyList<ManagedAgent> UnavailableAgents { get; init; } = [];
     public IReadOnlyDictionary<ManagedAgent, string> UnavailableReasons { get; init; } = new Dictionary<ManagedAgent, string>();
@@ -87,6 +98,7 @@ public sealed record SessionCatalogSnapshot(
         ManagedAgent.Continue => Continue,
         ManagedAgent.Kimi => Kimi,
         ManagedAgent.Muse => Muse,
+        ManagedAgent.Hermes => Hermes,
         _ => throw new ArgumentOutOfRangeException(nameof(agent))
     };
 
@@ -94,13 +106,15 @@ public sealed record SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> claude,
         IReadOnlyList<ManagedSession> continueSessions,
         IReadOnlyList<ManagedSession> kimi,
-        IReadOnlyList<ManagedSession> muse)
+        IReadOnlyList<ManagedSession> muse,
+        IReadOnlyList<ManagedSession> hermes)
     {
         var agents = new List<ManagedAgent> { ManagedAgent.Codex, ManagedAgent.Grok };
         if (claude.Count != 0) agents.Add(ManagedAgent.Claude);
         if (continueSessions.Count != 0) agents.Add(ManagedAgent.Continue);
         if (kimi.Count != 0) agents.Add(ManagedAgent.Kimi);
         if (muse.Count != 0) agents.Add(ManagedAgent.Muse);
+        if (hermes.Count != 0) agents.Add(ManagedAgent.Hermes);
         return agents;
     }
 
@@ -112,7 +126,7 @@ public sealed record SessionCatalogSnapshot(
 public static class ManagedAgents
 {
     public static IReadOnlyList<ManagedAgent> All { get; } =
-        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude, ManagedAgent.Continue, ManagedAgent.Kimi, ManagedAgent.Muse];
+        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude, ManagedAgent.Continue, ManagedAgent.Kimi, ManagedAgent.Muse, ManagedAgent.Hermes];
 
     /// <summary>A session copied out of <paramref name="source"/> can land on any other agent.</summary>
     public static IReadOnlyList<ManagedAgent> Destinations(ManagedAgent source) =>

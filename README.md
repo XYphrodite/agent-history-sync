@@ -1,8 +1,8 @@
 # Agent History Sync
 
-Windows 11 x64 CLI that synchronizes **Codex**, **Grok CLI**, **Claude Code**, **Continue**, and **Kimi Code CLI** conversation history through encrypted storage: a private GitHub repository or a self-hosted PostgreSQL API over Tailscale.
+Windows 11 x64 CLI that synchronizes **Codex**, **Grok CLI**, **Claude Code**, **Continue**, **Kimi Code CLI**, and **Hermes Agent** conversation history through encrypted storage: a private GitHub repository or a self-hosted PostgreSQL API over Tailscale.
 
-CLI для Windows 11 x64: синхронизация истории **Codex**, **Grok CLI**, **Claude Code**, **Continue** и **Kimi Code CLI** через зашифрованное хранилище — private-репозиторий GitHub или свой сервер с PostgreSQL через Tailscale.
+CLI для Windows 11 x64: синхронизация истории **Codex**, **Grok CLI**, **Claude Code**, **Continue**, **Kimi Code CLI** и **Hermes Agent** через зашифрованное хранилище — private-репозиторий GitHub или свой сервер с PostgreSQL через Tailscale.
 
 Self-hosted backend / серверное хранилище (slice 3): [setup, trust boundary, backup and restore](docs/server.md). No API token; client-side encryption remains. Existing GitHub installations are not migrated automatically.
 
@@ -20,6 +20,8 @@ Per-command profiles / Профиль для каждой команды: `agent
 
 > **Upgrading with more than one machine (Kimi):** update **every** machine before the first `push` that carries a Kimi Code CLI session. `ObjectKind.KimiSession` is new in the encrypted index and an older build rejects the whole index when it meets it. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-kimi-push).
 
+> **Upgrading with more than one machine (Hermes):** update **every** machine before the first `push` that carries a Hermes Agent session. `ObjectKind.HermesSession` is a new integer in the encrypted index and an older build rejects the whole index when it meets it. See [operations](docs/operations.md#upgrade-every-machine-before-the-first-hermes-push).
+
 ### What it syncs
 
 | Agent | Local path | What is uploaded |
@@ -29,6 +31,7 @@ Per-command profiles / Профиль для каждой команды: `agent
 | **Claude Code** | `%USERPROFILE%\.claude\projects` | One transcript JSONL per session, plus each markdown file under `<project>/memory/` as its own object (nothing from `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
 | **Continue** | `%USERPROFILE%\.continue\sessions` | One session JSON plus its entry in the shared `sessions.json` (nothing from `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
 | **Kimi Code CLI** | `%USERPROFILE%\.kimi-code\sessions` | Per-session package: `state.json` plus every `agents/<id>/wire.jsonl` and plan file, plus its line in the shared `session_index.jsonl` (nothing from `logs/`, `notify/`, `tasks/`, `cron/`, `credentials/`) |
+| **Hermes Agent** | `%LOCALAPPDATA%\hermes` (`HERMES_HOME`, or `%USERPROFILE%\.hermes` when that tree holds `state.db`) | One session from `state.db`: the `sessions` row and its `messages`. Nothing from `config.yaml`, credentials, logs, the WAL, or the full-text index. Named profiles under `profiles/<name>/state.db` are included |
 
 Beside the sessions themselves, `agent-sync` synchronizes the **titles and descriptions you give them** in `--sessions`: one small encrypted object per named session, kept in `%LOCALAPPDATA%\CodexHistorySync\annotations` and never written into an agent home.
 
@@ -183,6 +186,7 @@ Deleting `%LOCALAPPDATA%\CodexHistorySync` removes keys, config, conflict eviden
 | **Claude Code** | `%USERPROFILE%\.claude\projects` | По одному JSONL-транскрипту на сессию, плюс каждый markdown-файл из `<project>/memory/` отдельным объектом (ничего из `backups/`, `ide/`, `shell-snapshots/`, `session-env/`) |
 | **Continue** | `%USERPROFILE%\.continue\sessions` | JSON сессии плюс её запись в общем `sessions.json` (ничего из `config.yaml`, `config.ts`, `dev_data/`, `index/`) |
 | **Kimi Code CLI** | `%USERPROFILE%\.kimi-code\sessions` | Пакет на сессию: `state.json` плюс все `agents/<id>/wire.jsonl` и файлы планов, плюс её строка в общем `session_index.jsonl` (ничего из `logs/`, `notify/`, `tasks/`, `cron/`, `credentials/`) |
+| **Hermes Agent** | `%LOCALAPPDATA%\hermes` (`HERMES_HOME`, либо `%USERPROFILE%\.hermes`, если там лежит `state.db`) | Одна сессия из `state.db`: строка `sessions` и её `messages`. Ничего из `config.yaml`, ключей, логов, WAL и полнотекстового индекса. Именованные профили `profiles/<name>/state.db` тоже входят |
 
 Каждый успешный publish переписывает `main` в **один orphan-коммит** (хранилище-snapshot, не append-only история). Крупные tool-output’ы, compaction и картинки отбрасываются или обрезаются перед шифрованием. Локальные каталоги агентов **не меняются**.
 

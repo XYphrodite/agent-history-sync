@@ -30,7 +30,7 @@ If the client cannot find the executable on its PATH, use the absolute path retu
 | `search_sessions` | `query` (1–1024 characters), optional `limit` (1–200, default 20) | `sessions`, each with `agent`, `session_id`, `title`, and `snippet` |
 | `get_session` | `agent`, `session_id`, optional `offset` (default 0), `max_characters` (2–64000, default 16000) | Title, last-modified timestamp, a page of `text`, `offset`, `total_characters`, and `next_offset` |
 
-Use the exact `agent` and `session_id` from a search result. Agent names are `codex`, `grok`, `claude`, and `continue`; IDs are scoped to their agent. Neither tool accepts a filesystem path or a remote URL.
+Use the exact `agent` and `session_id` from a search result. Agent names are `codex`, `grok`, `claude`, `continue`, `kimi`, `muse`, and `hermes`; IDs are scoped to their agent. Neither tool accepts a filesystem path or a remote URL.
 
 Both tools return structured JSON and an equivalent text content block for clients that need it. Empty searches return an empty `sessions` array. Invalid arguments, missing sessions and unreadable files return tool errors without ending the connection.
 

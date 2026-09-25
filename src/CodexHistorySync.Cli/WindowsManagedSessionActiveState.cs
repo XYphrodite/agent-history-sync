@@ -15,6 +15,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Management;
@@ -41,6 +42,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     private readonly ClaudePaths? claudePaths;
     private readonly KimiPaths? kimiPaths;
     private readonly MusePaths? musePaths;
+    private readonly HermesPaths? hermesPaths;
     private readonly Func<int, string, bool> isNamedProcessRunning;
     private readonly Func<string, bool> isExclusiveLockHeld;
     private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
@@ -51,7 +53,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
 
     public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths, ClaudePaths? claudePaths = null,
         KimiPaths? kimiPaths = null,
-        MusePaths? musePaths = null)
+        MusePaths? musePaths = null,
+        HermesPaths? hermesPaths = null)
         : this(
             codexPaths,
             grokPaths,
@@ -63,7 +66,9 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
             IsAnyNamedProcessRunning,
             path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null,
             () => DateTime.UtcNow,
-            kimiPaths)
+            kimiPaths,
+            musePaths,
+            hermesPaths)
     {
     }
 
@@ -79,13 +84,15 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         Func<string, DateTime?>? lastWriteTimeUtc = null,
         Func<DateTime>? utcNow = null,
         KimiPaths? kimiPaths = null,
-        MusePaths? musePaths = null)
+        MusePaths? musePaths = null,
+        HermesPaths? hermesPaths = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
         this.claudePaths = claudePaths;
         this.kimiPaths = kimiPaths;
         this.musePaths = musePaths;
+        this.hermesPaths = hermesPaths;
         this.isAnyNamedProcessRunning = isAnyNamedProcessRunning ?? IsAnyNamedProcessRunning;
         this.lastWriteTimeUtc = lastWriteTimeUtc ?? (path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null);
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -123,6 +130,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ManagedAgent.Claude => ReadClaudeActiveIds(),
         ManagedAgent.Kimi => ReadKimiActiveIds(),
         ManagedAgent.Muse => ReadMuseActiveIds(),
+        ManagedAgent.Hermes => ReadHermesActiveIds(),
         _ => EmptyIds
     };
 
@@ -148,6 +156,31 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
                     (wireWrite is { } wire && wire >= activeSince))
                     ids.Add(sessionName[KimiPaths.SessionIdPrefix.Length..]);
             }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Hermes keeps every session in one database, so a running hermes process plus a message
+    /// newer than the activity window is what marks that session live.
+    /// </summary>
+    private IReadOnlySet<string> ReadHermesActiveIds()
+    {
+        if (hermesPaths is null || !isAnyNamedProcessRunning("hermes")) return EmptyIds;
+        var clock = DateTime.SpecifyKind(utcNow(), DateTimeKind.Utc);
+        var cutoff = new DateTimeOffset(clock).ToUnixTimeMilliseconds() / 1000d -
+            HermesSessionScanner.DefaultActivityWindow.TotalSeconds;
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var (sessionId, lastActiveUnix) in HermesSessionPackage.ReadActivity(hermesPaths))
+                if (lastActiveUnix >= cutoff) ids.Add(sessionId);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or
+                                          Microsoft.Data.Sqlite.SqliteException)
+        {
+            return EmptyIds;
+        }
 
         return ids;
     }

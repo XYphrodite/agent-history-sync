@@ -16,6 +16,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Management;
@@ -45,6 +46,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
     private readonly string? continueHome;
     private readonly string? kimiHome;
     private readonly string? museHome;
+    private readonly string? hermesHome;
     private readonly Action<SyncProgress>? syncProgress;
 
     public CoreCliSyncRuntime(string localAppData, ICliRepositoryGateway gateway, ICodexProcessDetector processDetector)
@@ -77,7 +79,8 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         string? claudeHome = null,
         string? continueHome = null,
         string? kimiHome = null,
-        string? museHome = null)
+        string? museHome = null,
+        string? hermesHome = null)
     {
         this.localAppData = Path.GetFullPath(localAppData ?? throw new ArgumentNullException(nameof(localAppData)));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
@@ -92,6 +95,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         this.continueHome = continueHome;
         this.kimiHome = kimiHome;
         this.museHome = museHome;
+        this.hermesHome = hermesHome;
         this.syncProgress = syncProgress;
     }
 
@@ -197,7 +201,10 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             MuseSessions = preview.LocalByKind.TryGetValue(ObjectKind.MuseSession, out var museCount) ? museCount : 0,
             KimiSessions = preview.LocalByKind.TryGetValue(ObjectKind.KimiSession, out var kimiCount) ? kimiCount : 0,
             MuseUncertain = preview.UncertainKinds.Contains(ObjectKind.MuseSession),
-            KimiUncertain = preview.UncertainKinds.Contains(ObjectKind.KimiSession)
+            KimiUncertain = preview.UncertainKinds.Contains(ObjectKind.KimiSession),
+            HermesHome = HermesPaths.TryResolve(hermesHome)?.Home,
+            HermesSessions = preview.LocalByKind.TryGetValue(ObjectKind.HermesSession, out var hermesCount) ? hermesCount : 0,
+            HermesUncertain = preview.UncertainKinds.Contains(ObjectKind.HermesSession)
         };
     }
 
@@ -214,6 +221,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         checks.Add(new("continue-paths", ContinuePaths.TryResolve(continueHome) is not null));
         checks.Add(new("kimi-paths", KimiPaths.TryResolve(kimiHome) is not null));
         checks.Add(new("muse-paths", MusePaths.TryResolve(museHome) is not null));
+        checks.Add(new("hermes-paths", HermesPaths.TryResolve(hermesHome) is not null));
         checks.Add(new("codex-version", await CommandSucceedsAsync("codex", ["--version"], cancellationToken).ConfigureAwait(false)));
         var serverStorage = configuration is not null && StoreEndpoint.IsServerUrl(configuration.RemoteUrl);
         if (!serverStorage) checks.Add(new("git-version", await CommandSucceedsAsync("git", ["--version"], cancellationToken).ConfigureAwait(false)));
@@ -271,18 +279,19 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
         var continuePaths = ContinuePaths.TryResolve(continueHome);
         var kimiPaths = KimiPaths.TryResolve(kimiHome);
         var musePaths = MusePaths.TryResolve(museHome);
+        var hermesPaths = HermesPaths.TryResolve(hermesHome);
         var scanner = new SessionScanner();
         var state = new LocalStateStore(localAppData);
         var annotationsDirectory = new SessionAnnotationStore(localAppData).Directory;
         var backups = new BackupStore(configuration.RepositoryId, localAppData, paths, grokPaths: grokPaths,
             claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory,
-            kimiPaths: kimiPaths);
+            kimiPaths: kimiPaths, hermesPaths: hermesPaths);
         var conflicts = new ConflictStore(configuration.RepositoryId, localAppData, paths);
         if (!requireKey) return new Components(paths, scanner, conflicts, null!);
         if (engineFactory is not null) return new Components(paths, scanner, conflicts, engineFactory(configuration, key));
         var writer = new CodexHistoryWriter(paths, backups, processDetector, grokPaths: grokPaths,
             claudePaths: claudePaths, continuePaths: continuePaths, annotationsDirectory: annotationsDirectory,
-            kimiPaths: kimiPaths);
+            kimiPaths: kimiPaths, hermesPaths: hermesPaths);
         // First-time history upload can stage hundreds of objects; the default 30s git timeout is too short.
         IStorageProvider provider = StoreEndpoint.IsServerUrl(configuration.RemoteUrl)
             ? new HttpStorageProvider(new StoreClient(new StoreEndpoint(configuration.RemoteUrl)), key)
@@ -297,7 +306,7 @@ public sealed class CoreCliSyncRuntime : ICliSyncRuntime
             var engine = new SyncEngine(configuration.RepositoryId,
                 configuration.DeviceId, paths, key, scanner, new RepositoryCrypto(), state, writer, conflicts, provider, staging,
                 grokPaths: grokPaths, progress: syncProgress, claudePaths: claudePaths, continuePaths: continuePaths,
-                annotationsDirectory: annotationsDirectory, kimiPaths: kimiPaths);
+                annotationsDirectory: annotationsDirectory, kimiPaths: kimiPaths, hermesPaths: hermesPaths);
             return new Components(paths, scanner, conflicts, engine, providerOwner);
         }
         catch { providerOwner?.Dispose(); throw; }

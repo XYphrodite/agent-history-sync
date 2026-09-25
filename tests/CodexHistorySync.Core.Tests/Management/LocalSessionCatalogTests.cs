@@ -52,15 +52,16 @@ public sealed class LocalSessionCatalogTests
     [InlineData(ManagedAgent.Continue)]
     [InlineData(ManagedAgent.Kimi)]
     [InlineData(ManagedAgent.Muse)]
+    [InlineData(ManagedAgent.Hermes)]
     public async Task AnyMissingAgentLeavesAllOtherSourcesUsable(ManagedAgent missing)
     {
         var sources = ManagedAgents.All.Select(agent => agent == missing ? null : new FixedCatalogSource(agent)).ToArray();
         var activity = new FakeActiveState();
-        var catalog = new LocalSessionCatalog(sources[0], sources[1], activity, sources[2], sources[3], sources[4], sources[5]);
+        var catalog = new LocalSessionCatalog(sources[0], sources[1], activity, sources[2], sources[3], sources[4], sources[5], sources[6]);
         var snapshot = await catalog.ScanAsync(CancellationToken.None);
         Assert.DoesNotContain(missing, snapshot.ConfiguredAgents);
         Assert.False(activity.TotalQueries.ContainsKey(missing));
-        Assert.Equal(5, snapshot.ConfiguredAgents.Count);
+        Assert.Equal(ManagedAgents.All.Count - 1, snapshot.ConfiguredAgents.Count);
         Assert.All(snapshot.ConfiguredAgents, agent => Assert.Single(snapshot.For(agent)));
     }
 

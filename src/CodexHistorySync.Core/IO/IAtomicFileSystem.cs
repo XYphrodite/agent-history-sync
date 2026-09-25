@@ -257,7 +257,8 @@ internal static class PathSafety
     }
 
     public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null,
-        Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null, Kimi.KimiPaths? kimiPaths = null)
+        Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null, Kimi.KimiPaths? kimiPaths = null,
+        Hermes.HermesPaths? hermesPaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
@@ -286,11 +287,15 @@ internal static class PathSafety
                 if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
                     throw new ArgumentException("The storage path must not overlap synchronized Kimi paths.", parameterName);
         }
+        if (hermesPaths is not null &&
+            (CodexPaths.IsPathWithin(candidate, hermesPaths.Home) || CodexPaths.IsPathWithin(hermesPaths.Home, candidate)))
+            throw new ArgumentException("The storage path must not overlap the synchronized Hermes home.", parameterName);
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
         Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null,
-        string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null, Muse.MusePaths? musePaths = null)
+        string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null, Muse.MusePaths? musePaths = null,
+        Hermes.HermesPaths? hermesPaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
         if (kind == ObjectKind.SessionAnnotations)
@@ -403,6 +408,16 @@ internal static class PathSafety
                 throw new ArgumentException("The destination is outside the synchronized Muse sessions directory.", parameterName);
             if (!musePaths.IsSynchronizedSessionFile(canonical))
                 throw new ArgumentException("Muse session destinations must be session.jsonl inside one session directory.", parameterName);
+            return canonical;
+        }
+
+        if (kind == ObjectKind.HermesSession)
+        {
+            if (hermesPaths is null) throw new ArgumentException("Hermes paths are required for Hermes session destinations.", parameterName);
+            if (!Hermes.HermesPaths.TryParseAnchor(canonical, out var home, out var profile, out var sessionId) ||
+                !string.Equals(home, hermesPaths.Home, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(canonical, hermesPaths.AnchorPath(profile, sessionId), StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Hermes session destinations must be <profile>/<session>.json inside the Hermes anchor directory.", parameterName);
             return canonical;
         }
 

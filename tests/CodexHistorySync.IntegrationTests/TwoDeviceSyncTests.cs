@@ -263,7 +263,7 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var device = CreateDevice("without-agents", remote, key, withClaudeHome: false, withKimiHome: false);
         var preview = await device.Engine.PreviewAsync(SyncMode.Bidirectional, CancellationToken.None);
         foreach (var kind in new[] { ObjectKind.GrokSession, ObjectKind.ClaudeSession, ObjectKind.ContinueSession,
-            ObjectKind.KimiSession, ObjectKind.MuseSession })
+            ObjectKind.KimiSession, ObjectKind.MuseSession, ObjectKind.HermesSession })
             Assert.Contains(kind, preview.UncertainKinds);
         Assert.DoesNotContain(ObjectKind.ActiveSession, preview.UncertainKinds);
     }

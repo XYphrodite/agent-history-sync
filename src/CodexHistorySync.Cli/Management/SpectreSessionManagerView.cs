@@ -299,6 +299,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         ManagedAgent.Continue => "Continue",
         ManagedAgent.Kimi => "Kimi",
         ManagedAgent.Muse => "Muse",
+        ManagedAgent.Hermes => "Hermes",
         _ => agent.ToString()
     };
 

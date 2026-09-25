@@ -4,6 +4,7 @@ using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Muse;
@@ -35,6 +36,7 @@ public sealed class CodexHistoryWriter
     private readonly ContinuePaths? _continuePaths;
     private readonly KimiPaths? _kimiPaths;
     private readonly MusePaths? _musePaths;
+    private readonly HermesPaths? _hermesPaths;
     private readonly string? _annotationsDirectory;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
@@ -44,7 +46,8 @@ public sealed class CodexHistoryWriter
 
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
         IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null,
-        ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, MusePaths? musePaths = null)
+        ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, MusePaths? musePaths = null,
+        HermesPaths? hermesPaths = null)
     {
         _annotationsDirectory = annotationsDirectory;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -56,12 +59,13 @@ public sealed class CodexHistoryWriter
         _continuePaths = continuePaths;
         _kimiPaths = kimiPaths;
         _musePaths = musePaths;
+        _hermesPaths = hermesPaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -73,7 +77,7 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         ct.ThrowIfCancellationRequested();
@@ -95,6 +99,9 @@ public sealed class CodexHistoryWriter
             return await ImportMusePackageAsync(incoming, plaintext, operationId, expected, destination, ct);
         if (incoming.Kind == ObjectKind.KimiSession)
             return await ImportKimiPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.HermesSession)
+            return await ImportHermesPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.SessionAnnotations)
             return await ImportAnnotationAsync(incoming, plaintext, operationId, expected, destination, ct)
@@ -131,9 +138,11 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
+        if (local.Kind == ObjectKind.HermesSession)
+            return await ApplyHermesTombstoneAsync(local, baselineHash, operationId, destination, ct).ConfigureAwait(false);
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
         ct.ThrowIfCancellationRequested();
         EnsureAgentInactive(local.Kind);
@@ -485,7 +494,8 @@ public sealed class CodexHistoryWriter
     /// </summary>
     private static bool IsPackageBackedKind(ObjectKind kind) =>
         kind is ObjectKind.GrokSession or ObjectKind.ClaudeSession or ObjectKind.ClaudeMemory
-            or ObjectKind.ContinueSession or ObjectKind.KimiSession or ObjectKind.MuseSession;
+            or ObjectKind.ContinueSession or ObjectKind.KimiSession or ObjectKind.MuseSession
+            or ObjectKind.HermesSession;
 
     private bool EnsureAgentInactive(ObjectKind kind)
     {
@@ -497,12 +507,14 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         ct.ThrowIfCancellationRequested();
         EnsureAgentInactive(plan.Target.Kind);
         if (!await MatchesExpectedStateAsync(destination, plan.Target.Kind, plan.Before, ct).ConfigureAwait(false))
             throw new IOException("Local history changed before the mutation batch could be captured.");
+        if (plan.Target.Kind == ObjectKind.HermesSession && plan.Before.Exists)
+            HermesSessionPackage.WriteAnchorSnapshot(destination);
         if (!plan.Before.Exists) return new RollbackCapture(destination, null);
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         var backupIntact = BackupStore.HashEquals(
@@ -517,14 +529,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         ct.ThrowIfCancellationRequested();
@@ -534,6 +546,12 @@ public sealed class CodexHistoryWriter
             throw new IOException("Local history changed after an interrupted synchronized mutation; automatic rollback was refused.");
         if (!before.Exists)
         {
+            if (kind == ObjectKind.HermesSession)
+            {
+                HermesSessionPackage.DeleteAnchor(destination);
+                if (File.Exists(destination)) File.Delete(destination);
+                return;
+            }
             if (after.Exists && !await _fileSystem.DeleteIfUnchangedAsync(destination, after.ContentHash!.Value,
                     () => EnsureAgentInactive(kind), ct).ConfigureAwait(false))
                 throw new IOException("The synchronized file changed before rollback deletion.");
@@ -561,6 +579,7 @@ public sealed class CodexHistoryWriter
             await _fileSystem.PublishAsync(temporary, destination,
                 packageBacked ? backup.ContentHash : before.ContentHash!.Value,
                 after.Exists ? after.ContentHash : null, () => EnsureAgentInactive(kind), ct).ConfigureAwait(false);
+            if (kind == ObjectKind.HermesSession) HermesSessionPackage.MaterializeAnchor(destination);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
@@ -587,6 +606,9 @@ public sealed class CodexHistoryWriter
 
     private static async Task<ContentHash?> ContentHashAsync(string destination, ObjectKind kind, CancellationToken ct)
     {
+        if (kind == ObjectKind.HermesSession)
+            return HermesSessionPackage.HashAnchor(destination);
+
         if (kind == ObjectKind.ContinueSession)
         {
             if (!File.Exists(destination)) return null;
@@ -750,6 +772,60 @@ public sealed class CodexHistoryWriter
         {
             return ImportApplyResult.Conflict;
         }
+    }
+
+    private async Task<ImportApplyResult> ImportHermesPackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_hermesPaths is null) throw new InvalidOperationException("Hermes paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = HermesSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        if (!HermesPaths.TryParseAnchor(destination, out _, out var profile, out var sessionId) ||
+            !string.Equals(HermesSessionPackage.ToLogicalId(profile, sessionId), incoming.Id.Value, StringComparison.Ordinal) ||
+            !string.Equals(HermesSessionPackage.LogicalIdOf(packageBytes), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("Hermes session package id does not match the logical object id.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.HermesSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists)
+        {
+            HermesSessionPackage.WriteAnchorSnapshot(destination);
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+        }
+
+        try
+        {
+            HermesSessionPackage.Materialize(_hermesPaths, packageBytes);
+            HermesSessionPackage.WriteAnchorSnapshot(destination);
+            var after = await ContentHashAsync(destination, ObjectKind.HermesSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("Hermes session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
+    private async Task<TombstoneApplyResult> ApplyHermesTombstoneAsync(LocalObject local, ContentHash baselineHash,
+        string operationId, string destination, CancellationToken ct)
+    {
+        if (_hermesPaths is null) throw new InvalidOperationException("Hermes paths are not configured.");
+        ct.ThrowIfCancellationRequested();
+        EnsureAgentInactive(local.Kind);
+        var current = await ContentHashAsync(destination, ObjectKind.HermesSession, ct).ConfigureAwait(false);
+        if (current is null) return TombstoneApplyResult.Applied;
+        if (!BackupStore.HashEquals(current.Value, baselineHash)) return TombstoneApplyResult.Conflict;
+        HermesSessionPackage.WriteAnchorSnapshot(destination);
+        await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+        HermesSessionPackage.DeleteAnchor(destination);
+        if (File.Exists(destination)) File.Delete(destination);
+        return TombstoneApplyResult.Applied;
     }
 
 }

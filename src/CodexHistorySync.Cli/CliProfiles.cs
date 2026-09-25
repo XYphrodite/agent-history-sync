@@ -220,6 +220,7 @@ internal sealed class CliProfileEnvironment : IDisposable
             values["CONTINUE_GLOBAL_DIR"] = Path.Combine(sessions, "continue");
             values["KIMI_CODE_HOME"] = Path.Combine(sessions, "kimi");
             values["MUSE_HOME"] = Path.Combine(sessions, "muse");
+            values["HERMES_HOME"] = Path.Combine(sessions, "hermes");
         }
         try
         {

@@ -354,6 +354,24 @@ Kimi publishes no active-session file. Like Claude, a session is treated as live
 
 Copying out of Kimi takes user/assistant text from the `agent.message.appended` events of each agent wire; thinking blocks and tool calls stay behind, the same rule other agents follow. Copying into Kimi synthesizes a new session: a fresh UUID, a `state.json`, a minimal `wire.jsonl`, and a merged index line. The synthesized session is written to look like a native one, but **resuming it inside Kimi Code CLI is not verified** — treat copies into Kimi as archived transcripts rather than continuable conversations.
 
+## Hermes Agent sessions
+
+When a Hermes home exists, `agent-sync` inventories sessions from `state.db`. Resolution order is `HERMES_HOME`, then `%LOCALAPPDATA%\hermes` when that directory exists, then `%USERPROFILE%\.hermes` when that is the tree that holds `state.db` (or the only home present). Named profiles are separate databases at `<home>\profiles\<name>\state.db`.
+
+One session is one encrypted package under logical id `he-<profile>~<session-id>` (`profile` is `default` for the home database). The package is the `sessions` row plus its `messages` rows. SQLite's local message row id is not part of the package, so the same conversation hashes the same way on another machine. Null columns are omitted, so a column only one machine has does not republish forever. Full-text tables, gateway locks, `config.yaml`, credentials, logs, and the WAL are not read.
+
+Import writes those rows back into the local `state.db`, creating the database with the columns the package carries when Hermes has not opened that home yet. A home directory with no `state.db` is not treated as "every Hermes session was deleted": absence is uncertain until a database can be read, so a fresh install cannot publish tombstones for sessions that live on another machine.
+
+Hermes publishes no per-session lock. A session is deferred when a `hermes` process is running **and** its newest message timestamp falls within the last 30 seconds. A session whose rows change between the two scan reads is deferred even when the process name is not visible.
+
+### Upgrade every machine before the first Hermes push
+
+`ObjectKind.HermesSession` is a new integer in the encrypted index, and the rule from [the Claude gate](#upgrade-every-machine-before-the-first-claude-push) applies unchanged: a build that does not know the value rejects the **whole** index and its `pull` stops working for every agent, not just Hermes. Upgrade every machine sharing the repository before the first push that carries a Hermes session. `agent-sync status` prints `hermes-sessions=` on a build that knows the kind and does not on an older one.
+
+### Cross-agent copy
+
+Copying out of Hermes keeps user and assistant text. Tool rows and reasoning stay in the native package and out of the portable copy. Copying into Hermes inserts a new `source=cli` session in the default profile's `state.db`, with `active=1` on each message, so `hermes --resume <id>` loads the same turns. Titles are unique in Hermes; a colliding title is retried once with a ` (copy)` suffix.
+
 ## Status and diagnostics
 
 ```powershell
@@ -362,7 +380,7 @@ agent-sync doctor
 agent-sync doctor --compatibility-session <inactive archived JSONL> --codex-exe <codex executable>
 ```
 
-`status` also prints a second line for Claude: the resolved projects root (or `none`), how many Claude sessions the scan saw, and whether that count is uncertain because something could not be read. A third line reports the same for Continue, and a fourth for Kimi (`kimi-home=`, `kimi-sessions=`, `kimi-uncertain=`). `doctor` reports `claude-paths`, `continue-paths`, and `kimi-paths`, each of which fails only when no home of that agent was found — that is the first thing to check when the manager shows no panel for that agent.
+`status` also prints a line per installed agent family: Claude (`claude-home=`, `claude-sessions=`, `claude-memory=`, `claude-uncertain=`), Continue, Muse, Kimi, and Hermes (`hermes-home=`, `hermes-sessions=`, `hermes-uncertain=`). `doctor` reports `claude-paths`, `continue-paths`, `kimi-paths`, `muse-paths`, and `hermes-paths`, each of which fails only when no home of that agent was found — that is the first thing to check when the manager shows no panel for that agent.
 
 `status` performs the same authenticated, non-mutating three-way planning used by synchronization. It reports local, remote, pending, and conflict counts plus both the current authenticated remote revision and the last successfully synchronized revision. Its conflict count is the exact identity-deduplicated union of persisted evidence and conflicts in the current plan; an unreadable evidence store makes status fail closed. Equal counts do not hide divergent objects.
 

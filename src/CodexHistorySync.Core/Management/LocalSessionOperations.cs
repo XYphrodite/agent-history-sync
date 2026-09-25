@@ -5,6 +5,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Grok;
+using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Muse;
 
@@ -24,12 +25,15 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly ContinuePaths? continuePaths;
     private readonly KimiPaths? kimiPaths;
     private readonly MusePaths? musePaths;
+    private readonly HermesPaths? hermesPaths;
     private readonly IConversationWriter? continueWriter;
     private readonly IConversationReader continueReader;
     private readonly IConversationWriter? kimiWriter;
     private readonly IConversationWriter? museWriter;
+    private readonly IConversationWriter? hermesWriter;
     private readonly IConversationReader kimiReader;
     private readonly IConversationReader museReader;
+    private readonly IConversationReader hermesReader;
     private readonly IManagedSessionActiveState activeState;
     private readonly IManagedSessionDirectoryDeleter directoryDeleter;
     private readonly IConversationWriter? codexWriter;
@@ -86,6 +90,8 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         "The staged Muse conversation failed validation.",
         "The selected Muse target is invalid.",
         "The selected Muse identity is invalid.",
+        "The selected Hermes target is invalid.",
+        "Hermes conversation is invalid.",
         "The staged Kimi conversation failed validation.",
         "The selected Grok identity is invalid.",
         "The selected agent is invalid.",
@@ -114,7 +120,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         KimiPaths? kimiPaths = null,
         IConversationWriter? kimiWriter = null,
         MusePaths? musePaths = null,
-        IConversationWriter? museWriter = null)
+        IConversationWriter? museWriter = null,
+        HermesPaths? hermesPaths = null,
+        IConversationWriter? hermesWriter = null)
         : this(
             codexPaths,
             grokPaths,
@@ -136,7 +144,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             new KimiConversationReader(),
             musePaths,
             museWriter,
-            new MuseConversationReader())
+            new MuseConversationReader(),
+            hermesPaths,
+            hermesWriter,
+            new HermesConversationReader())
     {
     }
 
@@ -161,7 +172,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationReader? kimiReader = null,
         MusePaths? musePaths = null,
         IConversationWriter? museWriter = null,
-        IConversationReader? museReader = null)
+        IConversationReader? museReader = null,
+        HermesPaths? hermesPaths = null,
+        IConversationWriter? hermesWriter = null,
+        IConversationReader? hermesReader = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -177,6 +191,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.musePaths = musePaths;
         this.museWriter = museWriter;
         this.museReader = museReader ?? new MuseConversationReader();
+        this.hermesPaths = hermesPaths;
+        this.hermesWriter = hermesWriter;
+        this.hermesReader = hermesReader ?? new HermesConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
         this.codexWriter = codexWriter;
@@ -286,6 +303,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Continue => continueWriter,
         ManagedAgent.Kimi => kimiWriter,
         ManagedAgent.Muse => museWriter,
+        ManagedAgent.Hermes => hermesWriter,
         _ => null
     };
 
@@ -297,6 +315,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Continue => continueReader,
         ManagedAgent.Kimi => kimiReader,
         ManagedAgent.Muse => museReader,
+        ManagedAgent.Hermes => hermesReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 
@@ -379,6 +398,13 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             // The shared index lists every session Kimi can resume; the row for a deleted session
             // would point at a directory that no longer exists.
             RemoveFromKimiIndex(KimiPaths.SessionIdPrefix + source.SessionId);
+            return;
+        }
+
+        if (source.Agent == ManagedAgent.Hermes && hermesPaths is not null)
+        {
+            HermesSessionPackage.DeleteAnchor(validated.NativePath);
+            if (File.Exists(validated.NativePath)) File.Delete(validated.NativePath);
             return;
         }
 
@@ -572,6 +598,16 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
                 nativePath);
         }
 
+        if (source.Agent == ManagedAgent.Hermes)
+        {
+            if (hermesPaths is null ||
+                !HermesPaths.TryParseAnchor(source.NativePath, out var home, out _, out var sessionId) ||
+                !string.Equals(home, hermesPaths.Home, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(sessionId, source.SessionId, StringComparison.Ordinal))
+                throw new InvalidDataException("The selected Hermes target is invalid.");
+            return new Target(hermesPaths.AnchorRoot, Path.GetFullPath(source.NativePath));
+        }
+
         throw new InvalidDataException("The selected agent is invalid.");
     }
 
@@ -668,6 +704,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ManagedAgent.Continue => ConversationAgent.Continue,
             ManagedAgent.Kimi => ConversationAgent.Kimi,
             ManagedAgent.Muse => ConversationAgent.Muse,
+            ManagedAgent.Hermes => ConversationAgent.Hermes,
             _ => throw new InvalidDataException("The selected agent is invalid.")
         };
         if (conversation.SourceAgent != expectedAgent ||
@@ -704,6 +741,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent agent,
         CancellationToken cancellationToken)
     {
+        if (agent == ManagedAgent.Hermes)
+            return await Task.Run(() => HermesSessionPackage.Fingerprint(nativePath), cancellationToken).ConfigureAwait(false);
+
         if (IsFileBackedAgent(agent))
             return await HashFileAsync(nativePath, cancellationToken).ConfigureAwait(false);
 
@@ -735,6 +775,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (agent == ManagedAgent.Hermes)
+            return HermesSessionPackage.Fingerprint(nativePath);
+
         if (IsFileBackedAgent(agent))
             return HashFileImmediate(nativePath, cancellationToken);
 

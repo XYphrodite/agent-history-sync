@@ -50,6 +50,7 @@ public sealed class SessionSearchCommand(
         ManagedAgent.Continue => "continue",
         ManagedAgent.Kimi => "kimi",
         ManagedAgent.Muse => "muse",
+        ManagedAgent.Hermes => "hermes",
         _ => "unknown"
     };
 

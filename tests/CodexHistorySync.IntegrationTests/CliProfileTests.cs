@@ -126,7 +126,7 @@ public sealed class CliProfileTests
         {
             ["LOCALAPPDATA"] = "old-data", ["CODEX_HOME"] = "old-codex", ["GROK_HOME"] = null,
             ["CLAUDE_CONFIG_DIR"] = "old-claude", ["CONTINUE_GLOBAL_DIR"] = "old-continue",
-            ["KIMI_CODE_HOME"] = "old-kimi", ["MUSE_HOME"] = "old-muse"
+            ["KIMI_CODE_HOME"] = "old-kimi", ["MUSE_HOME"] = "old-muse", ["HERMES_HOME"] = "old-hermes"
         };
         var original = environment.ToDictionary(pair => pair.Key, pair => pair.Value);
         await Assert.ThrowsAsync<InvalidOperationException>(() => CliEntryPoint.RunAsync(
@@ -142,6 +142,7 @@ public sealed class CliProfileTests
                 Assert.Equal(Path.Combine(homes, "continue"), environment["CONTINUE_GLOBAL_DIR"]);
                 Assert.Equal(Path.Combine(homes, "kimi"), environment["KIMI_CODE_HOME"]);
                 Assert.Equal(Path.Combine(homes, "muse"), environment["MUSE_HOME"]);
+                Assert.Equal(Path.Combine(homes, "hermes"), environment["HERMES_HOME"]);
                 throw new InvalidOperationException("test failure");
             }));
         Assert.Equal(original.OrderBy(pair => pair.Key), environment.OrderBy(pair => pair.Key));

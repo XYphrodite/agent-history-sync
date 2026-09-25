@@ -86,7 +86,8 @@ agent-sync --sessions --profile reader
 ```
 
 Внутри `--sessions-dir` используются `codex\sessions`, `codex\archived_sessions`,
-`grok\sessions`, `claude\projects`, `continue\sessions` и `kimi\sessions`. При первом запуске
+`grok\sessions`, `claude\projects`, `continue\sessions`, `kimi\sessions` и каталог `hermes`
+(дом Hermes, переменная `HERMES_HOME`). При первом запуске
 синхронизации эти каталоги создаются. Каталог SQLite, аннотации, настройки
 названий и диагностика используют `--data-dir` выбранного профиля.
 Профиль задаёт папки и подключение; он не вводит отдельные права доступа на сервере.

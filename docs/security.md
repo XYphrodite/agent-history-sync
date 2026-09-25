@@ -38,6 +38,8 @@ Only complete, stable active and archived JSONL session files are synchronized. 
 
 For Claude Code, only `projects/**/*.jsonl` leaves the machine. `backups/`, `ide/`, `session-env/`, `shell-snapshots/`, settings files, and any credential material under `%USERPROFILE%\.claude` are never read by the scanner and never reach a Git blob. A transcript is synchronized whole, so tool output and file contents that Claude recorded in the conversation are inside the encrypted package — the same exposure the conversation itself already carries.
 
+For Hermes Agent, only the `sessions` row and its `messages` rows leave `state.db`. `config.yaml`, credential files, logs, the WAL/SHM sidecars, and the FTS index are never read. A message body is synchronized whole, so tool output Hermes recorded is inside the encrypted package. The logical id is `he-<profile>~<session-id>`; the file under `.agent-sync-hermes/` is only a path key for the sync journal, not a second copy Hermes reads.
+
 Attachment discovery is intentionally disabled in the MVP. The security audit places a unique canary in the synthetic attachment directory and proves it does not reach any Git blob. Attachments may be added only after Codex exposes a documented typed reference that can be validated without guessing paths or scanning arbitrary files.
 
 Remote Git history is intentionally non-append-only: each publish force-updates `main` to one orphan commit under compare-and-swap (`force-with-lease`). GitHub may retain unreachable objects until its garbage collection runs; operators who need immediate reclaim can re-create the private repository.
@@ -64,18 +66,18 @@ The supported local security boundary is immediate pre-publish/final-action hash
 
 The release audit uses only synthetic disposable homes. It scans every blob reachable from every ref and historical commit, validates the allowed public manifest separately, authenticates every historical encrypted index and object with the test key, audits the dedicated working clone and typed agent logs, and checks forbidden filenames, marker content, local paths, and credential-bearing URLs. The clone's explicitly allowed structural `.git` data is limited to Git control files, configuration, index, refs and reflogs, standard hook samples and `info` files, plus loose, packed, and temporary object-store artifacts. Their paths and bytes are audited too; `.git` is not excluded as a whole. No real Codex history is used.
 
-## Session titling boundary
-
-`agent-sync --sessions` can ask a local model to name a session. The paragraph above still holds for `--manage`: that screen makes no network request at all. In the viewer one request is made per press of `T`, and on no other key, no scan, no render, and no refresh.
-
-What is sent is the digest of the one selected session: its user and assistant turns, technical wrappers dropped, each turn cut at 2,000 characters and the whole cut to 18,000 with the middle elided. Reasoning, tool calls, and tool results are not part of the portable model and are not sent. Nothing else leaves the machine - no other session, no path, no repository state, and no key material.
-
-Where it may be sent is configured and has no default. With no endpoint configured the feature is inert. A configured endpoint is refused unless it is `http` or `https` on `localhost`, a loopback address, or a private address: `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `100.64/10` (where tailnet nodes live), IPv6 loopback, `fc00::/7`, or `fe80::/10`. A DNS name other than `localhost` is refused, because a name can be repointed after it is configured.
-
+## Session titling boundary
+
+`agent-sync --sessions` can ask a local model to name a session. The paragraph above still holds for `--manage`: that screen makes no network request at all. In the viewer one request is made per press of `T`, and on no other key, no scan, no render, and no refresh.
+
+What is sent is the digest of the one selected session: its user and assistant turns, technical wrappers dropped, each turn cut at 2,000 characters and the whole cut to 18,000 with the middle elided. Reasoning, tool calls, and tool results are not part of the portable model and are not sent. Nothing else leaves the machine - no other session, no path, no repository state, and no key material.
+
+Where it may be sent is configured and has no default. With no endpoint configured the feature is inert. A configured endpoint is refused unless it is `http` or `https` on `localhost`, a loopback address, or a private address: `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `100.64/10` (where tailnet nodes live), IPv6 loopback, `fc00::/7`, or `fe80::/10`. A DNS name other than `localhost` is refused, because a name can be repointed after it is configured.
+
 Titles and descriptions are stored one file per session under `%LOCALAPPDATA%\CodexHistorySync\annotations`. No agent home is written: an annotation never becomes an `ai-title` record, a Codex index entry, or any other native artifact.
 
-They are synchronized. An annotation is `CHS1`-encrypted like every other object, so its text is no more visible in the repository than a transcript is, and it is the first synchronized object that is not session history: the import path that writes into agent homes refuses it, and the annotations directory refuses everything else. A destination is built from the annotation itself and the configured directory, never from a path an incoming object carries.
-
+They are synchronized. An annotation is `CHS1`-encrypted like every other object, so its text is no more visible in the repository than a transcript is, and it is the first synchronized object that is not session history: the import path that writes into agent homes refuses it, and the annotations directory refuses everything else. A destination is built from the annotation itself and the configured directory, never from a path an incoming object carries.
+
 ## Reporting a suspected exposure
 
 Stop the agent with `agent-sync agent uninstall`, close Codex, and revoke repository access. Preserve the encrypted repository and local recovery directories without posting them publicly. Treat a lost passphrase differently from an exposed passphrase: a lost passphrase cannot be recovered; an exposed passphrase requires migration to a newly keyed private repository.
