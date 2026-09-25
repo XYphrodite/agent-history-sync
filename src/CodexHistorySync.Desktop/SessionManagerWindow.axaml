@@ -75,6 +75,8 @@
         <WrapPanel Grid.Row="1" Margin="0,0,0,14">
           <Button Content="{Binding CopyLabel}" Classes="accent" Click="OnCopy" IsEnabled="{Binding CanCopy}" Margin="0,0,8,6" ToolTip.Tip="Copy conversation to another agent (C)" />
           <Button Content="Delete…" Click="OnDelete" IsEnabled="{Binding CanDelete}" Margin="0,0,8,6" ToolTip.Tip="Delete local session only (Del)" />
+          <TextBlock Text="{Binding DeleteUnavailableReason}" IsVisible="{Binding HasDeleteUnavailableReason}"
+                     Classes="muted" TextWrapping="Wrap" MaxWidth="620" FontSize="12" VerticalAlignment="Center" />
         </WrapPanel>
         <StackPanel Grid.Row="2" Spacing="8" Margin="0,0,0,14">
           <Grid ColumnDefinitions="*,Auto,Auto,Auto" IsEnabled="{Binding HasSelection}">

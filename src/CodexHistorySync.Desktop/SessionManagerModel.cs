@@ -56,8 +56,12 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
     public string Description => selected?.Annotation?.Description ?? string.Empty;
     public bool HasSelection => selected is not null;
     public bool HasTrace => trace is not null;
-    public bool CanCopy => selected is not null && !selected.IsReadOnly && !selected.IsActive && selected.CanRead && services.Operations is not null && AvailableTargets.Count > 0;
+    public bool CanCopy => selected is not null && !selected.IsActive && selected.CanRead && services.Operations is not null && AvailableTargets.Count > 0;
     public bool CanDelete => selected is not null && !selected.IsReadOnly && !selected.IsActive && selected.CanRead && services.Operations is not null;
+    public string DeleteUnavailableReason => selected?.IsReadOnly == true
+        ? "This WSL disk is read-only. Delete the original session in Muse after starting WSL. Copying does not require WSL."
+        : string.Empty;
+    public bool HasDeleteUnavailableReason => DeleteUnavailableReason.Length > 0;
     public IReadOnlyList<ManagedAgent> AvailableTargets
     {
         get
@@ -203,14 +207,26 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
         finally { if (!token.IsCancellationRequested) IsLoading = false; }
     }
 
-    public async Task CopyAsync(ManagedAgent target)
+    public async Task<string> GetCopyWorkingDirectoryAsync()
+    {
+        if (selected is null) return string.Empty;
+        try
+        {
+            var conversation = await services.Conversations.ReadAsync(selected, lifetime.Token);
+            var directory = Core.Conversion.MuseConversationReader.LocalWorkingDirectory(conversation.WorkingDirectory);
+            return directory is not null && Directory.Exists(directory) ? directory : string.Empty;
+        }
+        catch (Exception ex) when (ReadFailure(ex)) { return string.Empty; }
+    }
+
+    public async Task CopyAsync(ManagedAgent target, string? workingDirectory = null)
     {
         var source = selected;
         if (source is null || services.Operations is null) return;
         try
         {
             Status = $"Copying to {target}…";
-            var newId = await services.Operations.CopyAsync(source, target, lifetime.Token);
+            var newId = await services.Operations.CopyAsync(source, target, workingDirectory, lifetime.Token);
             await RefreshAsync();
             Status = $"Copied to {target} ({newId}).";
         }
@@ -299,7 +315,7 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
     private void NotifySelection()
     {
         foreach (var name in new[] { nameof(Selected), nameof(Title), nameof(Subtitle), nameof(Description), nameof(HasSelection),
-            nameof(HasTrace), nameof(CanCopy), nameof(CanDelete), nameof(CopyLabel), nameof(ActiveBadge), nameof(UnreadableBadge),
+            nameof(HasTrace), nameof(CanCopy), nameof(CanDelete), nameof(DeleteUnavailableReason), nameof(HasDeleteUnavailableReason), nameof(CopyLabel), nameof(ActiveBadge), nameof(UnreadableBadge),
             nameof(IsSelectedActive), nameof(IsSelectedUnreadable), nameof(IsSelectedReadable), nameof(AvailableTargets) }) Changed(name);
     }
 

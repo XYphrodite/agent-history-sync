@@ -90,7 +90,8 @@ internal sealed class MuseWslDisk(string distribution, string image, string? hom
                 await ExtractAsync(source.Entry, Path.Combine(directory, MusePaths.SessionFileName), ct).ConfigureAwait(false);
                 var conversation = await new MuseConversationReader().ReadAsync(directory, ct).ConfigureAwait(false);
                 if (CheckDisk() != before) throw new IOException("The WSL disk changed while reading. Refresh the session list.");
-                return conversation with { Title = session.Title, CreatedAt = source.Entry.Modified, LastModifiedAt = source.Entry.Modified };
+                return conversation with { Title = session.TitleSource == ManagedTitleSource.SessionId ? conversation.Title : session.Title,
+                    CreatedAt = source.Entry.Modified, LastModifiedAt = source.Entry.Modified };
             }
             finally { temporary.Delete(recursive: true); }
         }

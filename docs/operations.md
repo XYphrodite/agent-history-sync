@@ -8,7 +8,7 @@ Running distributions use the normal filesystem path. Stopped distributions use 
 
 Disk mode reads the file listing and optional native title index first. It extracts only the selected session journal into a temporary directory and removes that directory after reading. It does not mount the disk, start Linux, copy the entire image, or maintain a persistent transcript cache. Subagents are grouped beneath their parent. Unindexed sessions display their IDs; listing them does not require extracting their journals.
 
-Disk-backed sessions show a read-only label. Delete and cross-agent copy are disabled; viewing and export remain available. Background full-text indexing skips disk-backed sessions to avoid extracting the whole history; search within an opened conversation works normally. If WSL starts or the disk changes during a read, refresh/reopen instead of using a stale disk snapshot.
+Disk-backed sessions show a read-only label. They can be viewed, exported, or copied to another configured agent without starting WSL or changing the source disk. Copying Muse asks for the destination agent and a local project folder; `/mnt/<drive>/...` workspace paths are mapped to Windows paths when available. Deletion from the stopped disk remains unavailable; the manager explains that the original session must be deleted in Muse after starting WSL. Background full-text indexing skips disk-backed sessions to avoid extracting the whole history; search within an opened conversation works normally. If WSL starts or the disk changes during a read, refresh/reopen instead of using a stale disk snapshot.
 
 ## Prerequisites
 

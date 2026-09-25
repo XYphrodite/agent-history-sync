@@ -189,7 +189,6 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source)
     {
         ArgumentNullException.ThrowIfNull(source);
-        if (source.IsReadOnly) return [];
         return ManagedAgents.Destinations(source.Agent).Where(agent => WriterFor(agent) is not null).ToArray();
     }
 
@@ -219,13 +218,30 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         }
     }
 
-    public async Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken)
+    public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken) =>
+        CopyAsync(source, target, null, cancellationToken);
+
+    public async Task<string> CopyAsync(ManagedSession source, ManagedAgent target, string? workingDirectory, CancellationToken cancellationToken)
     {
         try
         {
             ArgumentNullException.ThrowIfNull(source);
             if (target == source.Agent) throw new InvalidOperationException("The destination agent is unavailable.");
+            if (source.DiskSession is { } disk)
+            {
+                var diskWriter = WriterFor(target)
+                    ?? throw new InvalidOperationException("The destination agent is unavailable.");
+                if (!source.CanRead) throw new InvalidDataException("The session is not readable.");
+                if (source.IsActive) throw new InvalidOperationException("The session is active.");
+                var conversation = await disk.Disk.ReadAsync(source, cancellationToken).ConfigureAwait(false);
+                ValidateConversationIdentity(source, conversation);
+                conversation = PrepareCopy(source, conversation, workingDirectory);
+                cancellationToken.ThrowIfCancellationRequested();
+                // The disk reader validates the source snapshot. Copying writes only to the destination agent.
+                return (await diskWriter.WriteAsync(conversation, cancellationToken).ConfigureAwait(false)).SessionId;
+            }
             var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
+            validated = validated with { Conversation = PrepareCopy(source, validated.Conversation, workingDirectory) };
             var writer = WriterFor(target)
                 ?? throw new InvalidOperationException("The destination agent is unavailable.");
             return await CopyAfterFinalValidationAsync(
@@ -667,6 +683,20 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ConversationTechnicalText.IsWrapper(catalogTitle))
             return conversation;
         return conversation with { Title = catalogTitle };
+    }
+
+    private static PortableConversation PrepareCopy(ManagedSession source, PortableConversation conversation, string? workingDirectory)
+    {
+        conversation = WithCatalogTitle(source, conversation);
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            if (!Path.IsPathFullyQualified(workingDirectory) || !Directory.Exists(workingDirectory))
+                throw new InvalidDataException("A working directory is required: select an existing project folder.");
+            return conversation with { WorkingDirectory = Path.GetFullPath(workingDirectory) };
+        }
+        return source.Agent == ManagedAgent.Muse
+            ? conversation with { WorkingDirectory = MuseConversationReader.LocalWorkingDirectory(conversation.WorkingDirectory) }
+            : conversation;
     }
 
     private static async Task<byte[]> CaptureFingerprintAsync(

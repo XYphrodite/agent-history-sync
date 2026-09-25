@@ -1,5 +1,6 @@
 using System.Text;
 using CodexHistorySync.Core.Conversion;
+using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Management;
 using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Search;
@@ -55,6 +56,32 @@ public sealed class MuseWslDiskTests
         await Assert.ThrowsAsync<ManagedSessionOperationException>(() => operations.DeleteAsync(session, CancellationToken.None));
         await Assert.ThrowsAsync<ManagedSessionOperationException>(() => operations.CopyAsync(session, ManagedAgent.Codex, CancellationToken.None));
         Assert.Empty(fixture.Archive.Extracted);
+    }
+
+    [Fact]
+    public async Task CopiesOfflineSessionIntoAnotherAgentWithoutWritingToTheImage()
+    {
+        using var fixture = new Fixture();
+        fixture.Archive.Files[Parent] = "{\"role\":\"user\",\"text\":\"copy me\"}\n{\"role\":\"assistant\",\"text\":\"answer\"}";
+        var session = Assert.Single((await fixture.Catalog.ScanAsync(CancellationToken.None)).Muse) with { Title = "My conversation" };
+        var destinationHome = Path.Combine(fixture.Root.FullName, "grok");
+        Directory.CreateDirectory(destinationHome);
+        var destination = new GrokPaths(destinationHome, Path.Combine(destinationHome, "sessions"));
+        var operations = new LocalSessionOperations(null, destination, new NoActivity(), new NoDelete(), null,
+            new GrokConversationWriter(destination));
+        Assert.Equal([ManagedAgent.Grok], operations.AvailableCopyTargets(session));
+        var imageBefore = File.ReadAllBytes(fixture.Image);
+        var id = await operations.CopyAsync(session, ManagedAgent.Grok, fixture.Root.FullName, CancellationToken.None);
+        var copy = await new GrokConversationReader().ReadAsync(destination.SessionDirectory(fixture.Root.FullName, id), CancellationToken.None);
+        Assert.Equal(["copy me", "answer"], copy.Turns.Select(turn => turn.Text));
+        Assert.Equal(fixture.Root.FullName, copy.WorkingDirectory);
+        Assert.Equal("My conversation", copy.Title);
+        Assert.Equal(imageBefore, File.ReadAllBytes(fixture.Image));
+        Assert.True(session.IsReadOnly);
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => operations.DeleteAsync(session, CancellationToken.None));
+        File.AppendAllText(fixture.Image, "changed");
+        await Assert.ThrowsAsync<ManagedSessionOperationException>(() => operations.CopyAsync(session, ManagedAgent.Grok, fixture.Root.FullName, CancellationToken.None));
+        Assert.Single(fixture.Archive.Extracted);
     }
 
     [Fact]

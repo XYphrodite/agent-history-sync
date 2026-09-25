@@ -13,6 +13,28 @@ namespace CodexHistorySync.Desktop.Tests;
 public sealed class SessionManagerTests
 {
     [AvaloniaFact]
+    public async Task OfflineMuseCanBeCopiedAndExplainsWhyDeletionIsUnavailable()
+    {
+        var source = Session("first", "Offline Muse") with
+        {
+            Agent = ManagedAgent.Muse,
+            DiskSession = new CodexHistorySync.Core.Muse.MuseDiskSession(null!,
+                new CodexHistorySync.Core.Muse.MuseDiskEntry("session.jsonl", 1, DateTimeOffset.UtcNow), ["first"])
+        };
+        var operations = new FakeOperations();
+        using var model = CreateModel(operations, suppliedCatalog: new SingleSessionCatalog(source));
+        await model.RefreshAsync();
+        Assert.True(model.CanCopy);
+        Assert.False(model.CanDelete);
+        Assert.True(model.HasDeleteUnavailableReason);
+        Assert.Contains("starting WSL", model.DeleteUnavailableReason);
+        await model.CopyAsync(ManagedAgent.Grok, Path.GetTempPath());
+        Assert.Single(operations.Copied);
+        Assert.Equal(Path.GetTempPath(), Assert.Single(operations.CopyWorkingDirectories));
+        Assert.Empty(operations.Deleted);
+    }
+
+    [AvaloniaFact]
     public async Task SlowMuseDoesNotKeepTheManagerListEmpty()
     {
         var catalog = new IncrementalDesktopCatalog();
@@ -201,11 +223,17 @@ public sealed class SessionManagerTests
 
     private sealed class FakeOperations : ILocalSessionOperations
     {
+        public List<string?> CopyWorkingDirectories { get; } = [];
         public List<(ManagedSession Source, ManagedAgent Target)> Copied { get; } = [];
         public List<ManagedSession> Deleted { get; } = [];
         public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source) =>
             source.CanRead && !source.IsActive ? [ManagedAgent.Grok, ManagedAgent.Claude] : [];
         public Task<string> CopyAsync(ManagedSession source, CancellationToken ct) => CopyAsync(source, ManagedAgent.Grok, ct);
+        public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, string? workingDirectory, CancellationToken ct)
+        {
+            CopyWorkingDirectories.Add(workingDirectory);
+            return CopyAsync(source, target, ct);
+        }
         public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken ct)
         {
             Copied.Add((source, target));
@@ -216,5 +244,11 @@ public sealed class SessionManagerTests
             Deleted.Add(source);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class SingleSessionCatalog(ManagedSession source) : ILocalSessionCatalog
+    {
+        public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken ct) =>
+            Task.FromResult(new SessionCatalogSnapshot([], [], [], [], [], [source]) { ConfiguredAgents = [ManagedAgent.Muse] });
     }
 }

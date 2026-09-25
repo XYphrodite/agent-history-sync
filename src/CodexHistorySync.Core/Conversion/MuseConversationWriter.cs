@@ -77,7 +77,7 @@ public sealed class MuseConversationWriter : IConversationWriter
     {
         var lines = new List<string>();
         // Add minimal header
-        lines.Add(JsonSerializer.Serialize(new { sessionId, title = conversation.Title, createdAt = conversation.CreatedAt.ToUnixTimeMilliseconds() }));
+        lines.Add(JsonSerializer.Serialize(new { sessionId, title = conversation.Title, cwd = conversation.WorkingDirectory, createdAt = conversation.CreatedAt.ToUnixTimeMilliseconds() }));
         foreach (var turn in conversation.Turns)
         {
             ct.ThrowIfCancellationRequested();

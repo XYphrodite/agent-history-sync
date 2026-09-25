@@ -22,7 +22,7 @@ public sealed class MuseConversationReader : IConversationReader
             if (!Guid.TryParse(sessionId, out _))
                 throw InvalidConversation();
 
-            var turns = await Task.Run(() => ReadTurns(sessionFile, cancellationToken), cancellationToken).ConfigureAwait(false);
+            var (turns, workingDirectory) = await Task.Run(() => ReadTurns(sessionFile, cancellationToken), cancellationToken).ConfigureAwait(false);
             if (turns.Count == 0) throw InvalidConversation();
 
             var title = turns.FirstOrDefault(t => t.Role == ConversationRole.User)?.Text ?? sessionId;
@@ -34,7 +34,7 @@ public sealed class MuseConversationReader : IConversationReader
                 ConversationAgent.Muse,
                 sessionId,
                 title,
-                null,
+                workingDirectory,
                 new DateTimeOffset(createdAt, TimeSpan.Zero),
                 new DateTimeOffset(lastWrite, TimeSpan.Zero),
                 turns);
@@ -46,9 +46,10 @@ public sealed class MuseConversationReader : IConversationReader
         }
     }
 
-    private static List<PortableTurn> ReadTurns(string sessionFile, CancellationToken ct)
+    private static (List<PortableTurn> Turns, string? WorkingDirectory) ReadTurns(string sessionFile, CancellationToken ct)
     {
         var turns = new List<PortableTurn>();
+        string? workingDirectory = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var line in File.ReadLines(sessionFile, Encoding.UTF8))
         {
@@ -59,12 +60,30 @@ public sealed class MuseConversationReader : IConversationReader
             {
                 ct.ThrowIfCancellationRequested();
                 if (Text(root, "id") is { } id && !seen.Add(id)) continue;
+                workingDirectory ??= WorkingDirectory(root);
                 var turn = ExtractTurn(root);
                 if (turn is null || turn.Role == ConversationRole.User && ConversationTechnicalText.IsWrapper(turn.Text)) continue;
                 turns.Add(turn);
             }
         }
-        return turns;
+        return (turns, workingDirectory);
+    }
+
+    private static string? WorkingDirectory(JsonElement root)
+    {
+        if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object &&
+            payload.TryGetProperty("record", out var record) && record.ValueKind == JsonValueKind.Object)
+            return Text(record, "cwd") ?? Text(record, "workspace_root");
+        return Text(root, "cwd") ?? Text(root, "workspace_root");
+    }
+
+    public static string? LocalWorkingDirectory(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        if (OperatingSystem.IsWindows() && path.StartsWith("/mnt/", StringComparison.Ordinal) &&
+            path.Length >= 7 && char.IsAsciiLetter(path[5]) && path[6] == '/')
+            path = char.ToUpperInvariant(path[5]) + @":\" + path[7..].Replace('/', '\\');
+        return Path.IsPathFullyQualified(path) ? path : null;
     }
 
     // Current Muse journals may retain events inside a transaction frame as serialized records.

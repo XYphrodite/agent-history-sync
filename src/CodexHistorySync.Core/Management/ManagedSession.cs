@@ -137,6 +137,9 @@ public interface ILocalSessionOperations
 
     Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken);
 
+    Task<string> CopyAsync(ManagedSession source, ManagedAgent target, string? workingDirectory, CancellationToken cancellationToken) =>
+        CopyAsync(source, target, cancellationToken);
+
     /// <summary>Agents this session can be copied to right now, in panel order.</summary>
     IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source);
     Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken);

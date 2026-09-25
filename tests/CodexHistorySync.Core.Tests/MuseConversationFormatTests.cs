@@ -6,6 +6,36 @@ namespace CodexHistorySync.Core.Tests;
 public sealed class MuseConversationFormatTests
 {
     [Fact]
+    public async Task PreservesWorkspaceFromMuseMetadataAndFromWriterRoundTrip()
+    {
+        var root = Directory.CreateTempSubdirectory("muse-workspace-");
+        try
+        {
+            var directory = Path.Combine(root.FullName, Guid.NewGuid().ToString());
+            Directory.CreateDirectory(directory);
+            var metadata = JsonSerializer.Serialize(new { payload = new { record = new { cwd = "/mnt/c/Repos/project" } } });
+            await File.WriteAllTextAsync(Path.Combine(directory, "session.jsonl"), metadata + "\n{\"role\":\"user\",\"text\":\"hello\"}");
+            var conversation = await new MuseConversationReader().ReadAsync(directory, CancellationToken.None);
+            Assert.Equal("/mnt/c/Repos/project", conversation.WorkingDirectory);
+            Assert.Equal(["hello"], conversation.Turns.Select(turn => turn.Text));
+            var paths = new CodexHistorySync.Core.Muse.MusePaths(root.FullName, Path.Combine(root.FullName, "sessions"));
+            var result = await new MuseConversationWriter(paths).WriteAsync(conversation, CancellationToken.None);
+            var restored = await new MuseConversationReader().ReadAsync(result.NativePath, CancellationToken.None);
+            Assert.Equal(conversation.WorkingDirectory, restored.WorkingDirectory);
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
+    [Fact]
+    public void TranslatesWslMountedWindowsDirectoriesWithoutInventingPathsForLinuxHomes()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        Assert.Equal(@"C:\Repos\project", MuseConversationReader.LocalWorkingDirectory("/mnt/c/Repos/project"));
+        Assert.Null(MuseConversationReader.LocalWorkingDirectory("/home/user/project"));
+        Assert.Null(MuseConversationReader.LocalWorkingDirectory(null));
+    }
+
+    [Fact]
     public async Task ReadsRetainedAndDirectRunMessagesWithoutLeakingReasoningOrDuplicatingEvents()
     {
         var container = Path.Combine(Path.GetTempPath(), "muse-format-" + Guid.NewGuid().ToString("N"));

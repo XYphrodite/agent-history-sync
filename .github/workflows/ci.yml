@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: ["feat/muse-offline-wsl"]
+    branches: ["feat/muse-offline-wsl", "fix/muse-offline-copy"]
   pull_request:
 
 permissions:
