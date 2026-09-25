@@ -85,7 +85,7 @@ public sealed partial class SessionManagerWindow : Window
                 Background = Avalonia.Media.Brush.Parse("#1D2024")
             };
             var combo = new ComboBox { ItemsSource = targets.Select(t => t.ToString()).ToArray(), SelectedIndex = 0, Margin = new Thickness(0, 0, 0, 16), HorizontalAlignment = HorizontalAlignment.Stretch };
-            var project = new TextBox { Watermark = "Project folder on this computer", HorizontalAlignment = HorizontalAlignment.Stretch };
+            var project = new TextBox { PlaceholderText = "Project folder on this computer", HorizontalAlignment = HorizontalAlignment.Stretch };
             if (selected.Agent == ManagedAgent.Muse)
             {
                 try { project.Text = await model.GetCopyWorkingDirectoryAsync(); }
