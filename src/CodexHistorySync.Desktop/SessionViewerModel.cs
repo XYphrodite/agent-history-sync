@@ -61,6 +61,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
     public event Action<TraceEntryModel>? RevealEntry;
     public event Action<SessionNode>? RevealNode;
     public void ReportFailure(string action, Exception exception) => Status = action + ": " + exception.Message;
+    public void ReportSessionIdCopied() => Status = "Session id copied.";
 
     public async Task RefreshAsync()
     {

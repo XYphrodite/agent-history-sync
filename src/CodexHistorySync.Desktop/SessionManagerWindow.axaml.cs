@@ -55,6 +55,18 @@ public sealed partial class SessionManagerWindow : Window
     }
     private void OnPreviousPage(object? sender, RoutedEventArgs e) { if (sender is Control { DataContext: TraceEntryModel entry }) entry.MovePage(-1); }
     private void OnNextPage(object? sender, RoutedEventArgs e) { if (sender is Control { DataContext: TraceEntryModel entry }) entry.MovePage(1); }
+    private async void OnCopySessionId(object? sender, RoutedEventArgs e)
+    {
+        var id = model.Selected?.SessionId;
+        if (string.IsNullOrEmpty(id)) return;
+        try
+        {
+            if (Clipboard is not { } clipboard) throw new InvalidOperationException("Clipboard is unavailable.");
+            await clipboard.SetTextAsync(id);
+            model.ReportSessionIdCopied();
+        }
+        catch (Exception exception) when (PlatformFailure(exception)) { model.ReportFailure("Could not copy session id", exception); }
+    }
     private async void OnCopyEntry(object? sender, RoutedEventArgs e)
     {
         try

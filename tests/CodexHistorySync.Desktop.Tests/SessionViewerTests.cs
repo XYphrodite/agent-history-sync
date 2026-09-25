@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using CodexHistorySync.Core.Annotations;
@@ -119,6 +120,23 @@ public sealed class SessionViewerTests
             Assert.True(model.HasTrace);
         }
         finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [AvaloniaFact]
+    public async Task ClickingTheLineAboveTheTitleCopiesTheSessionId()
+    {
+        using var model = CreateModel();
+        var window = new SessionViewerWindow(model);
+        window.Show();
+        try
+        {
+            await UntilAsync(() => model.Selected?.Session.SessionId == "parent");
+            window.FindControl<Button>("CopySessionId")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await UntilAsync(() => model.Status == "Session id copied.");
+            Assert.Equal("parent", await window.Clipboard!.TryGetTextAsync());
+            Dispatcher.UIThread.RunJobs();
+        }
+        finally { window.Close(); }
     }
 
     [AvaloniaFact]

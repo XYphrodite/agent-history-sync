@@ -66,6 +66,18 @@ public sealed partial class SessionViewerWindow : Window
         }
         catch (Exception exception) when (PlatformFailure(exception)) { model.ReportFailure("Could not select export folder", exception); }
     }
+    private async void OnCopySessionId(object? sender, RoutedEventArgs e)
+    {
+        var id = model.Selected?.Session.SessionId;
+        if (string.IsNullOrEmpty(id)) return;
+        try
+        {
+            if (Clipboard is not { } clipboard) throw new InvalidOperationException("Clipboard is unavailable.");
+            await clipboard.SetTextAsync(id);
+            model.ReportSessionIdCopied();
+        }
+        catch (Exception exception) when (PlatformFailure(exception)) { model.ReportFailure("Could not copy session id", exception); }
+    }
     private async void OnCopyEntry(object? sender, RoutedEventArgs e)
     {
         try

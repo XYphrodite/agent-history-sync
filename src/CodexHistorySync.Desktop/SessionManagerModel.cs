@@ -98,6 +98,7 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
     public event Action<TraceEntryModel>? RevealEntry;
 
     public void ReportFailure(string action, Exception exception) => Status = action + ": " + exception.Message;
+    public void ReportSessionIdCopied() => Status = "Session id copied.";
 
     public async Task RefreshAsync()
     {

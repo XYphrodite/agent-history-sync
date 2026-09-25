@@ -1,6 +1,8 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
 using Avalonia.Headless.XUnit;
 using Avalonia.Threading;
 using CodexHistorySync.Core.Annotations;
@@ -146,6 +148,23 @@ public sealed class SessionManagerTests
 
         Assert.True(model.HasMatches);
         Assert.Equal("1 / 1", model.MatchCount);
+    }
+
+    [AvaloniaFact]
+    public async Task ClickingTheLineAboveTheTitleCopiesTheSessionId()
+    {
+        using var model = CreateModel();
+        var window = new SessionManagerWindow(model);
+        window.Show();
+        try
+        {
+            await UntilAsync(() => model.Selected?.SessionId == "first");
+            window.FindControl<Button>("CopySessionId")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await UntilAsync(() => model.Status == "Session id copied.");
+            Assert.Equal("first", await window.Clipboard!.TryGetTextAsync());
+            Dispatcher.UIThread.RunJobs();
+        }
+        finally { window.Close(); }
     }
 
     [AvaloniaFact]

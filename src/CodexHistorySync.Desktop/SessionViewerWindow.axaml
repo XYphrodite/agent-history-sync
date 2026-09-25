@@ -10,6 +10,16 @@
     <Style Selector="TextBox"><Setter Property="CornerRadius" Value="6" /></Style>
     <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="#A5A8AF" /></Style>
     <Style Selector="Button.accent"><Setter Property="Background" Value="#D6B979" /><Setter Property="Foreground" Value="#24221B" /></Style>
+    <Style Selector="Button.link">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Foreground" Value="#A5A8AF" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
     <Style Selector="TreeViewItem"><Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" /></Style>
     <Style Selector="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="Padding" Value="0" /></Style>
   </Window.Styles>
@@ -52,7 +62,9 @@
       <GridSplitter Grid.Column="1" Background="#34373C" ResizeDirection="Columns" />
       <Grid Grid.Column="2" RowDefinitions="Auto,Auto,Auto,*" Margin="26,22,26,12">
         <StackPanel Spacing="8" Margin="0,0,0,18">
-          <TextBlock Text="{Binding Subtitle}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
+          <Button x:Name="CopySessionId" Classes="link" Click="OnCopySessionId" IsEnabled="{Binding HasSelection}" ToolTip.Tip="Copy session id">
+            <TextBlock Text="{Binding Subtitle}" Classes="muted" FontSize="11" TextWrapping="Wrap" />
+          </Button>
           <TextBlock Text="{Binding Title}" FontSize="24" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" />
           <TextBlock Text="{Binding Description}" Classes="muted" TextWrapping="Wrap" IsVisible="{Binding HasSelection}" />
         </StackPanel>
