@@ -79,7 +79,8 @@ internal sealed class MuseWslDisk(string distribution, string image, string? hom
             var before = CheckDisk();
             if (stamp != before) throw new IOException("The WSL disk changed. Refresh the session list.");
             var source = session.DiskSession ?? throw new InvalidDataException("Missing WSL session location.");
-            if (!ReferenceEquals(source.Disk, this) || !sessions.Any(row => row.CanRead && row.DiskSession == source))
+            if (!ReferenceEquals(source.Disk, this) || session.SessionId != source.Ids[^1] ||
+                !sessions.Any(row => row.CanRead && row.DiskSession == source))
                 throw new InvalidDataException("The selected WSL session is not in the catalog.");
             var temporary = Directory.CreateTempSubdirectory("agent-sync-muse-session-");
             try

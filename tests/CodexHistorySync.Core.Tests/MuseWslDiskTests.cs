@@ -58,6 +58,29 @@ public sealed class MuseWslDiskTests
     }
 
     [Fact]
+    public async Task AlteredSessionIdentityIsRejectedBeforeCreatingTemporaryFiles()
+    {
+        using var fixture = new Fixture();
+        fixture.Archive.Files[Parent] = "{\"text\":\"offline\"}";
+        var session = Assert.Single((await fixture.Catalog.ScanAsync(CancellationToken.None)).Muse);
+        await Assert.ThrowsAsync<InvalidDataException>(() => new SessionContentReader().ReadAsync(
+            session with { SessionId = "../other" }, CancellationToken.None));
+        Assert.Empty(fixture.Archive.Extracted);
+    }
+
+    [Fact]
+    public async Task OfflinePathsCannotBeUsedForWritingOrSyncScanning()
+    {
+        using var fixture = new Fixture();
+        var conversation = new PortableConversation(ConversationAgent.Muse, ParentId, "title", null,
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [new PortableTurn(ConversationRole.User, "hello")]);
+        await Assert.ThrowsAsync<IOException>(() => new MuseConversationWriter(fixture.Paths).WriteAsync(conversation, CancellationToken.None));
+        var scan = await new MuseSessionScanner().ScanDetailedAsync(fixture.Paths, CancellationToken.None);
+        Assert.Empty(scan.Objects);
+        Assert.Contains(CodexHistorySync.Core.Model.ObjectKind.MuseSession, scan.UncertainKinds);
+    }
+
+    [Fact]
     public async Task StartedWslOrChangedImageRequiresRefreshInsteadOfReadingStaleOffsets()
     {
         using var fixture = new Fixture();

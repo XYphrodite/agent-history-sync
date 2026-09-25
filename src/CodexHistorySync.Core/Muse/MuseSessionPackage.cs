@@ -112,6 +112,7 @@ public static class MuseSessionPackage
     {
         ArgumentNullException.ThrowIfNull(package);
         ArgumentNullException.ThrowIfNull(paths);
+        if (paths.IsReadOnly) throw new IOException("Sessions inside a stopped WSL disk are read-only.");
 
         // Find the session directory that contains this sessionId (search by UUID)
         // For new sessions, create under sessions/<uuid>/session.jsonl (flat, scanner will find it)
