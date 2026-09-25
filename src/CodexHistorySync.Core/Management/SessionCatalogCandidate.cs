@@ -15,4 +15,7 @@ internal sealed record SessionCatalogCandidate(
     string Title,
     DateTimeOffset LastModifiedAt,
     bool CanRead,
-    ManagedTitleSource TitleSource = ManagedTitleSource.Official);
+    ManagedTitleSource TitleSource = ManagedTitleSource.Official)
+{
+    internal Muse.MuseDiskSession? DiskSession { get; init; }
+}

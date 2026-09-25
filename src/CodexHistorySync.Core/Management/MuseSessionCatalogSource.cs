@@ -13,6 +13,12 @@ internal sealed class MuseSessionCatalogSource(MusePaths paths, ISessionCatalogI
 
     public async Task<IReadOnlyList<SessionCatalogCandidate>> ScanAsync(SessionCatalogReadLimiter limiter, CancellationToken cancellationToken)
     {
+        if (paths.IsReadOnly)
+        {
+            var rows = new List<SessionCatalogCandidate>();
+            foreach (var disk in paths.OfflineDisks) rows.AddRange(await disk.ScanAsync(cancellationToken).ConfigureAwait(false));
+            return rows;
+        }
         var directories = MuseSessionDiscovery.MainDirectories(paths.Sessions, cancellationToken);
         var indexed = MuseSessionIndex.Read(paths.Home, cancellationToken);
         var candidates = await ReadDirectoriesAsync(directories, paths.Sessions, indexed, limiter, cancellationToken).ConfigureAwait(false);

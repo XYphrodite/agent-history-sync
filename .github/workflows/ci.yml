@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/muse-offline-wsl"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  muse-disk-fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create a synthetic ext4 disk (no mounting or WSL required)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils
+          python3 tests/fixtures/create-muse-disk.py fixture-root
+          truncate -s 64M fixture.ext4
+          mkfs.ext4 -q -F -d fixture-root fixture.ext4
+          qemu-img convert -f raw -O vhdx -o subformat=dynamic fixture.ext4 muse-fixture.vhdx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muse-vhdx-fixture
+          path: muse-fixture.vhdx
+          retention-days: 3
+
+  windows:
+    needs: muse-disk-fixture
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: XYphrodite/self-update-kit
+          ref: v0.3.0
+          path: kit-tmp
+      - name: Place shared project beside the checkout
+        shell: pwsh
+        run: Move-Item -LiteralPath kit-tmp -Destination ../self-update-kit
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/download-artifact@v4
+        with:
+          name: muse-vhdx-fixture
+          path: artifacts/fixture
+      - name: Test Core including real offline VHDX reads
+        shell: pwsh
+        run: |
+          $env:AGENT_SYNC_TEST_MUSE_VHDX = (Resolve-Path artifacts/fixture/muse-fixture.vhdx).Path
+          if (-not (Test-Path 'C:\Program Files\7-Zip\7z.exe')) { throw '7-Zip is required for the real disk tests' }
+          dotnet test tests/CodexHistorySync.Core.Tests -c Release --nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test desktop
+        run: dotnet test tests/CodexHistorySync.Desktop.Tests -c Release --nologo
+      - name: Test session and profile integration
+        run: dotnet test tests/CodexHistorySync.IntegrationTests -c Release --nologo --filter "FullyQualifiedName~Session|FullyQualifiedName~CliProfileTests|FullyQualifiedName~UninstalledAgents|FullyQualifiedName~Muse"
+      - name: Publish application for review
+        run: dotnet publish src/CodexHistorySync.Cli -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o artifacts/app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-sync-offline-muse
+          path: artifacts/app/agent-sync.exe
+          retention-days: 7

@@ -45,7 +45,7 @@ public sealed class MuseSessionScanner
         var uncertain = new HashSet<ObjectKind>();
         var duplicates = new HashSet<LogicalObjectId>();
 
-        if (!Directory.Exists(paths.Sessions))
+        if (paths.IsReadOnly || !Directory.Exists(paths.Sessions))
         {
             uncertain.Add(ObjectKind.MuseSession);
             return new SessionScanResult(objects, uncertain, duplicates);

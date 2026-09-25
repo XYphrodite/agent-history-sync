@@ -28,7 +28,11 @@ public sealed record ManagedSession(
     bool CanRead,
     ManagedTitleSource TitleSource = ManagedTitleSource.Official,
     // This machine's own title and description, when it has one for this session.
-    Annotations.SessionAnnotation? Annotation = null);
+    Annotations.SessionAnnotation? Annotation = null)
+{
+    internal Muse.MuseDiskSession? DiskSession { get; init; }
+    public bool IsReadOnly => DiskSession is not null;
+}
 
 public sealed record SessionCatalogSnapshot(
     IReadOnlyList<ManagedSession> Codex,
@@ -66,10 +70,13 @@ public sealed record SessionCatalogSnapshot(
     public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi, Muse);
     public IReadOnlyList<ManagedAgent> PendingAgents { get; init; } = [];
     public IReadOnlyList<ManagedAgent> UnavailableAgents { get; init; } = [];
+    public IReadOnlyDictionary<ManagedAgent, string> UnavailableReasons { get; init; } = new Dictionary<ManagedAgent, string>();
 
     public string? LoadingMessage => PendingAgents.Count > 0
         ? "Loading sessions: " + string.Join(", ", PendingAgents) + "…"
-        : UnavailableAgents.Count > 0 ? "Could not read sessions: " + string.Join(", ", UnavailableAgents) + ". Other sessions are available."
+        : UnavailableAgents.Count > 0 ? "Could not read sessions: " + string.Join(", ", UnavailableAgents.Select(agent =>
+            UnavailableReasons.TryGetValue(agent, out var reason) ? agent + ": " + reason : agent.ToString())) + ". Other sessions are available."
+        : Muse.Any(session => session.IsReadOnly) ? "Muse: reading WSL disk directly (read-only). WSL remains stopped."
         : ConfiguredAgents.Count == 0 ? "No local agent histories found." : null;
 
     public IReadOnlyList<ManagedSession> For(ManagedAgent agent) => agent switch

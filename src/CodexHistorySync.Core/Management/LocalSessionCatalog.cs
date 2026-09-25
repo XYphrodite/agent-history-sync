@@ -85,6 +85,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             agent => ScanAgentAsync(SourceFor(agent), agent, limiter, lifetime.Token));
         var rows = new Dictionary<ManagedAgent, IReadOnlyList<ManagedSession>>();
         var unavailable = new List<ManagedAgent>();
+        var reasons = new Dictionary<ManagedAgent, string>();
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -98,6 +99,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
                     {
                         unavailable.Add(agent);
+                        reasons[agent] = ex.Message;
                     }
                     pending.Remove(agent);
                 }
@@ -119,7 +121,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         {
             ConfiguredAgents = configured,
             PendingAgents = configured.Where(pending.ContainsKey).ToArray(),
-            UnavailableAgents = unavailable.ToArray()
+            UnavailableAgents = unavailable.ToArray(),
+            UnavailableReasons = new Dictionary<ManagedAgent, string>(reasons)
         };
     }
 
@@ -159,9 +162,9 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             candidate.NativePath,
             candidate.Title,
             candidate.LastModifiedAt,
-            activity.Unknown || activity.SessionIds.Contains(candidate.SessionId),
+            candidate.DiskSession is null && (activity.Unknown || activity.SessionIds.Contains(candidate.SessionId)),
             candidate.CanRead,
-            candidate.TitleSource)).ToArray();
+            candidate.TitleSource) { DiskSession = candidate.DiskSession }).ToArray();
     }
 
     private async Task<ActiveIds> ReadActiveIdsAsync(

@@ -189,6 +189,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     public IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.IsReadOnly) return [];
         return ManagedAgents.Destinations(source.Agent).Where(agent => WriterFor(agent) is not null).ToArray();
     }
 
@@ -293,6 +294,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     {
         ArgumentNullException.ThrowIfNull(source);
         cancellationToken.ThrowIfCancellationRequested();
+        if (source.IsReadOnly) throw new InvalidOperationException("Sessions inside a stopped WSL disk are read-only.");
         if (!source.CanRead) throw new InvalidOperationException("The session is not readable.");
         if (source.IsActive) throw new InvalidOperationException("The session is active.");
 

@@ -57,7 +57,9 @@ public sealed class SessionContentReader : ISessionContentReader
         if (string.IsNullOrWhiteSpace(session.NativePath))
             throw new InvalidDataException("The selected session identity is invalid.");
 
-        return ReaderFor(session.Agent).ReadAsync(session.NativePath, cancellationToken);
+        return session.DiskSession is { } archive
+            ? archive.Disk.ReadAsync(session, cancellationToken)
+            : ReaderFor(session.Agent).ReadAsync(session.NativePath, cancellationToken);
     }
 
     private IConversationReader ReaderFor(ManagedAgent agent) => agent switch

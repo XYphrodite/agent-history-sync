@@ -27,6 +27,7 @@ public sealed class MuseConversationWriter : IConversationWriter
     public async Task<ConversationWriteResult> WriteAsync(PortableConversation conversation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(conversation);
+        if (paths.IsReadOnly) throw new IOException("Sessions inside a stopped WSL disk are read-only.");
         conversation = conversation with { LastModifiedAt = utcNow() };
         conversation = conversation with
         {

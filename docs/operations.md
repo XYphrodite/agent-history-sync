@@ -1,5 +1,15 @@
 # Agent History Sync Operations
 
+## Muse while WSL is stopped
+
+On Windows, the session manager and viewer can read Muse directly from a stopped WSL 2 distribution's `ext4.vhdx`. The application discovers registered disks without starting WSL. This requires the Windows version of 7-Zip installed in its standard `Program Files/7-Zip` directory (tested with 24.06). If it is missing or the disk cannot be read, the Muse status explains the problem; other agent histories remain available.
+
+Running distributions use the normal filesystem path. Stopped distributions use a read-only disk source, including when `MUSE_HOME` names a `\\wsl$\...` or `\\wsl.localhost\...` directory. Automatic disk discovery recognizes `~/.local/share/muse`; an explicit home can select a different location. WSL 1 does not use this disk fallback. Reopen the application after changing whether WSL is running.
+
+Disk mode reads the file listing and optional native title index first. It extracts only the selected session journal into a temporary directory and removes that directory after reading. It does not mount the disk, start Linux, copy the entire image, or maintain a persistent transcript cache. Subagents are grouped beneath their parent. Unindexed sessions display their IDs; listing them does not require extracting their journals.
+
+Disk-backed sessions show a read-only label. Delete and cross-agent copy are disabled; viewing and export remain available. Background full-text indexing skips disk-backed sessions to avoid extracting the whole history; search within an opened conversation works normally. If WSL starts or the disk changes during a read, refresh/reopen instead of using a stale disk snapshot.
+
 ## Prerequisites
 
 Agent History Sync runs on Windows. Install `git`, GitHub CLI (`gh`), and the agents you sync (Codex, Grok CLI, Claude Code, Continue, and/or Kimi Code CLI), then authenticate `gh`. Setup accepts only HTTPS GitHub repository URLs. The **data** repository must already exist, be private, and be empty for `init` (recommended name: `agent-history-sync-data`).

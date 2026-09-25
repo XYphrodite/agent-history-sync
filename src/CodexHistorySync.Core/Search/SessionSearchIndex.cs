@@ -88,6 +88,8 @@ public sealed class SessionSearchIndex : ISessionSearchIndex, IDisposable
             foreach (var session in Enumerate(snapshot))
             {
                 present.Add((session.Agent, session.SessionId));
+                // Opening a disk-backed conversation is explicit: do not extract every journal for background search.
+                if (session.IsReadOnly) continue;
                 if (!session.CanRead) continue;
 
                 if (existing.TryGetValue((session.Agent, session.SessionId), out var stored) &&

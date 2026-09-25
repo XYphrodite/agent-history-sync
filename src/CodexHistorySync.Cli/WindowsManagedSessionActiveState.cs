@@ -154,7 +154,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
 
     private IReadOnlySet<string> ReadMuseActiveIds()
     {
-        if (musePaths is null || !isAnyNamedProcessRunning("muse")) return EmptyIds;
+        if (musePaths is null || musePaths.IsReadOnly || !isAnyNamedProcessRunning("muse")) return EmptyIds;
 
         var activeSince = utcNow() - MuseSessionScanner.DefaultActivityWindow;
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -300,4 +300,3 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         char.IsAsciiLetterOrDigit(value[0]) &&
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
 }
-

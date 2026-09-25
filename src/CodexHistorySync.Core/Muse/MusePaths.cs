@@ -6,26 +6,34 @@ namespace CodexHistorySync.Core.Muse;
 public sealed record MusePaths(string Home, string Sessions)
 {
     public const string SessionFileName = "session.jsonl";
+    internal IReadOnlyList<MuseWslDisk> OfflineDisks { get; init; } = [];
+    public bool IsReadOnly => OfflineDisks.Count > 0;
 
     public static MusePaths? TryResolve(string? configuredHome = null)
     {
         try
         {
-            var homeInput = configuredHome
+            var explicitHome = configuredHome
                 ?? Environment.GetEnvironmentVariable("MUSE_HOME")
-                ?? Environment.GetEnvironmentVariable("MUSE_CODE_HOME")
-                ?? GetDefaultHome();
+                ?? Environment.GetEnvironmentVariable("MUSE_CODE_HOME");
+            if (explicitHome is not null && MuseWslDiscovery.TryUncHome(explicitHome, out _, out _))
+                return MuseWslDiscovery.Resolve(explicitHome);
+            var homeInput = explicitHome ?? GetDefaultHome();
+            if (explicitHome is null && string.IsNullOrWhiteSpace(homeInput)) return MuseWslDiscovery.Resolve(null);
             if (string.IsNullOrWhiteSpace(homeInput)) return null;
-            var home = Path.GetFullPath(homeInput);
-            if (!Directory.Exists(home)) return null;
-            var sessions = Path.GetFullPath(Path.Combine(home, "sessions"));
-            if (!Directory.Exists(sessions)) return null;
-            return new MusePaths(home, sessions);
+            return ExistingHome(homeInput);
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             return null;
         }
+    }
+
+    internal static MusePaths? ExistingHome(string input)
+    {
+        var home = Path.GetFullPath(input);
+        var sessions = Path.Combine(home, "sessions");
+        return Directory.Exists(sessions) ? new MusePaths(home, sessions) : null;
     }
 
     private static string GetDefaultHome()
@@ -65,7 +73,7 @@ public sealed record MusePaths(string Home, string Sessions)
         }
     }
 
-    private static string? RunWsl(string[] arguments)
+    internal static string? RunWsl(string[] arguments)
     {
         try
         {

@@ -52,12 +52,12 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
     public ManagedSession? Selected => selected;
     public string Title => selected?.Title ?? "Select a session";
     public string Subtitle => selected is null ? "Choose a conversation to manage."
-        : $"{selected.Agent}  /  {selected.SessionId}";
+        : $"{selected.Agent}  /  {selected.SessionId}" + (selected.IsReadOnly ? "  /  WSL disk · read-only" : "");
     public string Description => selected?.Annotation?.Description ?? string.Empty;
     public bool HasSelection => selected is not null;
     public bool HasTrace => trace is not null;
-    public bool CanCopy => selected is not null && !selected.IsActive && selected.CanRead && services.Operations is not null && AvailableTargets.Count > 0;
-    public bool CanDelete => selected is not null && !selected.IsActive && selected.CanRead && services.Operations is not null;
+    public bool CanCopy => selected is not null && !selected.IsReadOnly && !selected.IsActive && selected.CanRead && services.Operations is not null && AvailableTargets.Count > 0;
+    public bool CanDelete => selected is not null && !selected.IsReadOnly && !selected.IsActive && selected.CanRead && services.Operations is not null;
     public IReadOnlyList<ManagedAgent> AvailableTargets
     {
         get

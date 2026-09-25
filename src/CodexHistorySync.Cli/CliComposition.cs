@@ -224,7 +224,7 @@ public static class CliComposition
         var claudeWriter = claudePaths is null ? null : new ClaudeConversationWriter(claudePaths);
         var continueWriter = continuePaths is null ? null : new ContinueConversationWriter(continuePaths);
         var kimiWriter = kimiPaths is null ? null : new KimiConversationWriter(kimiPaths);
-        var museWriter = musePaths is null ? null : new MuseConversationWriter(musePaths);
+        var museWriter = musePaths is null || musePaths.IsReadOnly ? null : new MuseConversationWriter(musePaths);
         var operations = new LocalSessionOperations(
             codexPaths,
             grokPaths,
@@ -266,7 +266,7 @@ public static class CliComposition
         var claudeWriter2 = claudePaths2 is null ? null : new ClaudeConversationWriter(claudePaths2);
         var continueWriter2 = continuePaths2 is null ? null : new ContinueConversationWriter(continuePaths2);
         var kimiWriter2 = kimiPaths2 is null ? null : new KimiConversationWriter(kimiPaths2);
-        var museWriter2 = musePaths2 is null ? null : new MuseConversationWriter(musePaths2);
+        var museWriter2 = musePaths2 is null || musePaths2.IsReadOnly ? null : new MuseConversationWriter(musePaths2);
         var operations2 = new LocalSessionOperations(codexPaths2, grokPaths2, activeState2, new WindowsManagedSessionDirectoryDeleter(), codexWriter2, grokWriter2, claudePaths2, claudeWriter2, continuePaths2, continueWriter2, kimiPaths2, kimiWriter2);
         var ansiConsole2 = AnsiConsole.Console;
         var view2 = new SpectreSessionManagerView(ansiConsole2, new SpectreSessionManagerInput(ansiConsole2));
@@ -285,4 +285,3 @@ public static class CliComposition
         }
     }
 }
-

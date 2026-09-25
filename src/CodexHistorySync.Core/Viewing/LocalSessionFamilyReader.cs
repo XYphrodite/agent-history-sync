@@ -13,6 +13,7 @@ public sealed class LocalSessionFamilyReader(CodexPaths? codexPaths, MusePaths? 
     public async Task<SessionThread> ReadAsync(ManagedSession parent, CancellationToken cancellationToken)
     {
         if (parent.Agent != ManagedAgent.Muse) return await codex.ReadAsync(parent, cancellationToken).ConfigureAwait(false);
+        if (parent.DiskSession is { } archive) return await archive.Disk.ReadFamilyAsync(parent, cancellationToken).ConfigureAwait(false);
         if (musePaths is null || muse is null ||
             !ManagedSessionPathPolicy.TryResolveConcreteTarget(parent.NativePath, musePaths.Sessions, true, out var resolved))
             return new SessionThread(parent, []);

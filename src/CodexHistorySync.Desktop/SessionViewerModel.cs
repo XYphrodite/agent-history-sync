@@ -49,12 +49,12 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
     public SessionNode? Selected => selected;
     public string Title => selected?.Session.Annotation?.Title ?? selected?.Title ?? "Your conversation archive";
     public string Subtitle => selected is null ? "Choose a conversation to start reading."
-        : $"{selected.Session.Agent}  /  {selected.Session.SessionId}";
+        : $"{selected.Session.Agent}  /  {selected.Session.SessionId}" + (selected.Session.IsReadOnly ? "  /  WSL disk · read-only" : "");
     public string Description => selected?.Session.Annotation?.Description ?? string.Empty;
     public bool HasSelection => selected is not null;
     public bool HasTrace => trace is not null;
     public bool CanShowSubagents => selected?.Session.Agent is ManagedAgent.Codex or ManagedAgent.Muse;
-    public bool CanDelete => selected?.Parent is null && selected is not null && services.Operations is not null;
+    public bool CanDelete => selected?.Parent is null && selected is not null && !selected.Session.IsReadOnly && services.Operations is not null;
     public bool CanGenerateTitle => services.TitleSuggester?.IsConfigured == true && selected is not null;
     public bool HasMatches => Matches.Count > 0;
     public string MatchCount => Matches.Count == 0 ? "No matches" : $"{Math.Max(0, matchIndex + 1)} / {Matches.Count}";
@@ -310,7 +310,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
 
     public async Task DeleteAsync(SessionNode target)
     {
-        if (target.Parent is not null || services.Operations is null) return;
+        if (target.Parent is not null || target.Session.IsReadOnly || services.Operations is null) return;
         try
         {
             await services.Operations.DeleteAsync(target.Session, lifetime.Token);
