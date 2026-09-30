@@ -258,7 +258,7 @@ internal static class PathSafety
 
     public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null,
         Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null, Kimi.KimiPaths? kimiPaths = null,
-        Hermes.HermesPaths? hermesPaths = null)
+        Hermes.HermesPaths? hermesPaths = null, Mimo.MimoPaths? mimoPaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
@@ -290,12 +290,15 @@ internal static class PathSafety
         if (hermesPaths is not null &&
             (CodexPaths.IsPathWithin(candidate, hermesPaths.Home) || CodexPaths.IsPathWithin(hermesPaths.Home, candidate)))
             throw new ArgumentException("The storage path must not overlap the synchronized Hermes home.", parameterName);
+        if (mimoPaths is not null &&
+            (CodexPaths.IsPathWithin(candidate, mimoPaths.Home) || CodexPaths.IsPathWithin(mimoPaths.Home, candidate)))
+            throw new ArgumentException("The storage path must not overlap the synchronized MiMo home.", parameterName);
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
         Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null,
         string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null, Muse.MusePaths? musePaths = null,
-        Hermes.HermesPaths? hermesPaths = null)
+        Hermes.HermesPaths? hermesPaths = null, Mimo.MimoPaths? mimoPaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
         if (kind == ObjectKind.SessionAnnotations)
@@ -418,6 +421,16 @@ internal static class PathSafety
                 !string.Equals(home, hermesPaths.Home, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(canonical, hermesPaths.AnchorPath(profile, sessionId), StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Hermes session destinations must be <profile>/<session>.json inside the Hermes anchor directory.", parameterName);
+            return canonical;
+        }
+
+        if (kind == ObjectKind.MimoSession)
+        {
+            if (mimoPaths is null) throw new ArgumentException("MiMo paths are required for MiMo session destinations.", parameterName);
+            if (!Mimo.MimoPaths.TryParseAnchor(canonical, out var home, out var sessionId) ||
+                !string.Equals(home, mimoPaths.Home, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(canonical, mimoPaths.AnchorPath(sessionId), StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("MiMo session destinations must be <session>.json inside the MiMo anchor directory.", parameterName);
             return canonical;
         }
 

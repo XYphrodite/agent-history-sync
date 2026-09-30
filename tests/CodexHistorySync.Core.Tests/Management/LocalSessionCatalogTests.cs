@@ -57,7 +57,7 @@ public sealed class LocalSessionCatalogTests
     {
         var sources = ManagedAgents.All.Select(agent => agent == missing ? null : new FixedCatalogSource(agent)).ToArray();
         var activity = new FakeActiveState();
-        var catalog = new LocalSessionCatalog(sources[0], sources[1], activity, sources[2], sources[3], sources[4], sources[5], sources[6]);
+        var catalog = new LocalSessionCatalog(sources[0], sources[1], activity, sources[2], sources[3], sources[4], sources[5], sources[6], sources[7]);
         var snapshot = await catalog.ScanAsync(CancellationToken.None);
         Assert.DoesNotContain(missing, snapshot.ConfiguredAgents);
         Assert.False(activity.TotalQueries.ContainsKey(missing));

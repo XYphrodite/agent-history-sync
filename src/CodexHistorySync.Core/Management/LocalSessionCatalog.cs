@@ -4,6 +4,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.Kimi;
+using CodexHistorySync.Core.Mimo;
 using CodexHistorySync.Core.Muse;
 
 namespace CodexHistorySync.Core.Management;
@@ -19,6 +20,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
     private readonly ILocalSessionCatalogSource? kimiSource;
     private readonly ILocalSessionCatalogSource? museSource;
     private readonly ILocalSessionCatalogSource? hermesSource;
+    private readonly ILocalSessionCatalogSource? mimoSource;
     private readonly IManagedSessionActiveState activeState;
 
     public LocalSessionCatalog(
@@ -29,7 +31,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ContinuePaths? continuePaths = null,
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null,
-        HermesPaths? hermesPaths = null)
+        HermesPaths? hermesPaths = null,
+        MimoPaths? mimoPaths = null)
         : this(
             codexPaths is null || !Directory.Exists(codexPaths.Home)
                 ? null
@@ -52,7 +55,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 : new MuseSessionCatalogSource(musePaths, new SystemSessionCatalogIo()),
             hermesPaths is null
                 ? null
-                : new HermesSessionCatalogSource(hermesPaths))
+                : new HermesSessionCatalogSource(hermesPaths),
+            mimoPaths is null
+                ? null
+                : new MimoSessionCatalogSource(mimoPaths))
     {
     }
 
@@ -64,7 +70,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ILocalSessionCatalogSource? continueSource = null,
         ILocalSessionCatalogSource? kimiSource = null,
         ILocalSessionCatalogSource? museSource = null,
-        ILocalSessionCatalogSource? hermesSource = null)
+        ILocalSessionCatalogSource? hermesSource = null,
+        ILocalSessionCatalogSource? mimoSource = null)
     {
         this.codexSource = codexSource;
         this.grokSource = grokSource;
@@ -73,6 +80,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         this.kimiSource = kimiSource;
         this.museSource = museSource;
         this.hermesSource = hermesSource;
+        this.mimoSource = mimoSource;
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
     }
 
@@ -126,7 +134,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             rows.GetValueOrDefault(ManagedAgent.Codex) ?? [], rows.GetValueOrDefault(ManagedAgent.Grok) ?? [],
             rows.GetValueOrDefault(ManagedAgent.Claude) ?? [], rows.GetValueOrDefault(ManagedAgent.Continue) ?? [],
             rows.GetValueOrDefault(ManagedAgent.Kimi) ?? [], rows.GetValueOrDefault(ManagedAgent.Muse) ?? [],
-            rows.GetValueOrDefault(ManagedAgent.Hermes) ?? [])
+            rows.GetValueOrDefault(ManagedAgent.Hermes) ?? [],
+            rows.GetValueOrDefault(ManagedAgent.Mimo) ?? [])
         {
             ConfiguredAgents = configured,
             PendingAgents = configured.Where(pending.ContainsKey).ToArray(),
@@ -146,6 +155,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ManagedAgent.Kimi => kimiSource,
         ManagedAgent.Muse => museSource,
         ManagedAgent.Hermes => hermesSource,
+        ManagedAgent.Mimo => mimoSource,
         _ => null
     };
 

@@ -20,6 +20,7 @@ public sealed class SessionContentReader : ISessionContentReader
     private readonly IConversationReader kimiReader;
     private readonly IConversationReader museReader;
     private readonly IConversationReader hermesReader;
+    private readonly IConversationReader mimoReader;
 
     public SessionContentReader()
         : this(
@@ -29,7 +30,8 @@ public sealed class SessionContentReader : ISessionContentReader
             new ContinueConversationReader(),
             new KimiConversationReader(),
             new MuseConversationReader(),
-            new HermesConversationReader())
+            new HermesConversationReader(),
+            new MimoConversationReader())
     {
     }
 
@@ -40,7 +42,8 @@ public sealed class SessionContentReader : ISessionContentReader
         IConversationReader? continueReader = null,
         IConversationReader? kimiReader = null,
         IConversationReader? museReader = null,
-        IConversationReader? hermesReader = null)
+        IConversationReader? hermesReader = null,
+        IConversationReader? mimoReader = null)
     {
         this.codexReader = codexReader ?? throw new ArgumentNullException(nameof(codexReader));
         this.grokReader = grokReader ?? throw new ArgumentNullException(nameof(grokReader));
@@ -49,6 +52,7 @@ public sealed class SessionContentReader : ISessionContentReader
         this.kimiReader = kimiReader ?? new KimiConversationReader();
         this.museReader = museReader ?? new MuseConversationReader();
         this.hermesReader = hermesReader ?? new HermesConversationReader();
+        this.mimoReader = mimoReader ?? new MimoConversationReader();
     }
 
     public Task<PortableConversation> ReadAsync(ManagedSession session, CancellationToken cancellationToken)
@@ -75,6 +79,7 @@ public sealed class SessionContentReader : ISessionContentReader
         ManagedAgent.Kimi => kimiReader,
         ManagedAgent.Muse => museReader,
         ManagedAgent.Hermes => hermesReader,
+        ManagedAgent.Mimo => mimoReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 }

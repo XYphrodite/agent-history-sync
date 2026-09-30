@@ -145,7 +145,8 @@ public sealed class SessionManagerState
             Match(snapshot.Continue, query),
             Match(snapshot.Kimi, query),
             Match(snapshot.Muse, query),
-            Match(snapshot.Hermes, query))
+            Match(snapshot.Hermes, query),
+            Match(snapshot.Mimo, query))
         {
             ConfiguredAgents = Array.AsReadOnly(snapshot.ConfiguredAgents.ToArray())
         };

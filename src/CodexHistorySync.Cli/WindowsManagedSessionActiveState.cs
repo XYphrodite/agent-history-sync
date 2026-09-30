@@ -16,6 +16,7 @@ using CodexHistorySync.Core.Conversion;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Hermes;
+using CodexHistorySync.Core.Mimo;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Management;
@@ -43,6 +44,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     private readonly KimiPaths? kimiPaths;
     private readonly MusePaths? musePaths;
     private readonly HermesPaths? hermesPaths;
+    private readonly MimoPaths? mimoPaths;
     private readonly Func<int, string, bool> isNamedProcessRunning;
     private readonly Func<string, bool> isExclusiveLockHeld;
     private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
@@ -54,7 +56,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     public WindowsManagedSessionActiveState(CodexPaths? codexPaths, GrokPaths? grokPaths, ClaudePaths? claudePaths = null,
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null,
-        HermesPaths? hermesPaths = null)
+        HermesPaths? hermesPaths = null,
+        MimoPaths? mimoPaths = null)
         : this(
             codexPaths,
             grokPaths,
@@ -85,7 +88,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         Func<DateTime>? utcNow = null,
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null,
-        HermesPaths? hermesPaths = null)
+        HermesPaths? hermesPaths = null,
+        MimoPaths? mimoPaths = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -93,6 +97,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         this.kimiPaths = kimiPaths;
         this.musePaths = musePaths;
         this.hermesPaths = hermesPaths;
+        this.mimoPaths = mimoPaths;
         this.isAnyNamedProcessRunning = isAnyNamedProcessRunning ?? IsAnyNamedProcessRunning;
         this.lastWriteTimeUtc = lastWriteTimeUtc ?? (path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null);
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -131,6 +136,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ManagedAgent.Kimi => ReadKimiActiveIds(),
         ManagedAgent.Muse => ReadMuseActiveIds(),
         ManagedAgent.Hermes => ReadHermesActiveIds(),
+        ManagedAgent.Mimo => ReadMimoActiveIds(),
         _ => EmptyIds
     };
 
@@ -182,6 +188,28 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
             return EmptyIds;
         }
 
+        return ids;
+    }
+
+    private IReadOnlySet<string> ReadMimoActiveIds()
+    {
+        if (mimoPaths is null || !isAnyNamedProcessRunning("mimo")) return EmptyIds;
+        // Also check mimocode process name
+        if (!isAnyNamedProcessRunning("mimo") && !isAnyNamedProcessRunning("mimocode")) return EmptyIds;
+        var clock = DateTime.SpecifyKind(utcNow(), DateTimeKind.Utc);
+        var cutoff = new DateTimeOffset(clock).ToUnixTimeMilliseconds() / 1000d -
+            MimoSessionScanner.DefaultActivityWindow.TotalSeconds;
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var (sessionId, lastActiveUnix) in MimoSessionPackage.ReadActivity(mimoPaths))
+                if (lastActiveUnix >= cutoff) ids.Add(sessionId);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or
+                                          Microsoft.Data.Sqlite.SqliteException)
+        {
+            return EmptyIds;
+        }
         return ids;
     }
 

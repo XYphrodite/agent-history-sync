@@ -7,6 +7,7 @@ using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Kimi;
+using CodexHistorySync.Core.Mimo;
 using CodexHistorySync.Core.Muse;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.Sync;
@@ -37,6 +38,7 @@ public sealed class CodexHistoryWriter
     private readonly KimiPaths? _kimiPaths;
     private readonly MusePaths? _musePaths;
     private readonly HermesPaths? _hermesPaths;
+    private readonly MimoPaths? _mimoPaths;
     private readonly string? _annotationsDirectory;
     private readonly BackupStore _backups;
     private readonly ICodexProcessDetector _processDetector;
@@ -47,7 +49,7 @@ public sealed class CodexHistoryWriter
     public CodexHistoryWriter(CodexPaths paths, BackupStore backups, ICodexProcessDetector processDetector,
         IAtomicFileSystem? fileSystem = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null,
         ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, MusePaths? musePaths = null,
-        HermesPaths? hermesPaths = null)
+        HermesPaths? hermesPaths = null, MimoPaths? mimoPaths = null)
     {
         _annotationsDirectory = annotationsDirectory;
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -60,12 +62,13 @@ public sealed class CodexHistoryWriter
         _kimiPaths = kimiPaths;
         _musePaths = musePaths;
         _hermesPaths = hermesPaths;
+        _mimoPaths = mimoPaths;
     }
 
     public async Task ImportAsync(LocalObject incoming, Stream plaintext, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(incoming);
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths, _mimoPaths);
         var expected = await CurrentStateAsync(destination, incoming.Kind, ct).ConfigureAwait(false);
         if (await ImportAsync(incoming, plaintext, operationId, expected, ct).ConfigureAwait(false) == ImportApplyResult.Conflict)
             throw new IOException("The destination changed before the staged import could be published.");
@@ -77,7 +80,7 @@ public sealed class CodexHistoryWriter
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(plaintext);
         if (expected.Exists != (expected.ContentHash is not null)) throw new ArgumentException("Expected history state is inconsistent.", nameof(expected));
-        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
+        var destination = PathSafety.EnsureSessionDestination(incoming.SourcePath, incoming.Kind, _paths, nameof(incoming), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths, _mimoPaths);
         PathSafety.RejectReparsePoints(destination, nameof(incoming));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         ct.ThrowIfCancellationRequested();
@@ -102,6 +105,9 @@ public sealed class CodexHistoryWriter
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.HermesSession)
             return await ImportHermesPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
+                .ConfigureAwait(false);
+        if (incoming.Kind == ObjectKind.MimoSession)
+            return await ImportMimoPackageAsync(incoming, plaintext, operationId, expected, destination, ct)
                 .ConfigureAwait(false);
         if (incoming.Kind == ObjectKind.SessionAnnotations)
             return await ImportAnnotationAsync(incoming, plaintext, operationId, expected, destination, ct)
@@ -138,11 +144,13 @@ public sealed class CodexHistoryWriter
     public async Task<TombstoneApplyResult> ApplyTombstoneAsync(LocalObject local, ContentHash baselineHash, string operationId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(local);
-        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
+        var destination = PathSafety.EnsureSessionDestination(local.SourcePath, local.Kind, _paths, nameof(local), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths, _mimoPaths);
         PathSafety.RejectReparsePoints(destination, nameof(local));
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         if (local.Kind == ObjectKind.HermesSession)
             return await ApplyHermesTombstoneAsync(local, baselineHash, operationId, destination, ct).ConfigureAwait(false);
+        if (local.Kind == ObjectKind.MimoSession)
+            return await ApplyMimoTombstoneAsync(local, baselineHash, operationId, destination, ct).ConfigureAwait(false);
         if (!File.Exists(destination)) return TombstoneApplyResult.Applied;
         ct.ThrowIfCancellationRequested();
         EnsureAgentInactive(local.Kind);
@@ -495,7 +503,7 @@ public sealed class CodexHistoryWriter
     private static bool IsPackageBackedKind(ObjectKind kind) =>
         kind is ObjectKind.GrokSession or ObjectKind.ClaudeSession or ObjectKind.ClaudeMemory
             or ObjectKind.ContinueSession or ObjectKind.KimiSession or ObjectKind.MuseSession
-            or ObjectKind.HermesSession;
+            or ObjectKind.HermesSession or ObjectKind.MimoSession;
 
     private bool EnsureAgentInactive(ObjectKind kind)
     {
@@ -507,7 +515,7 @@ public sealed class CodexHistoryWriter
     {
         ArgumentNullException.ThrowIfNull(plan);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
-        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
+        var destination = PathSafety.EnsureSessionDestination(plan.Target.SourcePath, plan.Target.Kind, _paths, nameof(plan), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths, _mimoPaths);
         PathSafety.RejectReparsePoints(destination, nameof(plan));
         ct.ThrowIfCancellationRequested();
         EnsureAgentInactive(plan.Target.Kind);
@@ -515,6 +523,8 @@ public sealed class CodexHistoryWriter
             throw new IOException("Local history changed before the mutation batch could be captured.");
         if (plan.Target.Kind == ObjectKind.HermesSession && plan.Before.Exists)
             HermesSessionPackage.WriteAnchorSnapshot(destination);
+        if (plan.Target.Kind == ObjectKind.MimoSession && plan.Before.Exists)
+            MimoSessionPackage.WriteAnchorSnapshot(destination);
         if (!plan.Before.Exists) return new RollbackCapture(destination, null);
         var backup = await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         var backupIntact = BackupStore.HashEquals(
@@ -529,14 +539,14 @@ public sealed class CodexHistoryWriter
 
     internal void ValidateJournalTarget(string path, ObjectKind kind)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths, _mimoPaths);
         PathSafety.RejectReparsePoints(destination, nameof(path));
     }
 
     internal async Task RollbackAsync(string path, ObjectKind kind, ExpectedHistoryState before, ExpectedHistoryState after,
         string? backupId, string operationId, CancellationToken ct)
     {
-        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths);
+        var destination = PathSafety.EnsureSessionDestination(path, kind, _paths, nameof(path), _grokPaths, _claudePaths, _continuePaths, _annotationsDirectory, _kimiPaths, _musePaths, _hermesPaths, _mimoPaths);
         PathSafety.ValidateFileComponent(operationId, nameof(operationId));
         PathSafety.RejectReparsePoints(destination, nameof(path));
         ct.ThrowIfCancellationRequested();
@@ -549,6 +559,12 @@ public sealed class CodexHistoryWriter
             if (kind == ObjectKind.HermesSession)
             {
                 HermesSessionPackage.DeleteAnchor(destination);
+                if (File.Exists(destination)) File.Delete(destination);
+                return;
+            }
+            if (kind == ObjectKind.MimoSession)
+            {
+                MimoSessionPackage.DeleteAnchor(destination);
                 if (File.Exists(destination)) File.Delete(destination);
                 return;
             }
@@ -580,6 +596,7 @@ public sealed class CodexHistoryWriter
                 packageBacked ? backup.ContentHash : before.ContentHash!.Value,
                 after.Exists ? after.ContentHash : null, () => EnsureAgentInactive(kind), ct).ConfigureAwait(false);
             if (kind == ObjectKind.HermesSession) HermesSessionPackage.MaterializeAnchor(destination);
+            if (kind == ObjectKind.MimoSession) MimoSessionPackage.MaterializeAnchor(destination);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
@@ -608,6 +625,9 @@ public sealed class CodexHistoryWriter
     {
         if (kind == ObjectKind.HermesSession)
             return HermesSessionPackage.HashAnchor(destination);
+
+        if (kind == ObjectKind.MimoSession)
+            return MimoSessionPackage.HashAnchor(destination);
 
         if (kind == ObjectKind.ContinueSession)
         {
@@ -824,6 +844,60 @@ public sealed class CodexHistoryWriter
         HermesSessionPackage.WriteAnchorSnapshot(destination);
         await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
         HermesSessionPackage.DeleteAnchor(destination);
+        if (File.Exists(destination)) File.Delete(destination);
+        return TombstoneApplyResult.Applied;
+    }
+
+    private async Task<ImportApplyResult> ImportMimoPackageAsync(LocalObject incoming, Stream plaintext, string operationId,
+        ExpectedHistoryState expected, string destination, CancellationToken ct)
+    {
+        if (_mimoPaths is null) throw new InvalidOperationException("MiMo paths are not configured.");
+        await using var buffer = new MemoryStream();
+        await plaintext.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var packageBytes = buffer.ToArray();
+        var stagedHash = MimoSessionPackage.HashPackage(packageBytes);
+        if (!BackupStore.HashEquals(stagedHash, incoming.Hash))
+            throw new InvalidDataException("Incoming plaintext hash does not match the authenticated object hash.");
+        if (!MimoPaths.TryParseAnchor(destination, out _, out var sessionId) ||
+            !string.Equals(MimoSessionPackage.ToLogicalId(sessionId), incoming.Id.Value, StringComparison.Ordinal) ||
+            !string.Equals(MimoSessionPackage.LogicalIdOf(packageBytes), incoming.Id.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("MiMo session package id does not match the logical object id.");
+
+        if (!await MatchesExpectedStateAsync(destination, ObjectKind.MimoSession, expected, ct).ConfigureAwait(false))
+            return ImportApplyResult.Conflict;
+        if (expected.Exists)
+        {
+            MimoSessionPackage.WriteAnchorSnapshot(destination);
+            await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+        }
+
+        try
+        {
+            MimoSessionPackage.Materialize(_mimoPaths, packageBytes);
+            MimoSessionPackage.WriteAnchorSnapshot(destination);
+            var after = await ContentHashAsync(destination, ObjectKind.MimoSession, ct).ConfigureAwait(false);
+            if (after is null || !BackupStore.HashEquals(after.Value, incoming.Hash))
+                throw new IOException("MiMo session materialization did not produce the authenticated package hash.");
+            return ImportApplyResult.Applied;
+        }
+        catch (IOException)
+        {
+            return ImportApplyResult.Conflict;
+        }
+    }
+
+    private async Task<TombstoneApplyResult> ApplyMimoTombstoneAsync(LocalObject local, ContentHash baselineHash,
+        string operationId, string destination, CancellationToken ct)
+    {
+        if (_mimoPaths is null) throw new InvalidOperationException("MiMo paths are not configured.");
+        ct.ThrowIfCancellationRequested();
+        EnsureAgentInactive(local.Kind);
+        var current = await ContentHashAsync(destination, ObjectKind.MimoSession, ct).ConfigureAwait(false);
+        if (current is null) return TombstoneApplyResult.Applied;
+        if (!BackupStore.HashEquals(current.Value, baselineHash)) return TombstoneApplyResult.Conflict;
+        MimoSessionPackage.WriteAnchorSnapshot(destination);
+        await _backups.CreateAsync(destination, operationId, ct).ConfigureAwait(false);
+        MimoSessionPackage.DeleteAnchor(destination);
         if (File.Exists(destination)) File.Delete(destination);
         return TombstoneApplyResult.Applied;
     }

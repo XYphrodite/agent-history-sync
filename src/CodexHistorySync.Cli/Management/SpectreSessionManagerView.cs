@@ -300,6 +300,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         ManagedAgent.Kimi => "Kimi",
         ManagedAgent.Muse => "Muse",
         ManagedAgent.Hermes => "Hermes",
+        ManagedAgent.Mimo => "MiMo",
         _ => agent.ToString()
     };
 

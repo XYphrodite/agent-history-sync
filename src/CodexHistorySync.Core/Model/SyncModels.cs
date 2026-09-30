@@ -61,7 +61,14 @@ public enum ObjectKind
     /// state.db). Appended after MuseSession for the same reason that one was appended last, and
     /// carrying the same obligation: upgrade every machine before the first push that includes one.
     /// </summary>
-    HermesSession
+    HermesSession,
+
+    /// <summary>
+    /// Xiaomi MiMo session package (one <c>session</c> row and its <c>message</c> and <c>part</c> rows from
+    /// <c>mimocode.db</c>). Appended after HermesSession for the same reason that one was appended last, and
+    /// carrying the same obligation: upgrade every machine before the first push that includes one.
+    /// </summary>
+    MimoSession
 }
 
 public readonly record struct LogicalObjectId(string Value);

@@ -12,6 +12,7 @@ using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Model;
+using CodexHistorySync.Core.Mimo;
 using CodexHistorySync.Core.Providers;
 using CodexHistorySync.Core.State;
 
@@ -117,6 +118,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly KimiSessionScanner? _kimiScanner;
     private readonly Hermes.HermesPaths? _hermesPaths;
     private readonly Hermes.HermesSessionScanner? _hermesScanner;
+    private readonly MimoPaths? _mimoPaths;
+    private readonly MimoSessionScanner? _mimoScanner;
     private readonly string? _annotationsDirectory;
     private readonly SessionAnnotationScanner? _annotationScanner;
     private readonly byte[] _masterKey;
@@ -142,11 +145,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null,
         string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null,
         KimiPaths? kimiPaths = null, KimiSessionScanner? kimiScanner = null,
-        Hermes.HermesPaths? hermesPaths = null, Hermes.HermesSessionScanner? hermesScanner = null)
+        Hermes.HermesPaths? hermesPaths = null, Hermes.HermesSessionScanner? hermesScanner = null,
+        MimoPaths? mimoPaths = null, MimoSessionScanner? mimoScanner = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
             provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner, progress,
             claudePaths, claudeScanner, continuePaths, continueScanner, annotationsDirectory, annotationScanner,
-            kimiPaths, kimiScanner, hermesPaths, hermesScanner) { }
+            kimiPaths, kimiScanner, hermesPaths, hermesScanner, mimoPaths, mimoScanner) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
@@ -156,7 +160,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         ContinuePaths? continuePaths = null, ContinueSessionScanner? continueScanner = null,
         string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null,
         KimiPaths? kimiPaths = null, KimiSessionScanner? kimiScanner = null,
-        Hermes.HermesPaths? hermesPaths = null, Hermes.HermesSessionScanner? hermesScanner = null)
+        Hermes.HermesPaths? hermesPaths = null, Hermes.HermesSessionScanner? hermesScanner = null,
+        MimoPaths? mimoPaths = null, MimoSessionScanner? mimoScanner = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -176,6 +181,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _kimiScanner = kimiScanner ?? (kimiPaths is null ? null : new KimiSessionScanner());
         _hermesPaths = hermesPaths;
         _hermesScanner = hermesScanner ?? (hermesPaths is null ? null : new Hermes.HermesSessionScanner());
+        _mimoPaths = mimoPaths;
+        _mimoScanner = mimoScanner ?? (mimoPaths is null ? null : new MimoSessionScanner());
         _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
         _annotationScanner = annotationScanner ?? (_annotationsDirectory is null ? null : new SessionAnnotationScanner());
         _masterKey = masterKey.ToArray();
@@ -187,7 +194,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
-        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths, kimiPaths, hermesPaths);
+        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths, kimiPaths, hermesPaths, mimoPaths);
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
         _progress = progress;
@@ -205,6 +212,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
         if (_kimiPaths is not null && _kimiScanner is not null) extraTasks.Add(_kimiScanner.ScanDetailedAsync(_kimiPaths, ct));
         if (_hermesPaths is not null && _hermesScanner is not null) extraTasks.Add(_hermesScanner.ScanDetailedAsync(_hermesPaths, ct));
+        if (_mimoPaths is not null && _mimoScanner is not null) extraTasks.Add(_mimoScanner.ScanDetailedAsync(_mimoPaths, ct));
         if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
         var unscanned = UnscannedKinds();
         if (extraTasks.Count == 0)
@@ -264,6 +272,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_continuePaths is null || _continueScanner is null) unscanned.Add(ObjectKind.ContinueSession);
         if (_kimiPaths is null || _kimiScanner is null) unscanned.Add(ObjectKind.KimiSession);
         if (_hermesPaths is null || _hermesScanner is null) unscanned.Add(ObjectKind.HermesSession);
+        if (_mimoPaths is null || _mimoScanner is null) unscanned.Add(ObjectKind.MimoSession);
         // Muse is currently available to the local catalog, but no Muse scanner is wired into
         // this engine. Its absence can never authorize a repository-wide tombstone.
         unscanned.Add(ObjectKind.MuseSession);
@@ -750,6 +759,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             ? ResolveKimiDestination(id, plaintext)
                             : kind == ObjectKind.HermesSession
                             ? ResolveHermesDestination(id, plaintext)
+                            : kind == ObjectKind.MimoSession
+                            ? ResolveMimoDestination(id, plaintext)
                             : Path.Combine(kind switch
                     {
                         ObjectKind.ActiveSession => _paths.Sessions,
@@ -1018,6 +1029,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             !Hermes.HermesSessionPackage.TrySplitLogicalId(id.Value, out var profile, out var sessionId))
             throw new InvalidDataException("Hermes conflict payload id does not match the logical object id.");
         return _hermesPaths.AnchorPath(profile, sessionId);
+    }
+
+    private string ResolveMimoDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_mimoPaths is null) throw new InvalidOperationException("MiMo paths are not configured.");
+        if (!string.Equals(MimoSessionPackage.LogicalIdOf(plaintext), id.Value, StringComparison.Ordinal) ||
+            !MimoSessionPackage.TrySplitLogicalId(id.Value, out var sessionId))
+            throw new InvalidDataException("MiMo conflict payload id does not match the logical object id.");
+        return _mimoPaths.AnchorPath(sessionId);
     }
 
     private async Task<ObjectVersion> PublishResolvedRemoteAsync(RemoteSnapshot snapshot,
@@ -1418,6 +1438,19 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             else if (existing is not null)
                 path = existing.SourcePath;
         }
+        else if (version.Kind == ObjectKind.MimoSession)
+        {
+            if (_mimoPaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "MiMo paths are not configured.");
+            if (!MimoSessionPackage.TrySplitLogicalId(action.ObjectId.Value, out var mimoSessionId) ||
+                !string.Equals(MimoSessionPackage.LogicalIdOf(plaintext), action.ObjectId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("MiMo session package id does not match its logical object ID.");
+            path = _mimoPaths.AnchorPath(mimoSessionId);
+            if (existing is not null && existing.Kind != ObjectKind.MimoSession)
+                relocateFrom = existing;
+            else if (existing is not null)
+                path = existing.SourcePath;
+        }
         else
         {
             var root = version.Kind switch
@@ -1450,6 +1483,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 ObjectKind.ContinueSession => ".continuepkg",
                 ObjectKind.KimiSession => ".kimipkg",
                 ObjectKind.HermesSession => ".hermespkg",
+                ObjectKind.MimoSession => ".mimopkg",
                 ObjectKind.SessionAnnotations => ".annotation.json",
                 _ => ".jsonl"
             });
@@ -1542,6 +1576,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         {
             if (!string.Equals(Hermes.HermesSessionPackage.LogicalIdOf(bytes), expectedId.Value, StringComparison.Ordinal))
                 throw new InvalidDataException("Hermes session package id does not match its logical object ID.");
+            return;
+        }
+
+        if (kind == ObjectKind.MimoSession)
+        {
+            if (!string.Equals(MimoSessionPackage.LogicalIdOf(bytes), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("MiMo session package id does not match its logical object ID.");
             return;
         }
 

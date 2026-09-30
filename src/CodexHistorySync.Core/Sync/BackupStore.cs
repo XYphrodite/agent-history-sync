@@ -6,6 +6,7 @@ using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Hermes;
+using CodexHistorySync.Core.Mimo;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Model;
 
@@ -25,28 +26,30 @@ public sealed class BackupStore
     private readonly ContinuePaths? _continuePaths;
     private readonly KimiPaths? _kimiPaths;
     private readonly HermesPaths? _hermesPaths;
+    private readonly MimoPaths? _mimoPaths;
     private readonly string? _annotationsDirectory;
     private readonly IAtomicFileSystem _fileSystem;
     private readonly TimeProvider _clock;
     private readonly TimeSpan _retention;
     private readonly IStagingDirectoryCleaner _stagingCleaner;
 
-    public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, HermesPaths? hermesPaths = null)
-        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null, grokPaths, claudePaths, continuePaths, annotationsDirectory, kimiPaths, hermesPaths) { }
+    public BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem = null, TimeProvider? timeProvider = null, TimeSpan? retention = null, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, HermesPaths? hermesPaths = null, MimoPaths? mimoPaths = null)
+        : this(repositoryId, localAppDataDirectory, codexPaths, fileSystem, timeProvider, retention, null, grokPaths, claudePaths, continuePaths, annotationsDirectory, kimiPaths, hermesPaths, mimoPaths) { }
 
-    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, HermesPaths? hermesPaths = null)
+    internal BackupStore(string repositoryId, string? localAppDataDirectory, CodexPaths codexPaths, IAtomicFileSystem? fileSystem, TimeProvider? timeProvider, TimeSpan? retention, IStagingDirectoryCleaner? stagingCleaner, GrokPaths? grokPaths = null, ClaudePaths? claudePaths = null, ContinuePaths? continuePaths = null, string? annotationsDirectory = null, KimiPaths? kimiPaths = null, HermesPaths? hermesPaths = null, MimoPaths? mimoPaths = null)
     {
         ArgumentNullException.ThrowIfNull(codexPaths);
         PathSafety.ValidateFileComponent(repositoryId, nameof(repositoryId));
         var local = PathSafety.Canonicalize(localAppDataDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), nameof(localAppDataDirectory));
         RootPath = Path.GetFullPath(Path.Combine(local, "CodexHistorySync", "repositories", repositoryId, "backups"));
-        PathSafety.EnsureOutsideCodex(RootPath, codexPaths, nameof(localAppDataDirectory), grokPaths, claudePaths, continuePaths, kimiPaths, hermesPaths);
+        PathSafety.EnsureOutsideCodex(RootPath, codexPaths, nameof(localAppDataDirectory), grokPaths, claudePaths, continuePaths, kimiPaths, hermesPaths, mimoPaths);
         _paths = codexPaths;
         _grokPaths = grokPaths;
         _claudePaths = claudePaths;
         _continuePaths = continuePaths;
         _kimiPaths = kimiPaths;
         _hermesPaths = hermesPaths;
+        _mimoPaths = mimoPaths;
         _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
         _fileSystem = fileSystem ?? new AtomicFileSystem();
         _clock = timeProvider ?? TimeProvider.System;
@@ -181,6 +184,7 @@ public sealed class BackupStore
                 return canonical;
         }
         if (_hermesPaths is not null) roots.Add(_hermesPaths.AnchorRoot);
+        if (_mimoPaths is not null) roots.Add(_mimoPaths.AnchorRoot);
         if (!roots.Any(root => CodexPaths.IsPathWithin(canonical, root) && !StringComparer.OrdinalIgnoreCase.Equals(canonical, Path.TrimEndingDirectorySeparator(root))))
             throw new ArgumentException("The backup source is outside synchronized history paths.", nameof(path));
         return canonical;

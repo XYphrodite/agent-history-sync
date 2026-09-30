@@ -47,6 +47,14 @@ public sealed record CliStatusReport(int Local, int Remote, int Pending, int Con
     /// <summary>True when the Hermes scan could not confirm what it did not find.</summary>
     public bool HermesUncertain { get; init; }
 
+    /// <summary>Resolved MiMo home, or null when no MiMo home was found.</summary>
+    public string? MimoHome { get; init; }
+
+    public int MimoSessions { get; init; }
+
+    /// <summary>True when the MiMo scan could not confirm what it did not find.</summary>
+    public bool MimoUncertain { get; init; }
+
     public int ClaudeSessions { get; init; }
 
     public int ClaudeMemory { get; init; }
@@ -382,6 +390,7 @@ public sealed class CliApplication
             ("kimi", [ObjectKind.KimiSession]),
             ("muse", [ObjectKind.MuseSession]),
             ("hermes", [ObjectKind.HermesSession]),
+            ("mimo", [ObjectKind.MimoSession]),
             ("annotations", [ObjectKind.SessionAnnotations]),
         };
         var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
@@ -449,6 +458,8 @@ public sealed class CliApplication
             $"kimi-sessions={result.KimiSessions} kimi-uncertain={(result.KimiUncertain ? "yes" : "no")}");
         console.WriteLine($"hermes-home={(result.HermesHome is null ? "none" : SafeToken(result.HermesHome))} " +
             $"hermes-sessions={result.HermesSessions} hermes-uncertain={(result.HermesUncertain ? "yes" : "no")}");
+        console.WriteLine($"mimo-home={(result.MimoHome is null ? "none" : SafeToken(result.MimoHome))} " +
+            $"mimo-sessions={result.MimoSessions} mimo-uncertain={(result.MimoUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

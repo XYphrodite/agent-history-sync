@@ -118,7 +118,7 @@ public sealed class SessionMcpToolsTests : IDisposable
             return new SessionCatalogSnapshot(grouped[ManagedAgent.Codex].ToArray(), grouped[ManagedAgent.Grok].ToArray(),
                 grouped[ManagedAgent.Claude].ToArray(), grouped[ManagedAgent.Continue].ToArray(),
                 grouped[ManagedAgent.Kimi].ToArray(), grouped[ManagedAgent.Muse].ToArray(),
-                grouped[ManagedAgent.Hermes].ToArray()) { ConfiguredAgents = ManagedAgents.All };
+                grouped[ManagedAgent.Hermes].ToArray(), grouped[ManagedAgent.Mimo].ToArray()) { ConfiguredAgents = ManagedAgents.All };
         }
     }
 
