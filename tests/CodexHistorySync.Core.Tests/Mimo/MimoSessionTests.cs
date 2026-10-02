@@ -161,6 +161,57 @@ public sealed class MimoSessionTests : IDisposable
     }
 
     [Fact]
+    public async Task Catalog_HidesChildSessionsCreatedByInternalAgents()
+    {
+        var home = Home("catalog-subagent");
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_aaaa"], extraNullColumn: false);
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_cccc"], extraNullColumn: false,
+            sessionId: "ses_child0000000000000001",
+            title: "checkpoint-writer: Previous checkpoint: memory",
+            parentId: SessionId);
+
+        using var limiter = new SessionCatalogReadLimiter(2);
+        var rows = await new MimoSessionCatalogSource(home).ScanAsync(limiter, CancellationToken.None);
+        var row = Assert.Single(rows);
+        Assert.Equal(SessionId, row.SessionId);
+    }
+
+    [Fact]
+    public async Task Catalog_HidesLegacyGenerationSessions()
+    {
+        var home = Home("catalog-legacy");
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_aaaa"], extraNullColumn: false);
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_cccc"], extraNullColumn: false,
+            sessionId: "ses_legacy000000000000001",
+            title: "old mimo chat",
+            version: "2.1.251");
+
+        using var limiter = new SessionCatalogReadLimiter(2);
+        var rows = await new MimoSessionCatalogSource(home).ScanAsync(limiter, CancellationToken.None);
+        var row = Assert.Single(rows);
+        Assert.Equal(SessionId, row.SessionId);
+    }
+
+    [Fact]
+    public async Task Scanner_IgnoresChildSessionsInsteadOfPublishingOrDeletingThem()
+    {
+        var home = Home("scan-subagent");
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_aaaa"], extraNullColumn: false);
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_cccc"], extraNullColumn: false,
+            sessionId: "ses_child0000000000000001",
+            title: "checkpoint-writer: Previous checkpoint: memory",
+            parentId: SessionId);
+
+        var scanner = new MimoSessionScanner(_ => Task.CompletedTask, () => false, TimeSpan.Zero);
+        var result = await scanner.ScanDetailedAsync(home, CancellationToken.None);
+
+        var item = Assert.Single(result.Objects);
+        Assert.Equal("mi-" + SessionId, item.Id.Value);
+        Assert.True(result.IsIgnored(new LogicalObjectId("mi-ses_child0000000000000001")));
+        Assert.True(result.IsAbsenceConfirmed(ObjectKind.MimoSession));
+    }
+
+    [Fact]
     public void Paths_DetectChannelDatabaseFiles()
     {
         var home = Home("channel");
@@ -190,8 +241,10 @@ public sealed class MimoSessionTests : IDisposable
         return new MimoPaths(home);
     }
 
-    private static void WriteSession(string database, string[] messageIds, bool extraNullColumn)
+    private static void WriteSession(string database, string[] messageIds, bool extraNullColumn,
+        string? sessionId = null, string? title = null, string? parentId = null, string? version = null)
     {
+        sessionId ??= SessionId;
         Directory.CreateDirectory(Path.GetDirectoryName(database)!);
         using var connection = Open(database);
         using var command = connection.CreateCommand();
@@ -199,8 +252,10 @@ public sealed class MimoSessionTests : IDisposable
             CREATE TABLE IF NOT EXISTS session (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
+                parent_id TEXT,
                 directory TEXT NOT NULL,
                 title TEXT,
+                version TEXT,
                 time_created INTEGER NOT NULL,
                 time_updated INTEGER NOT NULL
             );
@@ -222,10 +277,13 @@ public sealed class MimoSessionTests : IDisposable
                 data TEXT
             );
             INSERT OR REPLACE INTO project (id, worktree) VALUES ('prj_123', '/work/mimo');
-            INSERT OR REPLACE INTO session (id, project_id, directory, title, time_created, time_updated)
-            VALUES (@id, 'prj_123', '/work/mimo', 'Fix the build', 1741166123000, 1741166124000);
+            INSERT OR REPLACE INTO session (id, project_id, parent_id, directory, title, version, time_created, time_updated)
+            VALUES (@id, 'prj_123', @parent, '/work/mimo', @title, @version, 1741166123000, 1741166124000);
             """;
-        command.Parameters.AddWithValue("@id", SessionId);
+        command.Parameters.AddWithValue("@id", sessionId);
+        command.Parameters.AddWithValue("@parent", (object?)parentId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@title", (object?)(title ?? "Fix the build") ?? DBNull.Value);
+        command.Parameters.AddWithValue("@version", (object?)version ?? DBNull.Value);
         command.ExecuteNonQuery();
         if (extraNullColumn)
         {
@@ -252,7 +310,7 @@ public sealed class MimoSessionTests : IDisposable
                 VALUES (@id, @session, @time, @data)
                 """;
             insert.Parameters.AddWithValue("@id", msgId);
-            insert.Parameters.AddWithValue("@session", SessionId);
+            insert.Parameters.AddWithValue("@session", sessionId);
             insert.Parameters.AddWithValue("@time", 1741166123000 + index * 1000);
             insert.Parameters.AddWithValue("@data", data);
             insert.ExecuteNonQuery();
@@ -264,7 +322,7 @@ public sealed class MimoSessionTests : IDisposable
                 VALUES (@pid, @session, @mid, @time, @data)
                 """;
             partInsert.Parameters.AddWithValue("@pid", "prt_" + msgId[4..]);
-            partInsert.Parameters.AddWithValue("@session", SessionId);
+            partInsert.Parameters.AddWithValue("@session", sessionId);
             partInsert.Parameters.AddWithValue("@mid", msgId);
             partInsert.Parameters.AddWithValue("@time", 1741166123000 + index * 1000);
             partInsert.Parameters.AddWithValue("@data", partJson);

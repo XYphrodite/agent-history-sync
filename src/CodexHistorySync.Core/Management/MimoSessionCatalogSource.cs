@@ -27,7 +27,9 @@ internal sealed class MimoSessionCatalogSource(MimoPaths paths) : ILocalSessionC
             throw new IOException("MiMo sessions could not be read.", exception);
         }
 
-        var rows = read.Snapshots.Select(snapshot =>
+        var rows = read.Snapshots
+            .Where(snapshot => !snapshot.IsSubagent && !snapshot.IsLegacyGeneration)
+            .Select(snapshot =>
         {
             var title = Normalize(CellText(snapshot.Session, "title"));
             var official = title is not null;

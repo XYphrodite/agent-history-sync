@@ -94,6 +94,7 @@ public sealed class MimoSessionScanner
         var running = isMimoRunning();
         var cutoff = now().ToUnixTimeMilliseconds() / 1000d - activityWindow.TotalSeconds;
         var complete = true;
+        var ignored = new HashSet<LogicalObjectId>();
         MimoReadResult read;
         try
         {
@@ -111,6 +112,15 @@ public sealed class MimoSessionScanner
         {
             cancellationToken.ThrowIfCancellationRequested();
             var logical = MimoSessionPackage.ToLogicalId(snapshot.SessionId);
+            if (snapshot.IsSubagent)
+            {
+                // A child session for an internal agent run is machine-local noise the manager
+                // already hides. Ignore it rather than drop it so its absence never reads as a
+                // deletion of a session another machine still holds.
+                ignored.Add(new LogicalObjectId(logical));
+                continue;
+            }
+
             if (!first.TryGetValue(logical, out var before) ||
                 !second.TryGetValue(logical, out var after) ||
                 !string.Equals(before, after, StringComparison.Ordinal))
@@ -161,7 +171,7 @@ public sealed class MimoSessionScanner
 
         if (first.Count != second.Count || first.Keys.Any(id => !second.ContainsKey(id))) complete = false;
         if (!complete) uncertain.Add(ObjectKind.MimoSession);
-        return new SessionScanResult(objects, uncertain, duplicates);
+        return new SessionScanResult(objects, uncertain, duplicates) { IgnoredIds = ignored };
     }
 
     private static Dictionary<string, string> Fingerprints(MimoPaths paths)
@@ -171,6 +181,7 @@ public sealed class MimoSessionScanner
         var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var snapshot in read.Snapshots)
         {
+            if (snapshot.IsSubagent) continue;
             var package = MimoSessionPackage.TryBuild(paths, snapshot.SessionId)
                 ?? throw new InvalidDataException("MiMo session disappeared while it was being read.");
             fingerprints[MimoSessionPackage.ToLogicalId(snapshot.SessionId)] =

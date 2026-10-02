@@ -442,6 +442,29 @@ internal sealed record MimoSnapshot(
     IReadOnlyList<MimoCell> Session,
     IReadOnlyList<IReadOnlyList<MimoCell>> Messages,
     IReadOnlyList<IReadOnlyList<MimoPart>> Parts,
-    double LastActiveUnix);
+    double LastActiveUnix)
+{
+    /// <summary>
+    /// A child session created for an internal agent run (checkpoint-writer and similar). The
+    /// manager hides it and the scanner ignores it, matching how Codex treats subagent threads.
+    /// </summary>
+    public bool IsSubagent =>
+        Session.Any(cell =>
+            string.Equals(cell.Name, "parent_id", StringComparison.Ordinal) &&
+            cell.Type == "text" &&
+            !string.IsNullOrEmpty(cell.Text));
+
+    /// <summary>
+    /// A session left behind by the previous MiMo generation (schema <c>version</c> 2.1.x).
+    /// MiMoCode does not list those as chats, so the manager hides them; the scanner still
+    /// keeps them so an older machine's history is never treated as deleted.
+    /// </summary>
+    public bool IsLegacyGeneration =>
+        Session.Any(cell =>
+            string.Equals(cell.Name, "version", StringComparison.Ordinal) &&
+            cell.Type == "text" &&
+            cell.Text is { Length: > 0 } text &&
+            text.StartsWith("2.1.", StringComparison.Ordinal));
+}
 
 internal sealed record MimoReadResult(IReadOnlyList<MimoSnapshot> Snapshots, bool Complete);
