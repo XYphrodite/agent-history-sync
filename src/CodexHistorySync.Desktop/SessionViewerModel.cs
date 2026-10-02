@@ -118,7 +118,8 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
         {
             if (debounce) await Task.Delay(220, token);
             var text = Filter.Trim();
-            var rows = allSessions.Where(node => Agent == "All agents" || node.Session.Agent.ToString() == Agent).ToArray();
+            var rows = allSessions.Where(node => Agent == "All agents"
+                || string.Equals(node.Session.Agent.ToString(), Agent, StringComparison.OrdinalIgnoreCase)).ToArray();
             var matching = new HashSet<(ManagedAgent, string)>();
             if (text.Length > 0 && services.SearchIndex is not null)
             {

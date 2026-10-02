@@ -88,6 +88,21 @@ public sealed class SessionManagerTests
     }
 
     [AvaloniaFact]
+    public async Task AgentDropdownMatchesMimoSessions()
+    {
+        var mimo = new ManagedSession(ManagedAgent.Mimo, "ses_abc", "anchor/ses_abc.json", "MiMo session",
+            new DateTimeOffset(2026, 9, 14, 18, 0, 0, TimeSpan.Zero), IsActive: false, CanRead: true);
+        using var model = CreateModel(suppliedCatalog: new SingleSessionCatalog(mimo) { ConfiguredAgentsOverride = [ManagedAgent.Mimo] });
+        await model.RefreshAsync();
+        Assert.Single(model.Sessions);
+
+        model.Agent = "MiMo";
+        await model.FilterAsync(debounce: false);
+        Assert.Single(model.Sessions);
+        Assert.Equal("ses_abc", model.Sessions[0].SessionId);
+    }
+
+    [AvaloniaFact]
     public async Task CopyDelegatesToOperationsAndRefreshes()
     {
         var operations = new FakeOperations();
@@ -267,7 +282,23 @@ public sealed class SessionManagerTests
 
     private sealed class SingleSessionCatalog(ManagedSession source) : ILocalSessionCatalog
     {
-        public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken ct) =>
-            Task.FromResult(new SessionCatalogSnapshot([], [], [], [], [], [source]) { ConfiguredAgents = [ManagedAgent.Muse] });
+        public IReadOnlyList<ManagedAgent>? ConfiguredAgentsOverride { get; init; }
+
+        public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken ct)
+        {
+            var snapshot = new SessionCatalogSnapshot(
+                source.Agent == ManagedAgent.Codex ? [source] : [],
+                source.Agent == ManagedAgent.Grok ? [source] : [],
+                source.Agent == ManagedAgent.Claude ? [source] : [],
+                source.Agent == ManagedAgent.Continue ? [source] : [],
+                source.Agent == ManagedAgent.Kimi ? [source] : [],
+                source.Agent == ManagedAgent.Muse ? [source] : [],
+                source.Agent == ManagedAgent.Hermes ? [source] : [],
+                source.Agent == ManagedAgent.Mimo ? [source] : [])
+            {
+                ConfiguredAgents = ConfiguredAgentsOverride ?? [source.Agent]
+            };
+            return Task.FromResult(snapshot);
+        }
     }
 }

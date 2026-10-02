@@ -51,6 +51,21 @@ public sealed class SessionViewerTests
     }
 
     [AvaloniaFact]
+    public async Task AgentDropdownMatchesMimoSessions()
+    {
+        var mimo = new ManagedSession(ManagedAgent.Mimo, "ses_abc", "anchor/ses_abc.json", "MiMo session",
+            new DateTimeOffset(2026, 9, 14, 18, 0, 0, TimeSpan.Zero), false, true);
+        using var model = CreateModel(catalog: new FixedCatalog(mimo));
+        await model.RefreshAsync();
+        Assert.Single(model.Sessions);
+
+        model.Agent = "MiMo";
+        await model.FilterAsync(debounce: false);
+        Assert.Single(model.Sessions);
+        Assert.Equal("ses_abc", model.Sessions[0].Session.SessionId);
+    }
+
+    [AvaloniaFact]
     public async Task UnreadableFirstSessionShowsErrorAndAnotherConversationCanBeOpened()
     {
         using var model = CreateModel(catalog: new FakeCatalog(unreadableParent: true));
@@ -340,6 +355,21 @@ public sealed class SessionViewerTests
         public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken) => Task.FromResult(
             new SessionCatalogSnapshot([Session("parent", "Find the project’s current task") with { CanRead = !unreadableParent },
                 Session("second", "Review release notes")], []));
+    }
+
+    private sealed class FixedCatalog(ManagedSession source) : ILocalSessionCatalog
+    {
+        public Task<SessionCatalogSnapshot> ScanAsync(CancellationToken cancellationToken) => Task.FromResult(
+            new SessionCatalogSnapshot(
+                source.Agent == ManagedAgent.Codex ? [source] : [],
+                source.Agent == ManagedAgent.Grok ? [source] : [],
+                source.Agent == ManagedAgent.Claude ? [source] : [],
+                source.Agent == ManagedAgent.Continue ? [source] : [],
+                source.Agent == ManagedAgent.Kimi ? [source] : [],
+                source.Agent == ManagedAgent.Muse ? [source] : [],
+                source.Agent == ManagedAgent.Hermes ? [source] : [],
+                source.Agent == ManagedAgent.Mimo ? [source] : [])
+            { ConfiguredAgents = [source.Agent] });
     }
     private sealed class FakeFamilies : ISessionFamilyReader
     {

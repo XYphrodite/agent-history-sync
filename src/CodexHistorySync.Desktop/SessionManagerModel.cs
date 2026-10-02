@@ -152,7 +152,8 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
         {
             if (debounce) await Task.Delay(220, token);
             var text = Filter.Trim();
-            var rows = allSessions.Where(s => Agent == "All agents" || s.Agent.ToString() == Agent).ToArray();
+            var rows = allSessions.Where(s => Agent == "All agents"
+                || string.Equals(s.Agent.ToString(), Agent, StringComparison.OrdinalIgnoreCase)).ToArray();
             var matching = new HashSet<(ManagedAgent, string)>();
             if (text.Length > 0 && services.SearchIndex is not null)
             {
