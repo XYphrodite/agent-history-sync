@@ -144,6 +144,24 @@ public sealed class MimoSessionTests : IDisposable
         var written = await new MimoConversationWriter(copyHome, () => SessionId + "2", () => DateTimeOffset.Parse("2026-03-05T09:15:23Z")).WriteAsync(conversation, CancellationToken.None);
         var copied = await reader.ReadAsync(written.NativePath, CancellationToken.None);
         Assert.Equal(conversation.Turns.Select(turn => turn.Text), copied.Turns.Select(turn => turn.Text));
+
+        // MiMoCode resumes a session by reading message.info.time.created and needs the
+        // project row the session points at; a bare { role, content } copy crashes the loader.
+        using var connection = Open(copyHome.PrimaryDatabasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT data FROM message WHERE session_id = @id ORDER BY time_created";
+        command.Parameters.AddWithValue("@id", SessionId + "2");
+        using var reader2 = command.ExecuteReader();
+        while (reader2.Read())
+        {
+            using var doc = JsonDocument.Parse(reader2.GetString(0));
+            Assert.True(doc.RootElement.TryGetProperty("time", out var time));
+            Assert.True(time.TryGetProperty("created", out _));
+        }
+
+        using var project = connection.CreateCommand();
+        project.CommandText = "SELECT COUNT(*) FROM project WHERE worktree = '/work/mimo'";
+        Assert.Equal(1, Convert.ToInt32(project.ExecuteScalar()));
     }
 
     [Fact]

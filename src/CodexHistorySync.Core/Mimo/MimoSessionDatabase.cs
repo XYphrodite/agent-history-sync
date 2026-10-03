@@ -76,6 +76,22 @@ internal static class MimoSessionDatabase
         using var transaction = connection.BeginTransaction();
         try
         {
+            EnsureTable(connection, "project",
+                """
+                CREATE TABLE IF NOT EXISTS "project" (
+                    "id" TEXT PRIMARY KEY,
+                    "worktree" TEXT NOT NULL,
+                    "vcs" TEXT,
+                    "name" TEXT,
+                    "icon_url" TEXT,
+                    "icon_color" TEXT,
+                    "time_created" INTEGER NOT NULL,
+                    "time_updated" INTEGER NOT NULL,
+                    "time_initialized" INTEGER,
+                    "sandboxes" TEXT,
+                    "commands" TEXT
+                );
+                """);
             EnsureTable(connection, "session",
                 """
                 CREATE TABLE IF NOT EXISTS "session" (

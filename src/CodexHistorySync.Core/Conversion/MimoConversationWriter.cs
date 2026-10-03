@@ -55,6 +55,7 @@ public sealed class MimoConversationWriter : IConversationWriter
 
             var messages = new List<IReadOnlyList<MimoCell>>();
             var partsPerMessage = new List<IReadOnlyList<MimoPart>>();
+            string? previousMessageId = null;
 
             for (var i = 0; i < conversation.Turns.Count; i++)
             {
@@ -62,9 +63,25 @@ public sealed class MimoConversationWriter : IConversationWriter
                 var messageId = "msg_" + Guid.NewGuid().ToString("N")[..24];
                 var role = turn.Role == ConversationRole.User ? "user" : "assistant";
                 var time = nowMs + i * 1000;
+                // MiMoCode resumes a session by reading message.info.time.created and the
+                // text parts below; a bare { role, content } payload crashes the session loader.
                 var dataJson = role == "user"
-                    ? JsonSerializer.Serialize(new { role = "user", content = turn.Text })
-                    : JsonSerializer.Serialize(new { role = "assistant", content = turn.Text, modelID = "mimo", providerID = "mimo" });
+                    ? JsonSerializer.Serialize(new
+                    {
+                        role = "user",
+                        agent = "main",
+                        time = new { created = time },
+                        model = new { providerID = "mimo", modelID = "mimo" }
+                    })
+                    : JsonSerializer.Serialize(new
+                    {
+                        role = "assistant",
+                        agent = "main",
+                        time = new { created = time, completed = time },
+                        modelID = "mimo",
+                        providerID = "mimo",
+                        parentID = previousMessageId
+                    });
 
                 var msgCells = new List<MimoCell>
                 {
@@ -88,6 +105,7 @@ public sealed class MimoConversationWriter : IConversationWriter
                     new("data", "text", partJson, null, null),
                 };
                 partsPerMessage.Add([new MimoPart(partCells)]);
+                previousMessageId = messageId;
             }
 
             var snapshot = new MimoSnapshot(sessionId, sessionCells, messages, partsPerMessage, created.ToUnixTimeSeconds());
@@ -116,24 +134,76 @@ public sealed class MimoConversationWriter : IConversationWriter
 
     private string EnsureProject(string directory)
     {
-        // Check if project already exists for this directory; if not, create one.
-        // We query the DB directly for existing project by worktree.
         var dbPath = paths.PrimaryDatabasePath;
-        if (!File.Exists(dbPath)) return "prj_" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(directory)))[..12].ToLowerInvariant();
+        var projectId = "prj_" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(directory)))[..12].ToLowerInvariant();
 
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Pooling=False");
+            Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadWriteCreate;Pooling=False");
             conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id FROM project WHERE worktree = @wt LIMIT 1";
-            cmd.Parameters.AddWithValue("@wt", directory);
-            var result = cmd.ExecuteScalar() as string;
-            if (!string.IsNullOrWhiteSpace(result)) return result;
-        }
-        catch { }
+            using (var create = conn.CreateCommand())
+            {
+                // ReadOne validates the session table before Write materializes the package,
+                // so a freshly created database needs the full schema up front.
+                create.CommandText = """
+                    CREATE TABLE IF NOT EXISTS "project" (
+                        "id" TEXT PRIMARY KEY,
+                        "worktree" TEXT NOT NULL,
+                        "vcs" TEXT,
+                        "name" TEXT,
+                        "icon_url" TEXT,
+                        "icon_color" TEXT,
+                        "time_created" INTEGER NOT NULL,
+                        "time_updated" INTEGER NOT NULL,
+                        "time_initialized" INTEGER,
+                        "sandboxes" TEXT,
+                        "commands" TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS "session" (
+                        "id" TEXT PRIMARY KEY,
+                        "project_id" TEXT NOT NULL,
+                        "time_created" INTEGER NOT NULL,
+                        "time_updated" INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS "message" (
+                        "id" TEXT PRIMARY KEY,
+                        "session_id" TEXT NOT NULL,
+                        "time_created" INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS "part" (
+                        "id" TEXT PRIMARY KEY,
+                        "message_id" TEXT NOT NULL,
+                        "session_id" TEXT NOT NULL,
+                        "time_created" INTEGER NOT NULL
+                    );
+                    """;
+                create.ExecuteNonQuery();
+            }
 
-        return "prj_" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(directory)))[..12].ToLowerInvariant();
+            using var lookup = conn.CreateCommand();
+            lookup.CommandText = "SELECT id FROM project WHERE worktree = @wt LIMIT 1";
+            lookup.Parameters.AddWithValue("@wt", directory);
+            if (lookup.ExecuteScalar() is string existing && !string.IsNullOrWhiteSpace(existing))
+                return existing;
+
+            // A session whose project_id has no project row is dropped from mimo session list.
+            using var insert = conn.CreateCommand();
+            insert.CommandText = """
+                INSERT OR IGNORE INTO project (id, worktree, vcs, time_created, time_updated, sandboxes)
+                VALUES (@id, @wt, NULL, @now, @now, '[]')
+                """;
+            insert.Parameters.AddWithValue("@id", projectId);
+            insert.Parameters.AddWithValue("@wt", directory);
+            insert.Parameters.AddWithValue("@now", utcNow().ToUnixTimeMilliseconds());
+            insert.ExecuteNonQuery();
+            return projectId;
+        }
+        catch
+        {
+            return projectId;
+        }
     }
 
     private static bool IsUnique(IOException ex) =>
