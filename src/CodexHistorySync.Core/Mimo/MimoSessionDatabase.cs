@@ -118,6 +118,20 @@ internal static class MimoSessionDatabase
                     "time_created" INTEGER NOT NULL
                 );
                 """);
+            // TUI /sessions lists from the history_fts table; without rows here a copy
+            // exists in the database but is invisible in the MiMoCode session picker.
+            EnsureTable(connection, "history_fts",
+                """
+                CREATE TABLE IF NOT EXISTS "history_fts" (
+                    "part_id" TEXT PRIMARY KEY NOT NULL,
+                    "session_id" TEXT NOT NULL,
+                    "message_id" TEXT NOT NULL,
+                    "project_id" TEXT NOT NULL,
+                    "tool_name" TEXT,
+                    "body" TEXT NOT NULL,
+                    "time_created" INTEGER NOT NULL
+                );
+                """);
             EnsureColumns(connection, "session", snapshot.Session);
             foreach (var message in snapshot.Messages) EnsureColumns(connection, "message", message);
             foreach (var partList in snapshot.Parts)
@@ -126,10 +140,12 @@ internal static class MimoSessionDatabase
             Execute(connection, "DELETE FROM \"part\" WHERE \"session_id\" = @id", ("@id", snapshot.SessionId));
             Execute(connection, "DELETE FROM \"message\" WHERE \"session_id\" = @id", ("@id", snapshot.SessionId));
             Execute(connection, "DELETE FROM \"session\" WHERE \"id\" = @id", ("@id", snapshot.SessionId));
+            Execute(connection, "DELETE FROM \"history_fts\" WHERE \"session_id\" = @sid", ("@sid", snapshot.SessionId));
             Insert(connection, "session", snapshot.Session);
             foreach (var message in snapshot.Messages) Insert(connection, "message", message);
             foreach (var partList in snapshot.Parts)
                 foreach (var part in partList) Insert(connection, "part", part.Cells);
+            IndexForSearch(connection, snapshot);
 
             transaction.Commit();
         }
@@ -329,6 +345,67 @@ internal static class MimoSessionDatabase
             "integer" => cell.Integer?.ToString(CultureInfo.InvariantCulture),
             _ => null
         };
+    }
+
+    private static void IndexForSearch(SqliteConnection connection, MimoSnapshot snapshot)
+    {
+        var projectId = snapshot.Session
+            .FirstOrDefault(c => string.Equals(c.Name, "project_id", StringComparison.Ordinal))
+            ?.Text ?? "global";
+        foreach (var partList in snapshot.Parts)
+        {
+            foreach (var part in partList)
+            {
+                var id = Text(part.Cells, "id");
+                var messageId = Text(part.Cells, "message_id");
+                if (id is null || messageId is null) continue;
+                var (toolName, body) = SearchBody(part.Cells);
+                if (body.Length == 0) continue;
+                Execute(connection,
+                    """
+                    INSERT OR IGNORE INTO "history_fts"
+                        ("part_id", "session_id", "message_id", "project_id", "tool_name", "body", "time_created")
+                    VALUES (@pid, @sid, @mid, @project, @tool, @body, @created)
+                    """,
+                    ("@pid", id),
+                    ("@sid", snapshot.SessionId),
+                    ("@mid", messageId),
+                    ("@project", projectId),
+                    ("@tool", (object?)toolName ?? DBNull.Value),
+                    ("@body", body),
+                    ("@created", Text(part.Cells, "time_created") is { } created &&
+                                 double.TryParse(created, NumberStyles.Float, CultureInfo.InvariantCulture, out var stamp)
+                            ? stamp
+                            : snapshot.LastActiveUnix));
+            }
+        }
+    }
+
+    private static (string? Tool, string Body) SearchBody(IReadOnlyList<MimoCell> cells)
+    {
+        var raw = Text(cells, "data");
+        if (string.IsNullOrWhiteSpace(raw)) return (null, string.Empty);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            string? tool = root.TryGetProperty("tool", out var t) ? t.GetString() : null;
+            var body = root.TryGetProperty("text", out var text) && text.ValueKind == System.Text.Json.JsonValueKind.String
+                ? text.GetString() ?? string.Empty
+                : root.TryGetProperty("output", out var output) && output.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? output.GetString() ?? string.Empty
+                    : root.TryGetProperty("state", out var state) &&
+                      state.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                      state.TryGetProperty("output", out var stateOut) &&
+                      stateOut.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? stateOut.GetString() ?? string.Empty
+                        : string.Empty;
+            return (tool, body);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return (null, raw);
+        }
     }
 
     private static void EnsureTable(SqliteConnection connection, string table, string createSql)

@@ -164,6 +164,12 @@ public sealed class MimoSessionTests : IDisposable
         project.Parameters.AddWithValue("@id", SessionId + "2");
         // mimo session list only shows `global` or the current worktree's project.
         Assert.Equal("global", project.ExecuteScalar());
+
+        using var fts = connection.CreateCommand();
+        fts.CommandText = "SELECT COUNT(*) FROM history_fts WHERE session_id = @id";
+        fts.Parameters.AddWithValue("@id", SessionId + "2");
+        // TUI /sessions lists from history_fts; a copy without rows is invisible there.
+        Assert.True(Convert.ToInt32(fts.ExecuteScalar()) > 0);
     }
 
     [Fact]
