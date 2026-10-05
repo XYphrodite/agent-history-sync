@@ -64,22 +64,39 @@ public sealed class MimoConversationWriter : IConversationWriter
                 var role = turn.Role == ConversationRole.User ? "user" : "assistant";
                 var time = nowMs + i * 1000;
                 // MiMoCode resumes a session by reading message.info.time.created and the
-                // text parts below; a bare { role, content } payload crashes the session loader.
+                // text parts below; a bare { role, content } payload crashes the session
+                // loader, and missing tokens.output crashes the TUI session picker.
                 var dataJson = role == "user"
                     ? JsonSerializer.Serialize(new
                     {
                         role = "user",
-                        agent = "main",
+                        agent = "build",
                         time = new { created = time },
-                        model = new { providerID = "mimo", modelID = "mimo" }
+                        model = new { providerID = "xiaomi", modelID = "mimo" },
+                        systemMode = "append",
+                        harness = "auto",
+                        summary = new { diffs = Array.Empty<object>() }
                     })
                     : JsonSerializer.Serialize(new
                     {
                         role = "assistant",
-                        agent = "main",
+                        agent = "build",
                         time = new { created = time, completed = time },
                         modelID = "mimo",
-                        providerID = "mimo",
+                        providerID = "xiaomi",
+                        mode = "build",
+                        variant = "high",
+                        finish = "stop",
+                        cost = 0,
+                        tokens = new
+                        {
+                            total = 0,
+                            input = 0,
+                            output = 0,
+                            reasoning = 0,
+                            cache = new { write = 0, read = 0 }
+                        },
+                        path = new { cwd = directory, root = "/" },
                         parentID = previousMessageId
                     });
 

@@ -157,6 +157,12 @@ public sealed class MimoSessionTests : IDisposable
             using var doc = JsonDocument.Parse(reader2.GetString(0));
             Assert.True(doc.RootElement.TryGetProperty("time", out var time));
             Assert.True(time.TryGetProperty("created", out _));
+            if (doc.RootElement.TryGetProperty("role", out var role) && role.GetString() == "assistant")
+            {
+                // The TUI session picker reads tokens.output; missing it crashes the picker.
+                Assert.True(doc.RootElement.TryGetProperty("tokens", out var tokens));
+                Assert.True(tokens.TryGetProperty("output", out _));
+            }
         }
 
         using var project = connection.CreateCommand();
