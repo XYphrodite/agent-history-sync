@@ -160,8 +160,10 @@ public sealed class MimoSessionTests : IDisposable
         }
 
         using var project = connection.CreateCommand();
-        project.CommandText = "SELECT COUNT(*) FROM project WHERE worktree = '/work/mimo'";
-        Assert.Equal(1, Convert.ToInt32(project.ExecuteScalar()));
+        project.CommandText = "SELECT project_id FROM session WHERE id = @id";
+        project.Parameters.AddWithValue("@id", SessionId + "2");
+        // mimo session list only shows `global` or the current worktree's project.
+        Assert.Equal("global", project.ExecuteScalar());
     }
 
     [Fact]

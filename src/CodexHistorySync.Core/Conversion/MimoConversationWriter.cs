@@ -135,8 +135,6 @@ public sealed class MimoConversationWriter : IConversationWriter
     private string EnsureProject(string directory)
     {
         var dbPath = paths.PrimaryDatabasePath;
-        var projectId = "prj_" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(directory)))[..12].ToLowerInvariant();
 
         try
         {
@@ -188,21 +186,21 @@ public sealed class MimoConversationWriter : IConversationWriter
             if (lookup.ExecuteScalar() is string existing && !string.IsNullOrWhiteSpace(existing))
                 return existing;
 
-            // A session whose project_id has no project row is dropped from mimo session list.
+            // mimo session list only surfaces sessions whose project is `global` or the
+            // project of the current worktree. A synthetic prj_* row is invisible there,
+            // so a directory MiMoCode has never opened lands in `global` like most copies.
             using var insert = conn.CreateCommand();
             insert.CommandText = """
                 INSERT OR IGNORE INTO project (id, worktree, vcs, time_created, time_updated, sandboxes)
-                VALUES (@id, @wt, NULL, @now, @now, '[]')
+                VALUES ('global', '/', NULL, @now, @now, '[]')
                 """;
-            insert.Parameters.AddWithValue("@id", projectId);
-            insert.Parameters.AddWithValue("@wt", directory);
             insert.Parameters.AddWithValue("@now", utcNow().ToUnixTimeMilliseconds());
             insert.ExecuteNonQuery();
-            return projectId;
+            return "global";
         }
         catch
         {
-            return projectId;
+            return "global";
         }
     }
 
