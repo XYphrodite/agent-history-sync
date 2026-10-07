@@ -199,7 +199,7 @@ agent-sync/
 | Claude Code | `.claude/projects/<project>/<uuid>.jsonl` | Транскрипт, `cwd` и сохранённое имя каталога проекта; идентификатор `cl-<uuid>` |
 | Continue | `.continue/sessions/<uuid>.json`, `.continue/sessions/sessions.json` | Файл сессии вместе с её записью общего индекса; идентификатор `co-<uuid>` |
 | Kimi Code CLI | `.kimi-code/sessions/<workDirKey>/session_<uuid>/` | Пакет `state.json` плюс все `agents/<id>/wire.jsonl` и файлы планов вместе с записью общего индекса `session_index.jsonl`; идентификатор `ki-<uuid>` |
-| Hermes Agent | `%LOCALAPPDATA%/hermes/state.db` (или `HERMES_HOME`) | Строка `sessions` и её `messages` из SQLite; идентификатор `he-<profile>~<sessionId>`. Конфиг, ключи, WAL и FTS не синхронизируются |
+| Hermes Agent | все дома Hermes на машине: `%LOCALAPPDATA%/hermes/state.db`, `~/.hermes` и `<user>/.hermes` запущенных дистрибутивов WSL (через `\\wsl.localhost`), `HERMES_HOME` — только указанный дом | Строка `sessions` и её `messages` из SQLite; идентификатор `he-<profile>~<sessionId>`. Конфиг, ключи, WAL и FTS не синхронизируются. Одинаковый id в двух домах — одна сессия (первый дом выигрывает); чтение WSL-домов идёт через локальную копию `state.db` |
 | Аннотации | `%LOCALAPPDATA%/CodexHistorySync/annotations/` | Название и описание одной сессии, отдельно от нативной истории |
 | Память Claude | `.claude/projects/<project>/memory/*.md` | Один Markdown-файл, включая `MEMORY.md`; идентификатор `cm-<hex(project)>.<name>` |
 
@@ -262,7 +262,8 @@ Codex и Grok перед отправкой сокращаются: исключ
 | `CLAUDE_CONFIG_DIR` | Альтернативный каталог Claude |
 | `CONTINUE_GLOBAL_DIR` | Альтернативный каталог Continue |
 | `KIMI_CODE_HOME` | Альтернативный каталог Kimi Code CLI |
-| `HERMES_HOME` | Альтернативный каталог Hermes Agent |
+| `HERMES_HOME` | Альтернативный каталог Hermes Agent; ограничивает поиск сессий Hermes одним этим домом |
+| `AGENT_SYNC_HERMES_WSL` | `0`/`false`/`off` — не сканировать дома Hermes в дистрибутивах WSL |
 | `CODEX_EXE` | Явный абсолютный путь к исполняемому файлу Codex |
 | `AGENT_SYNC_TITLE_ENDPOINT` | Сервер названий; переопределяет сохранённую настройку |
 | `AGENT_SYNC_TITLE_MODEL` | Модель генерации; по умолчанию в коде `qwen3:8b` |

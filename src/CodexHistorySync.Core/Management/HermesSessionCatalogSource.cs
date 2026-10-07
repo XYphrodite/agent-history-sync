@@ -15,6 +15,29 @@ internal sealed class HermesSessionCatalogSource(HermesPaths paths) : ILocalSess
     {
         ArgumentNullException.ThrowIfNull(limiter);
         cancellationToken.ThrowIfCancellationRequested();
+        if (paths.Companions.Count == 0) return Task.FromResult(ScanHome(paths));
+
+        // The same session id in several homes is one session (a copied state.db): the first
+        // readable row in home order wins, the primary home first.
+        var rows = new List<SessionCatalogCandidate>();
+        var byId = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var home in paths.AllHomes)
+        {
+            foreach (var row in ScanHome(home))
+            {
+                if (!byId.TryGetValue(row.SessionId, out var index))
+                {
+                    byId[row.SessionId] = rows.Count;
+                    rows.Add(row);
+                }
+                else if (!rows[index].CanRead && row.CanRead) rows[index] = row;
+            }
+        }
+        return Task.FromResult<IReadOnlyList<SessionCatalogCandidate>>(rows);
+    }
+
+    private static IReadOnlyList<SessionCatalogCandidate> ScanHome(HermesPaths paths)
+    {
         HermesReadResult read;
         try
         {
@@ -45,8 +68,7 @@ internal sealed class HermesSessionCatalogSource(HermesPaths paths) : ILocalSess
             .Where(group => group.Count() > 1)
             .Select(group => group.Key)
             .ToHashSet(StringComparer.Ordinal);
-        return Task.FromResult<IReadOnlyList<SessionCatalogCandidate>>(
-            rows.Select(row => duplicates.Contains(row.SessionId) ? row with { CanRead = false } : row).ToArray());
+        return rows.Select(row => duplicates.Contains(row.SessionId) ? row with { CanRead = false } : row).ToArray();
     }
 
     private static string? FirstUserText(IReadOnlyList<IReadOnlyList<HermesCell>> messages)

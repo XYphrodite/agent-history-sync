@@ -179,8 +179,9 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         var ids = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            foreach (var (sessionId, lastActiveUnix) in HermesSessionPackage.ReadActivity(hermesPaths))
-                if (lastActiveUnix >= cutoff) ids.Add(sessionId);
+            foreach (var home in hermesPaths.AllHomes)
+                foreach (var (sessionId, lastActiveUnix) in HermesSessionPackage.ReadActivity(home))
+                    if (lastActiveUnix >= cutoff) ids.Add(sessionId);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or
                                           Microsoft.Data.Sqlite.SqliteException)

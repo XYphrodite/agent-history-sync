@@ -51,6 +51,27 @@ public sealed class HermesSessionScanner
     public async Task<SessionScanResult> ScanDetailedAsync(HermesPaths paths, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        if (paths.Companions.Count == 0) return await ScanHomeAsync(paths, cancellationToken).ConfigureAwait(false);
+
+        // The same session id in two homes is the same session (a copied state.db); the primary
+        // home's copy wins, and the second copy is not a duplicate worth failing the scan over.
+        var objects = new List<LocalObject>();
+        var uncertain = new HashSet<ObjectKind>();
+        var duplicates = new HashSet<LogicalObjectId>();
+        var seen = new HashSet<LogicalObjectId>();
+        foreach (var home in paths.AllHomes)
+        {
+            var result = await ScanHomeAsync(home, cancellationToken).ConfigureAwait(false);
+            uncertain.UnionWith(result.UncertainKinds);
+            duplicates.UnionWith(result.DuplicateIds);
+            foreach (var item in result.Objects)
+                if (seen.Add(item.Id)) objects.Add(item);
+        }
+        return new SessionScanResult(objects, uncertain, duplicates);
+    }
+
+    private async Task<SessionScanResult> ScanHomeAsync(HermesPaths paths, CancellationToken cancellationToken)
+    {
         var objects = new List<LocalObject>();
         var uncertain = new HashSet<ObjectKind>();
         var duplicates = new HashSet<LogicalObjectId>();

@@ -45,65 +45,76 @@ internal static class HermesSessionDatabase
         var database = paths.DatabasePath(snapshot.Profile);
         var parent = Path.GetDirectoryName(database) ?? throw new InvalidDataException("Hermes database path has no directory.");
         Directory.CreateDirectory(parent);
-        using var connection = Open(database, write: true);
-        using var transaction = connection.BeginTransaction();
-        try
+        using var shadow = HermesDatabaseShadow.ForWrite(database);
+        using (var connection = Open(shadow.Database, write: true))
+        using (var transaction = connection.BeginTransaction())
         {
-            EnsureTable(connection, "sessions",
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    started_at REAL NOT NULL
-                );
-                """);
-            EnsureTable(connection, "messages",
-                """
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    timestamp REAL NOT NULL
-                );
-                """);
-            EnsureColumns(connection, "sessions", snapshot.Session);
-            foreach (var message in snapshot.Messages) EnsureColumns(connection, "messages", message);
+            try
+            {
+                EnsureTable(connection, "sessions",
+                    """
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        started_at REAL NOT NULL
+                    );
+                    """);
+                EnsureTable(connection, "messages",
+                    """
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id INTEGER PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        timestamp REAL NOT NULL
+                    );
+                    """);
+                EnsureColumns(connection, "sessions", snapshot.Session);
+                foreach (var message in snapshot.Messages) EnsureColumns(connection, "messages", message);
 
-            Execute(connection, "DELETE FROM messages WHERE session_id = @id", ("@id", snapshot.SessionId));
-            Execute(connection, "DELETE FROM sessions WHERE id = @id", ("@id", snapshot.SessionId));
-            Insert(connection, "sessions", snapshot.Session);
-            foreach (var message in snapshot.Messages) Insert(connection, "messages", message);
-            transaction.Commit();
+                Execute(connection, "DELETE FROM messages WHERE session_id = @id", ("@id", snapshot.SessionId));
+                Execute(connection, "DELETE FROM sessions WHERE id = @id", ("@id", snapshot.SessionId));
+                Insert(connection, "sessions", snapshot.Session);
+                foreach (var message in snapshot.Messages) Insert(connection, "messages", message);
+                transaction.Commit();
+            }
+            catch (SqliteException exception)
+            {
+                throw new IOException("Hermes state database could not be updated.", exception);
+            }
         }
-        catch (SqliteException exception)
-        {
-            throw new IOException("Hermes state database could not be updated.", exception);
-        }
+        // The connection is closed first so SQLite merges the write-ahead log into the database
+        // before a shadow copy is committed back to a remote home.
+        shadow.CommitBack();
     }
 
     public static void Delete(HermesPaths paths, string profile, string sessionId)
     {
         var database = paths.DatabasePath(profile);
         if (!File.Exists(database)) return;
-        using var connection = Open(database, write: true);
-        using var transaction = connection.BeginTransaction();
-        try
+        using var shadow = HermesDatabaseShadow.ForWrite(database);
+        using (var connection = Open(shadow.Database, write: true))
+        using (var transaction = connection.BeginTransaction())
         {
-            if (!TableExists(connection, "sessions")) return;
-            if (TableExists(connection, "messages"))
-                Execute(connection, "DELETE FROM messages WHERE session_id = @id", ("@id", sessionId));
-            Execute(connection, "DELETE FROM sessions WHERE id = @id", ("@id", sessionId));
-            transaction.Commit();
+            try
+            {
+                if (!TableExists(connection, "sessions")) return;
+                if (TableExists(connection, "messages"))
+                    Execute(connection, "DELETE FROM messages WHERE session_id = @id", ("@id", sessionId));
+                Execute(connection, "DELETE FROM sessions WHERE id = @id", ("@id", sessionId));
+                transaction.Commit();
+            }
+            catch (SqliteException exception)
+            {
+                throw new IOException("Hermes state database could not be updated.", exception);
+            }
         }
-        catch (SqliteException exception)
-        {
-            throw new IOException("Hermes state database could not be updated.", exception);
-        }
+        shadow.CommitBack();
     }
 
     private static HermesReadResult ReadDatabase(HermesProfile profile, string? sessionId)
     {
-        using var connection = Open(profile.DatabasePath, write: false);
+        using var shadow = HermesDatabaseShadow.ForRead(profile.DatabasePath);
+        using var connection = Open(shadow.Database, write: false);
         if (!TableExists(connection, "sessions"))
             throw new InvalidDataException("Hermes state database has no sessions table.");
 

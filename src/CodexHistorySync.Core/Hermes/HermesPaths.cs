@@ -17,19 +17,37 @@ public sealed record HermesPaths(string Home)
         @"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// Further Hermes homes discovered beside <see cref="Home"/> on the same machine (the legacy
+    /// <c>~/.hermes</c> tree, WSL distribution homes). They are read and synchronized together
+    /// with the primary home; imports and conversion writes still land in the primary home.
+    /// </summary>
+    public IReadOnlyList<HermesPaths> Companions { get; init; } = [];
+
+    /// <summary>The primary home first, then every companion home.</summary>
+    public IReadOnlyList<HermesPaths> AllHomes => [this, .. Companions];
+
     public string AnchorRoot => Path.GetFullPath(Path.Combine(Home, AnchorDirectoryName));
 
-    public static HermesPaths? TryResolve(string? configuredHome = null)
+    public static HermesPaths? TryResolve(string? configuredHome = null) =>
+        TryResolve(configuredHome ?? Environment.GetEnvironmentVariable("HERMES_HOME"), wslHomeProbe: null, machineDefaults: null);
+
+    /// <summary>Test seam: a null <paramref name="configuredHome"/> means no configuration at all.</summary>
+    internal static HermesPaths? TryResolve(
+        string? configuredHome,
+        Func<IReadOnlyList<string>>? wslHomeProbe,
+        IReadOnlyList<string>? machineDefaults)
     {
         try
         {
-            var homeInput = configuredHome
-                ?? Environment.GetEnvironmentVariable("HERMES_HOME")
-                ?? GetDefaultHome();
-            if (string.IsNullOrWhiteSpace(homeInput)) return null;
-            var home = Path.GetFullPath(homeInput);
-            if (!Directory.Exists(home)) return null;
-            return new HermesPaths(home);
+            var homeInput = configuredHome;
+            if (!string.IsNullOrWhiteSpace(homeInput))
+            {
+                // An explicitly configured home is exclusive: one home means one home.
+                var configured = Path.GetFullPath(homeInput);
+                return Directory.Exists(configured) ? new HermesPaths(configured) : null;
+            }
+            return ResolveDiscovered(HermesHomeDiscovery.CandidateHomes(configuredHome: null, wslHomeProbe, machineDefaults));
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
         {
@@ -37,25 +55,54 @@ public sealed record HermesPaths(string Home)
         }
     }
 
-    /// <summary>
-    /// Windows installs use <c>%LOCALAPPDATA%\hermes</c>. A <c>~/.hermes</c> tree is accepted when
-    /// that is the one that actually holds <c>state.db</c>, or when it is the only home present.
-    /// </summary>
-    private static string GetDefaultHome()
+    private static HermesPaths? ResolveDiscovered(IReadOnlyList<string> candidates)
     {
-        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var user = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var modern = string.IsNullOrWhiteSpace(local) ? null : Path.Combine(local, "hermes");
-        var legacy = string.IsNullOrWhiteSpace(user) ? null : Path.Combine(user, ".hermes");
-        if (HasDatabase(modern)) return modern!;
-        if (HasDatabase(legacy)) return legacy!;
-        if (modern is not null && Directory.Exists(modern)) return modern;
-        if (legacy is not null && Directory.Exists(legacy)) return legacy;
-        return string.Empty;
+        var homes = new List<string>();
+        var emptyFallback = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            string home;
+            try { home = Path.GetFullPath(candidate); }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException) { continue; }
+            if (!Directory.Exists(home)) continue;
+            if (HasAnyDatabase(home)) homes.Add(home);
+            else emptyFallback.Add(home);
+        }
+
+        // A home with no state.db has not been initialized. It still counts as the resolved home
+        // when nothing else exists, but it never shadows a home that actually holds sessions.
+        if (homes.Count == 0) return emptyFallback.Count == 0 ? null : new HermesPaths(emptyFallback[0]);
+        return new HermesPaths(homes[0])
+        {
+            Companions = homes.Skip(1).Select(home => new HermesPaths(home)).ToArray()
+        };
     }
 
+    /// <summary>
+    /// Windows installs use <c>%LOCALAPPDATA%\hermes</c>; a <c>~/.hermes</c> tree counts as well
+    /// when it is the one that holds <c>state.db</c>. Both are candidate homes; see
+    /// <see cref="HermesHomeDiscovery"/>.
+    /// </summary>
     private static bool HasDatabase(string? home) =>
         home is not null && File.Exists(Path.Combine(home, DatabaseFileName));
+
+    /// <summary>True when the home holds a root <c>state.db</c> or any <c>profiles/&lt;name&gt;/state.db</c>.</summary>
+    public static bool HasAnyDatabase(string home)
+    {
+        try
+        {
+            if (HasDatabase(home)) return true;
+            var profileRoot = Path.Combine(home, "profiles");
+            if (!Directory.Exists(profileRoot)) return false;
+            foreach (var directory in Directory.EnumerateDirectories(profileRoot))
+                if (File.Exists(Path.Combine(directory, DatabaseFileName))) return true;
+            return false;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     public static bool IsProfileName(string value) =>
         string.Equals(value, DefaultProfileName, StringComparison.Ordinal) || NamePattern.IsMatch(value);
