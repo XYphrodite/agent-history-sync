@@ -671,6 +671,24 @@ public sealed class SpectreSessionManagerViewTests
     }
 
     [Fact]
+    public void ChooseCopyDestination_names_each_hermes_home()
+    {
+        var console = CreateConsole(out var output, 160, 30);
+        var view = new SpectreSessionManagerView(console, new FakeInput(Key('2', ConsoleKey.D2)));
+        var source = Session(ManagedAgent.Codex, "one", "Codex title");
+        view.Render(new SessionManagerState(ThreeAgentSnapshot([source], [], [])));
+        var windows = new CopyDestination(ManagedAgent.Hermes, "Hermes (Windows)", @"C:\Users\Gamer\.hermes");
+        var wsl = new CopyDestination(ManagedAgent.Hermes, "Hermes (WSL)", @"\\wsl.localhost\Ubuntu\home\gamer\.hermes");
+
+        var target = view.ChooseCopyDestination(source, [windows, wsl], CancellationToken.None);
+
+        Assert.Equal(wsl, target);
+        var rendered = output.ToString();
+        Assert.Contains("1) Hermes (Windows)", rendered, StringComparison.Ordinal);
+        Assert.Contains("2) Hermes (WSL)", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ChooseCopyTarget_returns_null_on_escape()
     {
         var view = new SpectreSessionManagerView(

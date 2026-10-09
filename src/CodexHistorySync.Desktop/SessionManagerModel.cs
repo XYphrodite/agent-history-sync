@@ -62,12 +62,12 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
         ? "This WSL disk is read-only. Delete the original session in Muse after starting WSL. Copying does not require WSL."
         : string.Empty;
     public bool HasDeleteUnavailableReason => DeleteUnavailableReason.Length > 0;
-    public IReadOnlyList<ManagedAgent> AvailableTargets
+    public IReadOnlyList<CopyDestination> AvailableTargets
     {
         get
         {
             if (selected is null || services.Operations is null) return [];
-            try { return services.Operations.AvailableCopyTargets(selected); }
+            try { return services.Operations.AvailableCopyDestinations(selected); }
             catch { return []; }
         }
     }
@@ -79,7 +79,7 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
             return targets.Count switch
             {
                 0 => "Copy",
-                1 => $"Copy to {targets[0]}",
+                1 => $"Copy to {targets[0].Label}",
                 _ => "Copy to…"
             };
         }
@@ -221,16 +221,19 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
         catch (Exception ex) when (ReadFailure(ex)) { return string.Empty; }
     }
 
-    public async Task CopyAsync(ManagedAgent target, string? workingDirectory = null)
+    public Task CopyAsync(ManagedAgent target, string? workingDirectory = null) =>
+        CopyAsync(CopyDestination.For(target), workingDirectory);
+
+    public async Task CopyAsync(CopyDestination target, string? workingDirectory = null)
     {
         var source = selected;
         if (source is null || services.Operations is null) return;
         try
         {
-            Status = $"Copying to {target}…";
+            Status = $"Copying to {target.Label}…";
             var newId = await services.Operations.CopyAsync(source, target, workingDirectory, lifetime.Token);
             await RefreshAsync();
-            Status = $"Copied to {target} ({newId}).";
+            Status = $"Copied to {target.Label} ({newId}).";
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (ManagedSessionOperationException ex)

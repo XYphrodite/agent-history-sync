@@ -261,6 +261,12 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
     public ManagedAgent? ChooseCopyTarget(
         ManagedSession source,
         IReadOnlyList<ManagedAgent> targets,
+        CancellationToken cancellationToken) =>
+        ChooseCopyDestination(source, targets.Select(CopyDestination.For).ToArray(), cancellationToken)?.Agent;
+
+    public CopyDestination? ChooseCopyDestination(
+        ManagedSession source,
+        IReadOnlyList<CopyDestination> targets,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -268,9 +274,9 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         if (targets.Count == 0) return null;
         var state = latestState ?? throw new InvalidOperationException("A session state must be rendered before a copy target prompt.");
 
-        var choices = targets.Select((agent, index) => (Agent: agent, Key: (char)('1' + index))).ToArray();
+        var choices = targets.Select((destination, index) => (Destination: destination, Key: (char)('1' + index))).ToArray();
         pendingMessage = new PendingMessage(
-            "Copy to: " + string.Join("   ", choices.Select(choice => choice.Key + ") " + AgentName(choice.Agent))) +
+            "Copy to: " + string.Join("   ", choices.Select(choice => choice.Key + ") " + choice.Destination.Label)) +
             "   Esc) cancel",
             false);
         Render(state);
@@ -281,7 +287,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
                 var key = input.ReadKey(cancellationToken);
                 if (key.Key == ConsoleKey.Escape) return null;
                 foreach (var choice in choices)
-                    if (key.KeyChar == choice.Key) return choice.Agent;
+                    if (key.KeyChar == choice.Key) return choice.Destination;
             }
         }
         finally

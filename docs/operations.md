@@ -370,7 +370,7 @@ Hermes publishes no per-session lock. A session is deferred when a `hermes` proc
 
 ### Cross-agent copy
 
-Copying out of Hermes keeps user and assistant text. Tool rows and reasoning stay in the native package and out of the portable copy. Copying into Hermes inserts a new `source=cli` session in the default profile's `state.db`, with `active=1` on each message, so `hermes --resume <id>` loads the same turns. Titles are unique in Hermes; a colliding title is retried once with a ` (copy)` suffix.
+Copying out of Hermes keeps user and assistant text. Tool rows and reasoning stay in the native package and out of the portable copy. Copying into Hermes inserts a new `source=cli` session in the chosen home's default-profile `state.db`, with `active=1` on each message, so `hermes --resume <id>` in that home loads the same turns. Each Hermes home is its own destination: `Hermes (Windows)` and `Hermes (WSL)`, plus the distro name when two WSL homes would otherwise look the same. A session is not offered back into the home it already lives in. Titles are unique in Hermes; a colliding title is retried once with a ` (copy)` suffix.
 
 ## Status and diagnostics
 

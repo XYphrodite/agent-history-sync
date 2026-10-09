@@ -82,7 +82,7 @@ public sealed partial class SessionManagerWindow : Window
         var selected = model.Selected;
         if (selected is null || !model.CanCopy) return;
         var targets = model.AvailableTargets;
-        ManagedAgent? chosen = null;
+        CopyDestination? chosen = null;
         string? workingDirectory = null;
         if (targets.Count == 1 && selected.Agent != ManagedAgent.Muse) chosen = targets[0];
         else if (targets.Count > 0)
@@ -96,7 +96,7 @@ public sealed partial class SessionManagerWindow : Window
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Background = Avalonia.Media.Brush.Parse("#1D2024")
             };
-            var combo = new ComboBox { ItemsSource = targets.Select(t => t.ToString()).ToArray(), SelectedIndex = 0, Margin = new Thickness(0, 0, 0, 16), HorizontalAlignment = HorizontalAlignment.Stretch };
+            var combo = new ComboBox { ItemsSource = targets.Select(target => target.Label).ToArray(), SelectedIndex = 0, Margin = new Thickness(0, 0, 0, 16), HorizontalAlignment = HorizontalAlignment.Stretch };
             var project = new TextBox { PlaceholderText = "Project folder on this computer", HorizontalAlignment = HorizontalAlignment.Stretch };
             if (selected.Agent == ManagedAgent.Muse)
             {
@@ -142,9 +142,9 @@ public sealed partial class SessionManagerWindow : Window
             }
             content.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Children = { ok, cancel } });
             dialog.Content = content;
-            chosen = await dialog.ShowDialog<ManagedAgent?>(this);
+            chosen = await dialog.ShowDialog<CopyDestination?>(this);
         }
-        if (chosen is not null && model.Selected == selected) await model.CopyAsync(chosen.Value, workingDirectory);
+        if (chosen is not null && model.Selected == selected) await model.CopyAsync(chosen, workingDirectory);
     }
 
     private async void OnDelete(object? sender, RoutedEventArgs e)

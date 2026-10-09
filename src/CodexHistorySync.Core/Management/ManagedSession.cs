@@ -171,6 +171,19 @@ public interface ILocalSessionOperations
 
     /// <summary>Agents this session can be copied to right now, in panel order.</summary>
     IReadOnlyList<ManagedAgent> AvailableCopyTargets(ManagedSession source);
+
+    /// <summary>
+    /// Copy rows for the picker. Hermes homes are separate rows; other agents stay one row each.
+    /// </summary>
+    IReadOnlyList<CopyDestination> AvailableCopyDestinations(ManagedSession source) =>
+        AvailableCopyTargets(source).Select(CopyDestination.For).ToArray();
+
+    Task<string> CopyAsync(ManagedSession source, CopyDestination target, CancellationToken cancellationToken) =>
+        CopyAsync(source, target, null, cancellationToken);
+
+    Task<string> CopyAsync(ManagedSession source, CopyDestination target, string? workingDirectory, CancellationToken cancellationToken) =>
+        CopyAsync(source, target.Agent, workingDirectory, cancellationToken);
+
     Task DeleteAsync(ManagedSession source, CancellationToken cancellationToken);
 }
 

@@ -228,13 +228,61 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         return ManagedAgents.Destinations(source.Agent).Where(agent => WriterFor(agent) is not null).ToArray();
     }
 
+    public IReadOnlyList<CopyDestination> AvailableCopyDestinations(ManagedSession source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var destinations = new List<CopyDestination>();
+        var sourceHome = HermesSourceHome(source);
+        foreach (var agent in ManagedAgents.All)
+        {
+            if (agent == ManagedAgent.Hermes)
+            {
+                destinations.AddRange(HermesDestinations(sourceHome));
+                continue;
+            }
+
+            if (agent == source.Agent || WriterFor(agent) is null) continue;
+            destinations.Add(CopyDestination.For(agent));
+        }
+
+        return destinations;
+    }
+
+    private IReadOnlyList<CopyDestination> HermesDestinations(string? sourceHome)
+    {
+        if (hermesPaths is null) return [];
+        var homes = hermesPaths.AllHomes
+            .Select(home => Path.GetFullPath(home.Home))
+            .Where(home => sourceHome is null || !SameHome(home, sourceHome))
+            .ToArray();
+        var labels = CopyDestination.LabelsForHermesHomes(homes);
+        return homes.Select((home, index) => new CopyDestination(ManagedAgent.Hermes, labels[index], home)).ToArray();
+    }
+
+    private bool CanCopyTo(ManagedSession source, CopyDestination target)
+    {
+        if (target.Agent != source.Agent) return true;
+        if (target.Agent != ManagedAgent.Hermes || string.IsNullOrWhiteSpace(target.HermesHome)) return false;
+        var sourceHome = HermesSourceHome(source);
+        return sourceHome is null || !SameHome(sourceHome, target.HermesHome);
+    }
+
+    private static string? HermesSourceHome(ManagedSession source) =>
+        source.Agent == ManagedAgent.Hermes &&
+        HermesPaths.TryParseAnchor(source.NativePath, out var home, out _, out _)
+            ? home
+            : null;
+
+    private static bool SameHome(string left, string right) =>
+        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+
     public async Task<string> CopyAsync(ManagedSession source, CancellationToken cancellationToken)
     {
         try
         {
             ArgumentNullException.ThrowIfNull(source);
-            // Only unambiguous with exactly one other agent configured; the caller picks otherwise.
-            var targets = AvailableCopyTargets(source);
+            // Only unambiguous with exactly one other destination; two Hermes homes are a choice.
+            var targets = AvailableCopyDestinations(source);
             if (targets.Count != 1) throw new InvalidOperationException("The destination agent is unavailable.");
             return await CopyAsync(source, targets[0], cancellationToken).ConfigureAwait(false);
         }
@@ -255,18 +303,25 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     }
 
     public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, CancellationToken cancellationToken) =>
+        CopyAsync(source, CopyDestination.For(target), cancellationToken);
+
+    public Task<string> CopyAsync(ManagedSession source, ManagedAgent target, string? workingDirectory, CancellationToken cancellationToken) =>
+        CopyAsync(source, CopyDestination.For(target), workingDirectory, cancellationToken);
+
+    public Task<string> CopyAsync(ManagedSession source, CopyDestination target, CancellationToken cancellationToken) =>
         CopyAsync(source, target, null, cancellationToken);
 
-    public async Task<string> CopyAsync(ManagedSession source, ManagedAgent target, string? workingDirectory, CancellationToken cancellationToken)
+    public async Task<string> CopyAsync(ManagedSession source, CopyDestination target, string? workingDirectory, CancellationToken cancellationToken)
     {
         try
         {
             ArgumentNullException.ThrowIfNull(source);
-            if (target == source.Agent) throw new InvalidOperationException("The destination agent is unavailable.");
+            ArgumentNullException.ThrowIfNull(target);
+            if (!CanCopyTo(source, target)) throw new InvalidOperationException("The destination agent is unavailable.");
+            var writer = WriterFor(target)
+                ?? throw new InvalidOperationException("The destination agent is unavailable.");
             if (source.DiskSession is { } disk)
             {
-                var diskWriter = WriterFor(target)
-                    ?? throw new InvalidOperationException("The destination agent is unavailable.");
                 if (!source.CanRead) throw new InvalidDataException("The session is not readable.");
                 if (source.IsActive) throw new InvalidOperationException("The session is active.");
                 var conversation = await disk.Disk.ReadAsync(source, cancellationToken).ConfigureAwait(false);
@@ -274,12 +329,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
                 conversation = PrepareCopy(source, conversation, workingDirectory);
                 cancellationToken.ThrowIfCancellationRequested();
                 // The disk reader validates the source snapshot. Copying writes only to the destination agent.
-                return (await diskWriter.WriteAsync(conversation, cancellationToken).ConfigureAwait(false)).SessionId;
+                return (await writer.WriteAsync(conversation, cancellationToken).ConfigureAwait(false)).SessionId;
             }
             var validated = await ReadAndValidateAsync(source, cancellationToken).ConfigureAwait(false);
             validated = validated with { Conversation = PrepareCopy(source, validated.Conversation, workingDirectory) };
-            var writer = WriterFor(target)
-                ?? throw new InvalidOperationException("The destination agent is unavailable.");
             return await CopyAfterFinalValidationAsync(
                     source, validated, writer, cancellationToken)
                 .ConfigureAwait(false);
@@ -313,6 +366,11 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             throw new ManagedSessionOperationException(ManagedSessionOperationFailure.Delete);
         }
     }
+
+    private IConversationWriter? WriterFor(CopyDestination target) =>
+        target.Agent == ManagedAgent.Hermes && !string.IsNullOrWhiteSpace(target.HermesHome)
+            ? new HermesConversationWriter(new HermesPaths(target.HermesHome))
+            : WriterFor(target.Agent);
 
     private IConversationWriter? WriterFor(ManagedAgent agent) => agent switch
     {
@@ -630,10 +688,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         {
             if (hermesPaths is null ||
                 !HermesPaths.TryParseAnchor(source.NativePath, out var home, out _, out var sessionId) ||
-                !string.Equals(home, hermesPaths.Home, StringComparison.OrdinalIgnoreCase) ||
+                !hermesPaths.AllHomes.Any(candidate => SameHome(candidate.Home, home)) ||
                 !string.Equals(sessionId, source.SessionId, StringComparison.Ordinal))
                 throw new InvalidDataException("The selected Hermes target is invalid.");
-            return new Target(hermesPaths.AnchorRoot, Path.GetFullPath(source.NativePath));
+            return new Target(new HermesPaths(home).AnchorRoot, Path.GetFullPath(source.NativePath));
         }
 
         if (source.Agent == ManagedAgent.Mimo)

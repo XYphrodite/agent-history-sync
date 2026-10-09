@@ -20,7 +20,8 @@ public sealed record HermesPaths(string Home)
     /// <summary>
     /// Further Hermes homes discovered beside <see cref="Home"/> on the same machine (the legacy
     /// <c>~/.hermes</c> tree, WSL distribution homes). They are read and synchronized together
-    /// with the primary home; imports and conversion writes still land in the primary home.
+    /// with the primary home. Sync import still follows the anchor home. A cross-agent copy writes
+    /// into the home the user picked, not silently into the primary.
     /// </summary>
     public IReadOnlyList<HermesPaths> Companions { get; init; } = [];
 

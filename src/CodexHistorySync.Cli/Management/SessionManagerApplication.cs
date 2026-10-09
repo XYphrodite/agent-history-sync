@@ -84,7 +84,7 @@ public sealed class SessionManagerApplication(
         var source = GetActionableSession(state, "copied");
         if (source is null) return state;
 
-        var targets = operations.AvailableCopyTargets(source);
+        var targets = operations.AvailableCopyDestinations(source);
         if (targets.Count == 0)
         {
             view.ShowMessage(NoDestinationMessage(source), true);
@@ -94,13 +94,13 @@ public sealed class SessionManagerApplication(
         // One destination needs no question; more than one is the user's choice, not a default.
         var target = targets.Count == 1
             ? targets[0]
-            : view.ChooseCopyTarget(source, targets, cancellationToken);
+            : view.ChooseCopyDestination(source, targets, cancellationToken);
         if (target is null) return state;
 
         try
         {
-            await operations.CopyAsync(source, target.Value, cancellationToken);
-            view.ShowMessage($"Copied to {AgentName(target.Value)}.", false);
+            await operations.CopyAsync(source, target, cancellationToken);
+            view.ShowMessage($"Copied to {target.Label}.", false);
             return await RefreshAsync(state, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

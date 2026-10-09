@@ -17,5 +17,18 @@ public interface ISessionManagerView
         ManagedSession source,
         IReadOnlyList<ManagedAgent> targets,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks which destination to copy into, including a separate row per Hermes home. Null cancels.
+    /// </summary>
+    CopyDestination? ChooseCopyDestination(
+        ManagedSession source,
+        IReadOnlyList<CopyDestination> targets,
+        CancellationToken cancellationToken)
+    {
+        var chosen = ChooseCopyTarget(source, targets.Select(target => target.Agent).ToArray(), cancellationToken);
+        return chosen is null ? null : targets.FirstOrDefault(target => target.Agent == chosen);
+    }
+
     void ShowMessage(string message, bool isError);
 }
