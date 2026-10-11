@@ -266,7 +266,8 @@ public static class CliComposition
         return new DesktopSessionManagerRunner(new Desktop.DesktopSessionServices(annotatedCatalog,
             new Core.Viewing.SessionTraceReader(conversations), new Core.Viewing.LocalSessionFamilyReader(codexPaths, musePaths),
             conversations, annotationStore, operations, null, new SessionSearchIndex(),
-            $"{CliBuildInfo.Version} · {CliBuildInfo.Commit}"));
+            $"{CliBuildInfo.Version} · {CliBuildInfo.Commit}",
+            new SessionOperationsLog()));
     }
 
     // Kept for existing TUI tests; no longer wired to --manage.
@@ -296,7 +297,8 @@ public static class CliComposition
         var operations2 = new LocalSessionOperations(codexPaths2, grokPaths2, activeState2, new WindowsManagedSessionDirectoryDeleter(), codexWriter2, grokWriter2, claudePaths2, claudeWriter2, continuePaths2, continueWriter2, kimiPaths2, kimiWriter2, musePaths2, museWriter2, hermesPaths2, hermesWriter2, mimoPaths2, mimoWriter2);
         var ansiConsole2 = AnsiConsole.Console;
         var view2 = new SpectreSessionManagerView(ansiConsole2, new SpectreSessionManagerInput(ansiConsole2));
-        return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog2, operations2, view2));
+        return new DefaultSessionManagerRunner(new SessionManagerApplication(catalog2, operations2, view2,
+            new SessionOperationsLog()));
     }
 
     internal static CodexPaths? TryResolveCodexPaths(string? configuredHome = null)

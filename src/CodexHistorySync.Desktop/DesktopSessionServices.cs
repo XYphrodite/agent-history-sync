@@ -15,4 +15,5 @@ public sealed record DesktopSessionServices(
     ILocalSessionOperations? Operations = null,
     ISessionTitleSuggester? TitleSuggester = null,
     ISessionSearchIndex? SearchIndex = null,
-    string BuildLabel = "development build");
+    string BuildLabel = "development build",
+    SessionOperationsLog? OperationsLog = null);

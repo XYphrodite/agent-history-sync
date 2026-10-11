@@ -318,10 +318,14 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
             await services.Operations.DeleteAsync(target.Session, lifetime.Token);
             await services.Annotations.DeleteAsync(new SessionAnnotationKey(target.Session.Agent, target.Session.SessionId), lifetime.Token);
             await RefreshAsync();
+            services.OperationsLog?.RecordDelete(target.Session, "OK");
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (Exception exception) when (ReadFailure(exception) || exception is ManagedSessionOperationException)
-        { Status = "Could not delete session: " + exception.Message; }
+        {
+            Status = "Could not delete session: " + exception.Message;
+            services.OperationsLog?.RecordDelete(target.Session, "FAIL " + Status);
+        }
     }
 
     private async Task<SessionTrace> ReadTraceAsync(ManagedSession session, CancellationToken token)

@@ -5,7 +5,8 @@ namespace CodexHistorySync.Cli.Management;
 public sealed class SessionManagerApplication(
     ILocalSessionCatalog catalog,
     ILocalSessionOperations operations,
-    ISessionManagerView view)
+    ISessionManagerView view,
+    SessionOperationsLog? operationsLog = null)
 {
     private const string DeleteSyncWarning = "Local deletion may be restored by sync.";
 
@@ -88,6 +89,7 @@ public sealed class SessionManagerApplication(
         if (targets.Count == 0)
         {
             view.ShowMessage(NoDestinationMessage(source), true);
+            operationsLog?.RecordRefusal("copy", source, "FAIL " + NoDestinationMessage(source));
             return state;
         }
 
@@ -101,6 +103,7 @@ public sealed class SessionManagerApplication(
         {
             await operations.CopyAsync(source, target, cancellationToken);
             view.ShowMessage($"Copied to {target.Label}.", false);
+            operationsLog?.RecordCopy(source, target.Label, "OK");
             return await RefreshAsync(state, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -109,12 +112,16 @@ public sealed class SessionManagerApplication(
         }
         catch (ManagedSessionOperationException exception)
         {
-            view.ShowMessage(CopyFailureMessage(exception.Reason, source), true);
+            var message = CopyFailureMessage(exception.Reason, source);
+            view.ShowMessage(message, true);
+            operationsLog?.RecordCopy(source, target.Label, "FAIL " + message);
             return state;
         }
         catch (Exception)
         {
-            view.ShowMessage($"Copy failed for session {SafeId(source.SessionId)}.", true);
+            var message = $"Copy failed for session {SafeId(source.SessionId)}.";
+            view.ShowMessage(message, true);
+            operationsLog?.RecordCopy(source, target.Label, "FAIL " + message);
             return state;
         }
     }
@@ -130,6 +137,7 @@ public sealed class SessionManagerApplication(
         try
         {
             await operations.DeleteAsync(source, cancellationToken);
+            operationsLog?.RecordDelete(source, "OK");
             return await RefreshAsync(state, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -138,7 +146,9 @@ public sealed class SessionManagerApplication(
         }
         catch (Exception)
         {
-            view.ShowMessage($"Delete failed for session {SafeId(source.SessionId)}.", true);
+            var message = $"Delete failed for session {SafeId(source.SessionId)}.";
+            view.ShowMessage(message, true);
+            operationsLog?.RecordDelete(source, "FAIL " + message);
             return state;
         }
     }
@@ -154,13 +164,17 @@ public sealed class SessionManagerApplication(
 
         if (source.IsActive)
         {
-            view.ShowMessage($"Active sessions cannot be {action}.", true);
+            var message = $"Active sessions cannot be {action}.";
+            view.ShowMessage(message, true);
+            operationsLog?.RecordRefusal(action == "copied" ? "copy" : "delete", source, "FAIL " + message);
             return null;
         }
 
         if (!source.CanRead)
         {
-            view.ShowMessage($"This session cannot be {action}.", true);
+            var message = $"This session cannot be {action}.";
+            view.ShowMessage(message, true);
+            operationsLog?.RecordRefusal(action == "copied" ? "copy" : "delete", source, "FAIL " + message);
             return null;
         }
 

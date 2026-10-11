@@ -234,6 +234,7 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
             var newId = await services.Operations.CopyAsync(source, target, workingDirectory, lifetime.Token);
             await RefreshAsync();
             Status = $"Copied to {target.Label} ({newId}).";
+            services.OperationsLog?.RecordCopy(source, target.Label, $"OK {newId}");
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (ManagedSessionOperationException ex)
@@ -247,8 +248,13 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
                 ManagedSessionFailureReason.Incompatible => "Codex rejected the copied session.",
                 _ => "Copy failed: " + ex.Message
             };
+            services.OperationsLog?.RecordCopy(source, target.Label, "FAIL " + Status);
         }
-        catch (Exception ex) when (ReadFailure(ex) || ex is InvalidOperationException or InvalidDataException) { Status = "Copy failed: " + ex.Message; }
+        catch (Exception ex) when (ReadFailure(ex) || ex is InvalidOperationException or InvalidDataException)
+        {
+            Status = "Copy failed: " + ex.Message;
+            services.OperationsLog?.RecordCopy(source, target.Label, "FAIL " + Status);
+        }
     }
 
     public async Task DeleteAsync()
@@ -263,9 +269,14 @@ public sealed class SessionManagerModel : ObservableModel, IDisposable
             catch { }
             await RefreshAsync();
             Status = "Deleted.";
+            services.OperationsLog?.RecordDelete(target, "OK");
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        catch (Exception ex) when (ReadFailure(ex) || ex is ManagedSessionOperationException) { Status = "Could not delete session: " + ex.Message; }
+        catch (Exception ex) when (ReadFailure(ex) || ex is ManagedSessionOperationException)
+        {
+            Status = "Could not delete session: " + ex.Message;
+            services.OperationsLog?.RecordDelete(target, "FAIL " + Status);
+        }
     }
 
     public async Task SearchAsync()
