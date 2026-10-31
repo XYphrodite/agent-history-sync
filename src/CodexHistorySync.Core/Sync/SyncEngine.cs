@@ -7,6 +7,7 @@ using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
 using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
+using CodexHistorySync.Core.Antigravity;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Grok;
 using CodexHistorySync.Core.IO;
@@ -120,6 +121,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
     private readonly Hermes.HermesSessionScanner? _hermesScanner;
     private readonly MimoPaths? _mimoPaths;
     private readonly MimoSessionScanner? _mimoScanner;
+    private readonly AntigravityPaths? _antigravityPaths;
+    private readonly AntigravitySessionScanner? _antigravityScanner;
     private readonly string? _annotationsDirectory;
     private readonly SessionAnnotationScanner? _annotationScanner;
     private readonly byte[] _masterKey;
@@ -146,11 +149,12 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null,
         KimiPaths? kimiPaths = null, KimiSessionScanner? kimiScanner = null,
         Hermes.HermesPaths? hermesPaths = null, Hermes.HermesSessionScanner? hermesScanner = null,
-        MimoPaths? mimoPaths = null, MimoSessionScanner? mimoScanner = null)
+        MimoPaths? mimoPaths = null, MimoSessionScanner? mimoScanner = null,
+        AntigravityPaths? antigravityPaths = null, AntigravitySessionScanner? antigravityScanner = null)
         : this(repositoryId, deviceId, paths, masterKey, scanner, crypto, stateStore, historyWriter, conflictStore,
             provider, stagingDirectory, NoopSyncEngineHooks.Instance, new OperationDirectoryCleaner(), grokPaths, grokScanner, progress,
             claudePaths, claudeScanner, continuePaths, continueScanner, annotationsDirectory, annotationScanner,
-            kimiPaths, kimiScanner, hermesPaths, hermesScanner, mimoPaths, mimoScanner) { }
+            kimiPaths, kimiScanner, hermesPaths, hermesScanner, mimoPaths, mimoScanner, antigravityPaths, antigravityScanner) { }
 
     internal SyncEngine(string repositoryId, string deviceId, CodexPaths paths, ReadOnlyMemory<byte> masterKey,
         SessionScanner scanner, RepositoryCrypto crypto, LocalStateStore stateStore, CodexHistoryWriter historyWriter,
@@ -161,7 +165,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         string? annotationsDirectory = null, SessionAnnotationScanner? annotationScanner = null,
         KimiPaths? kimiPaths = null, KimiSessionScanner? kimiScanner = null,
         Hermes.HermesPaths? hermesPaths = null, Hermes.HermesSessionScanner? hermesScanner = null,
-        MimoPaths? mimoPaths = null, MimoSessionScanner? mimoScanner = null)
+        MimoPaths? mimoPaths = null, MimoSessionScanner? mimoScanner = null,
+        AntigravityPaths? antigravityPaths = null, AntigravitySessionScanner? antigravityScanner = null)
     {
         if (string.IsNullOrWhiteSpace(repositoryId)) throw new ArgumentException("Repository ID is required.", nameof(repositoryId));
         if (string.IsNullOrWhiteSpace(deviceId) || deviceId is "." or ".." || deviceId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || deviceId.Contains('/') || deviceId.Contains('\\'))
@@ -183,6 +188,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _hermesScanner = hermesScanner ?? (hermesPaths is null ? null : new Hermes.HermesSessionScanner());
         _mimoPaths = mimoPaths;
         _mimoScanner = mimoScanner ?? (mimoPaths is null ? null : new MimoSessionScanner());
+        _antigravityPaths = antigravityPaths;
+        _antigravityScanner = antigravityScanner ?? (antigravityPaths is null ? null : new AntigravitySessionScanner());
         _annotationsDirectory = string.IsNullOrWhiteSpace(annotationsDirectory) ? null : annotationsDirectory;
         _annotationScanner = annotationScanner ?? (_annotationsDirectory is null ? null : new SessionAnnotationScanner());
         _masterKey = masterKey.ToArray();
@@ -194,7 +201,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         if (string.IsNullOrWhiteSpace(stagingDirectory)) throw new ArgumentException("A staging directory is required.", nameof(stagingDirectory));
         _stagingRoot = PathSafety.Canonicalize(stagingDirectory, nameof(stagingDirectory));
-        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths, kimiPaths, hermesPaths, mimoPaths);
+        PathSafety.EnsureOutsideCodex(_stagingRoot, paths, nameof(stagingDirectory), grokPaths, claudePaths, continuePaths, kimiPaths, hermesPaths, mimoPaths, _antigravityPaths);
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _operationCleaner = operationCleaner ?? throw new ArgumentNullException(nameof(operationCleaner));
         _progress = progress;
@@ -213,6 +220,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_kimiPaths is not null && _kimiScanner is not null) extraTasks.Add(_kimiScanner.ScanDetailedAsync(_kimiPaths, ct));
         if (_hermesPaths is not null && _hermesScanner is not null) extraTasks.Add(_hermesScanner.ScanDetailedAsync(_hermesPaths, ct));
         if (_mimoPaths is not null && _mimoScanner is not null) extraTasks.Add(_mimoScanner.ScanDetailedAsync(_mimoPaths, ct));
+        if (_antigravityPaths is not null && _antigravityScanner is not null) extraTasks.Add(_antigravityScanner.ScanDetailedAsync(_antigravityPaths, ct));
         if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
         var unscanned = UnscannedKinds();
         if (extraTasks.Count == 0)
@@ -273,6 +281,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
         if (_kimiPaths is null || _kimiScanner is null) unscanned.Add(ObjectKind.KimiSession);
         if (_hermesPaths is null || _hermesScanner is null) unscanned.Add(ObjectKind.HermesSession);
         if (_mimoPaths is null || _mimoScanner is null) unscanned.Add(ObjectKind.MimoSession);
+        if (_antigravityPaths is null || _antigravityScanner is null) unscanned.Add(ObjectKind.AntigravitySession);
         // Muse is currently available to the local catalog, but no Muse scanner is wired into
         // this engine. Its absence can never authorize a repository-wide tombstone.
         unscanned.Add(ObjectKind.MuseSession);
@@ -761,6 +770,8 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                             ? ResolveHermesDestination(id, plaintext)
                             : kind == ObjectKind.MimoSession
                             ? ResolveMimoDestination(id, plaintext)
+                            : kind == ObjectKind.AntigravitySession
+                            ? ResolveAntigravityDestination(id, plaintext)
                             : Path.Combine(kind switch
                     {
                         ObjectKind.ActiveSession => _paths.Sessions,
@@ -1038,6 +1049,15 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             !MimoSessionPackage.TrySplitLogicalId(id.Value, out var sessionId))
             throw new InvalidDataException("MiMo conflict payload id does not match the logical object id.");
         return _mimoPaths.AnchorPath(sessionId);
+    }
+
+    private string ResolveAntigravityDestination(LogicalObjectId id, byte[] plaintext)
+    {
+        if (_antigravityPaths is null) throw new InvalidOperationException("Antigravity paths are not configured.");
+        if (!string.Equals(AntigravitySessionPackage.LogicalIdOf(plaintext), id.Value, StringComparison.Ordinal) ||
+            !AntigravitySessionPackage.TrySplitLogicalId(id.Value, out var sessionId))
+            throw new InvalidDataException("Antigravity conflict payload id does not match the logical object id.");
+        return _antigravityPaths.AnchorPath(sessionId);
     }
 
     private async Task<ObjectVersion> PublishResolvedRemoteAsync(RemoteSnapshot snapshot,
@@ -1451,6 +1471,19 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             else if (existing is not null)
                 path = existing.SourcePath;
         }
+        else if (version.Kind == ObjectKind.AntigravitySession)
+        {
+            if (_antigravityPaths is null)
+                throw new AgentHomeUnavailableException(version.Kind, "Antigravity paths are not configured.");
+            if (!AntigravitySessionPackage.TrySplitLogicalId(action.ObjectId.Value, out var agSessionId) ||
+                !string.Equals(AntigravitySessionPackage.LogicalIdOf(plaintext), action.ObjectId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Antigravity session package id does not match its logical object ID.");
+            path = _antigravityPaths.AnchorPath(agSessionId);
+            if (existing is not null && existing.Kind != ObjectKind.AntigravitySession)
+                relocateFrom = existing;
+            else if (existing is not null)
+                path = existing.SourcePath;
+        }
         else
         {
             var root = version.Kind switch
@@ -1484,6 +1517,7 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 ObjectKind.KimiSession => ".kimipkg",
                 ObjectKind.HermesSession => ".hermespkg",
                 ObjectKind.MimoSession => ".mimopkg",
+                ObjectKind.AntigravitySession => ".agypkg",
                 ObjectKind.SessionAnnotations => ".annotation.json",
                 _ => ".jsonl"
             });
@@ -1586,6 +1620,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
             return;
         }
 
+        if (kind == ObjectKind.AntigravitySession)
+        {
+            if (!string.Equals(AntigravitySessionPackage.LogicalIdOf(bytes), expectedId.Value, StringComparison.Ordinal))
+                throw new InvalidDataException("Antigravity session package id does not match its logical object ID.");
+            return;
+        }
+
         ValidateSessionJsonl(bytes, expectedId, ct);
     }
 
@@ -1669,6 +1710,13 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 Path.GetDirectoryName(sessionDirectory)
                 ?? throw new InvalidDataException("Kimi session path has no workDir bucket.")));
             return KimiSessionPackage.BuildFromDirectory(sessionDirectory, workDirKey);
+        }
+
+        if (kind == ObjectKind.AntigravitySession)
+        {
+            return AntigravitySessionPackage.BuildFromAnchor(sourcePath)
+                ?? (File.Exists(sourcePath) ? await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false) : null)
+                ?? throw new InvalidDataException("Antigravity session is not in the state database.");
         }
 
         var raw = await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false);

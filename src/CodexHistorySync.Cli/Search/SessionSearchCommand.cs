@@ -52,6 +52,7 @@ public sealed class SessionSearchCommand(
         ManagedAgent.Muse => "muse",
         ManagedAgent.Hermes => "hermes",
         ManagedAgent.Mimo => "mimo",
+        ManagedAgent.Antigravity => "antigravity",
         _ => "unknown"
     };
 

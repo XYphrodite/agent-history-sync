@@ -258,7 +258,8 @@ internal static class PathSafety
 
     public static void EnsureOutsideCodex(string candidate, CodexPaths paths, string parameterName, Grok.GrokPaths? grokPaths = null,
         Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null, Kimi.KimiPaths? kimiPaths = null,
-        Hermes.HermesPaths? hermesPaths = null, Mimo.MimoPaths? mimoPaths = null)
+        Hermes.HermesPaths? hermesPaths = null, Mimo.MimoPaths? mimoPaths = null,
+        Antigravity.AntigravityPaths? antigravityPaths = null)
     {
         foreach (var synchronizedPath in new[] { paths.Home, paths.Sessions, paths.ArchivedSessions, paths.Attachments })
             if (CodexPaths.IsPathWithin(candidate, synchronizedPath) || CodexPaths.IsPathWithin(synchronizedPath, candidate))
@@ -293,12 +294,16 @@ internal static class PathSafety
         if (mimoPaths is not null &&
             (CodexPaths.IsPathWithin(candidate, mimoPaths.Home) || CodexPaths.IsPathWithin(mimoPaths.Home, candidate)))
             throw new ArgumentException("The storage path must not overlap the synchronized MiMo home.", parameterName);
+        if (antigravityPaths is not null &&
+            (CodexPaths.IsPathWithin(candidate, antigravityPaths.Home) || CodexPaths.IsPathWithin(antigravityPaths.Home, candidate)))
+            throw new ArgumentException("The storage path must not overlap the synchronized Antigravity home.", parameterName);
     }
 
     public static string EnsureSessionDestination(string candidate, ObjectKind kind, CodexPaths paths, string parameterName,
         Grok.GrokPaths? grokPaths = null, Claude.ClaudePaths? claudePaths = null, Continue.ContinuePaths? continuePaths = null,
         string? annotationsDirectory = null, Kimi.KimiPaths? kimiPaths = null, Muse.MusePaths? musePaths = null,
-        Hermes.HermesPaths? hermesPaths = null, Mimo.MimoPaths? mimoPaths = null)
+        Hermes.HermesPaths? hermesPaths = null, Mimo.MimoPaths? mimoPaths = null,
+        Antigravity.AntigravityPaths? antigravityPaths = null)
     {
         var canonical = Canonicalize(candidate, parameterName, requireFullyQualified: true);
         if (kind == ObjectKind.SessionAnnotations)
@@ -431,6 +436,16 @@ internal static class PathSafety
                 !string.Equals(home, mimoPaths.Home, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(canonical, mimoPaths.AnchorPath(sessionId), StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("MiMo session destinations must be <session>.json inside the MiMo anchor directory.", parameterName);
+            return canonical;
+        }
+
+        if (kind == ObjectKind.AntigravitySession)
+        {
+            if (antigravityPaths is null) throw new ArgumentException("Antigravity paths are required for Antigravity session destinations.", parameterName);
+            if (!Antigravity.AntigravityPaths.TryParseAnchor(canonical, out var home, out var sessionId) ||
+                !string.Equals(home, antigravityPaths.Home, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(canonical, antigravityPaths.AnchorPath(sessionId), StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Antigravity session destinations must be <session>.json inside the Antigravity anchor directory.", parameterName);
             return canonical;
         }
 

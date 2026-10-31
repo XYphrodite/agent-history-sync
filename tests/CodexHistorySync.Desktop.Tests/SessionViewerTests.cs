@@ -66,6 +66,22 @@ public sealed class SessionViewerTests
     }
 
     [AvaloniaFact]
+    public async Task AgentDropdownMatchesAntigravitySessions()
+    {
+        var agy = new ManagedSession(ManagedAgent.Antigravity, "ses_agy_123", "anchor/ses_agy_123.json", "AGY session",
+            new DateTimeOffset(2026, 9, 14, 18, 0, 0, TimeSpan.Zero), false, true);
+        using var model = CreateModel(catalog: new FixedCatalog(agy));
+        await model.RefreshAsync();
+        Assert.Single(model.Sessions);
+
+        model.Agent = "Antigravity";
+        await model.FilterAsync(debounce: false);
+        Assert.Single(model.Sessions);
+        Assert.Equal("ses_agy_123", model.Sessions[0].Session.SessionId);
+        Assert.True(model.CanShowSubagents);
+    }
+
+    [AvaloniaFact]
     public async Task UnreadableFirstSessionShowsErrorAndAnotherConversationCanBeOpened()
     {
         using var model = CreateModel(catalog: new FakeCatalog(unreadableParent: true));
@@ -368,7 +384,8 @@ public sealed class SessionViewerTests
                 source.Agent == ManagedAgent.Kimi ? [source] : [],
                 source.Agent == ManagedAgent.Muse ? [source] : [],
                 source.Agent == ManagedAgent.Hermes ? [source] : [],
-                source.Agent == ManagedAgent.Mimo ? [source] : [])
+                source.Agent == ManagedAgent.Mimo ? [source] : [],
+                source.Agent == ManagedAgent.Antigravity ? [source] : [])
             { ConfiguredAgents = [source.Agent] });
     }
     private sealed class FakeFamilies : ISessionFamilyReader

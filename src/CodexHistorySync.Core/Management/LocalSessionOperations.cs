@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CodexHistorySync.Core.Antigravity;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Continue;
 using CodexHistorySync.Core.Codex;
@@ -28,16 +29,19 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
     private readonly MusePaths? musePaths;
     private readonly HermesPaths? hermesPaths;
     private readonly MimoPaths? mimoPaths;
+    private readonly AntigravityPaths? antigravityPaths;
     private readonly IConversationWriter? continueWriter;
     private readonly IConversationReader continueReader;
     private readonly IConversationWriter? kimiWriter;
     private readonly IConversationWriter? museWriter;
     private readonly IConversationWriter? hermesWriter;
     private readonly IConversationWriter? mimoWriter;
+    private readonly IConversationWriter? antigravityWriter;
     private readonly IConversationReader kimiReader;
     private readonly IConversationReader museReader;
     private readonly IConversationReader hermesReader;
     private readonly IConversationReader mimoReader;
+    private readonly IConversationReader antigravityReader;
     private readonly IManagedSessionActiveState activeState;
     private readonly IManagedSessionDirectoryDeleter directoryDeleter;
     private readonly IConversationWriter? codexWriter;
@@ -100,6 +104,8 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         "The staged MiMo conversation failed validation.",
         "The selected MiMo target is invalid.",
         "The selected MiMo identity is invalid.",
+        "The selected Antigravity target is invalid.",
+        "Antigravity conversation is invalid.",
         "The staged Kimi conversation failed validation.",
         "The selected Grok identity is invalid.",
         "The selected agent is invalid.",
@@ -132,7 +138,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         HermesPaths? hermesPaths = null,
         IConversationWriter? hermesWriter = null,
         MimoPaths? mimoPaths = null,
-        IConversationWriter? mimoWriter = null)
+        IConversationWriter? mimoWriter = null,
+        AntigravityPaths? antigravityPaths = null,
+        IConversationWriter? antigravityWriter = null)
         : this(
             codexPaths,
             grokPaths,
@@ -160,7 +168,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             new HermesConversationReader(),
             mimoPaths,
             mimoWriter,
-            new MimoConversationReader())
+            new MimoConversationReader(),
+            antigravityPaths,
+            antigravityWriter,
+            new AntigravityConversationReader())
     {
     }
 
@@ -191,7 +202,10 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         IConversationReader? hermesReader = null,
         MimoPaths? mimoPaths = null,
         IConversationWriter? mimoWriter = null,
-        IConversationReader? mimoReader = null)
+        IConversationReader? mimoReader = null,
+        AntigravityPaths? antigravityPaths = null,
+        IConversationWriter? antigravityWriter = null,
+        IConversationReader? antigravityReader = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -213,6 +227,9 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         this.mimoPaths = mimoPaths;
         this.mimoWriter = mimoWriter;
         this.mimoReader = mimoReader ?? new MimoConversationReader();
+        this.antigravityPaths = antigravityPaths;
+        this.antigravityWriter = antigravityWriter;
+        this.antigravityReader = antigravityReader ?? new AntigravityConversationReader();
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
         this.directoryDeleter = directoryDeleter ?? throw new ArgumentNullException(nameof(directoryDeleter));
         this.codexWriter = codexWriter;
@@ -382,6 +399,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Muse => museWriter,
         ManagedAgent.Hermes => hermesWriter,
         ManagedAgent.Mimo => mimoWriter,
+        ManagedAgent.Antigravity => antigravityWriter,
         _ => null
     };
 
@@ -395,6 +413,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         ManagedAgent.Muse => museReader,
         ManagedAgent.Hermes => hermesReader,
         ManagedAgent.Mimo => mimoReader,
+        ManagedAgent.Antigravity => antigravityReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 
@@ -491,6 +510,12 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         {
             MimoSessionPackage.DeleteAnchor(validated.NativePath);
             if (File.Exists(validated.NativePath)) File.Delete(validated.NativePath);
+            return;
+        }
+
+        if (source.Agent == ManagedAgent.Antigravity && antigravityPaths is not null)
+        {
+            DeleteAntigravitySession(antigravityPaths, source.SessionId, validated.NativePath);
             return;
         }
 
@@ -704,6 +729,31 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             return new Target(mimoPaths.AnchorRoot, Path.GetFullPath(source.NativePath));
         }
 
+        if (source.Agent == ManagedAgent.Antigravity)
+        {
+            if (antigravityPaths is null)
+                throw new InvalidDataException("The selected Antigravity target is invalid.");
+
+            if (AntigravityPaths.TryParseAnchor(source.NativePath, out var home, out var sessionId))
+            {
+                if (!SameHome(antigravityPaths.Home, home) ||
+                    !string.Equals(sessionId, source.SessionId, StringComparison.Ordinal))
+                    throw new InvalidDataException("The selected Antigravity target is invalid.");
+                return new Target(antigravityPaths.AnchorRoot, Path.GetFullPath(source.NativePath));
+            }
+
+            if (source.NativePath.EndsWith(".db", StringComparison.OrdinalIgnoreCase))
+            {
+                var fullNative = Path.GetFullPath(source.NativePath);
+                var expectedDb = Path.GetFullPath(antigravityPaths.ConversationDatabasePath(source.SessionId));
+                if (!string.Equals(fullNative, expectedDb, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The selected Antigravity target is invalid.");
+                return new Target(antigravityPaths.ConversationsDirectory, fullNative);
+            }
+
+            throw new InvalidDataException("The selected Antigravity target is invalid.");
+        }
+
         throw new InvalidDataException("The selected agent is invalid.");
     }
 
@@ -802,6 +852,7 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             ManagedAgent.Muse => ConversationAgent.Muse,
             ManagedAgent.Hermes => ConversationAgent.Hermes,
             ManagedAgent.Mimo => ConversationAgent.Mimo,
+            ManagedAgent.Antigravity => ConversationAgent.Antigravity,
             _ => throw new InvalidDataException("The selected agent is invalid.")
         };
         if (conversation.SourceAgent != expectedAgent ||
@@ -842,6 +893,8 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             return await Task.Run(() => HermesSessionPackage.Fingerprint(nativePath), cancellationToken).ConfigureAwait(false);
         if (agent == ManagedAgent.Mimo)
             return await Task.Run(() => MimoSessionPackage.Fingerprint(nativePath), cancellationToken).ConfigureAwait(false);
+        if (agent == ManagedAgent.Antigravity)
+            return await Task.Run(() => ComputeAntigravityFingerprint(nativePath), cancellationToken).ConfigureAwait(false);
 
         if (IsFileBackedAgent(agent))
             return await HashFileAsync(nativePath, cancellationToken).ConfigureAwait(false);
@@ -878,6 +931,8 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
             return HermesSessionPackage.Fingerprint(nativePath);
         if (agent == ManagedAgent.Mimo)
             return MimoSessionPackage.Fingerprint(nativePath);
+        if (agent == ManagedAgent.Antigravity)
+            return ComputeAntigravityFingerprint(nativePath);
 
         if (IsFileBackedAgent(agent))
             return HashFileImmediate(nativePath, cancellationToken);
@@ -966,6 +1021,161 @@ public sealed class LocalSessionOperations : ILocalSessionOperations
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new InvalidDataException("The selected session could not be validated.", exception);
+        }
+    }
+
+    private static byte[] ComputeAntigravityFingerprint(string nativePath)
+    {
+        string sessionId;
+        string convDbPath;
+        string? summariesDbPath = null;
+
+        if (AntigravityPaths.TryParseAnchor(nativePath, out var home, out var anchorSessionId))
+        {
+            sessionId = anchorSessionId;
+            var paths = new AntigravityPaths(home);
+            convDbPath = paths.ConversationDatabasePath(sessionId);
+            summariesDbPath = paths.ConversationSummariesDbPath;
+        }
+        else if (nativePath.EndsWith(".db", StringComparison.OrdinalIgnoreCase))
+        {
+            convDbPath = Path.GetFullPath(nativePath);
+            var rawId = Path.GetFileNameWithoutExtension(nativePath);
+            if (AntigravityPaths.IsSessionId(rawId))
+            {
+                sessionId = rawId;
+            }
+            else
+            {
+                var meta = AntigravityDatabase.ReadTrajectoryMeta(convDbPath);
+                if (meta is not null && AntigravityPaths.IsSessionId(meta.ConversationId))
+                    sessionId = meta.ConversationId;
+                else
+                    throw new InvalidDataException("The selected session could not be validated.");
+            }
+            var parentDir = Path.GetDirectoryName(convDbPath);
+            if (parentDir is not null && string.Equals(Path.GetFileName(parentDir), "conversations", StringComparison.OrdinalIgnoreCase))
+            {
+                var root = Path.GetDirectoryName(parentDir);
+                if (root is not null)
+                    summariesDbPath = Path.Combine(root, AntigravityPaths.SummariesDatabaseName);
+            }
+        }
+        else
+        {
+            throw new InvalidDataException("The selected session could not be validated.");
+        }
+
+        if (!File.Exists(convDbPath))
+            throw new InvalidDataException("The selected session could not be validated.");
+
+        AntigravitySummaryRow? summary = null;
+        if (!string.IsNullOrEmpty(summariesDbPath) && File.Exists(summariesDbPath))
+        {
+            try
+            {
+                var summaries = AntigravityDatabase.ReadSummaries(summariesDbPath);
+                summary = summaries.FirstOrDefault(s => string.Equals(s.ConversationId, sessionId, StringComparison.Ordinal));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
+            {
+                throw new InvalidDataException("The selected session could not be validated.", ex);
+            }
+        }
+
+        IReadOnlyList<AntigravityStepRow> steps;
+        try
+        {
+            steps = AntigravityDatabase.ReadSteps(convDbPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
+        {
+            throw new InvalidDataException("The selected session could not be validated.", ex);
+        }
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Encoding.UTF8.GetBytes("AGY:"));
+        hash.AppendData(Encoding.UTF8.GetBytes(sessionId));
+        if (summary is not null)
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes(summary.Title ?? string.Empty));
+            hash.AppendData(BitConverter.GetBytes(summary.CreatedAt.ToUnixTimeSeconds()));
+            hash.AppendData(BitConverter.GetBytes(summary.UpdatedAt.ToUnixTimeSeconds()));
+            if (!string.IsNullOrEmpty(summary.ParentConversationId))
+                hash.AppendData(Encoding.UTF8.GetBytes(summary.ParentConversationId));
+            hash.AppendData(BitConverter.GetBytes(summary.NestingDepth));
+        }
+
+        foreach (var step in steps)
+        {
+            hash.AppendData(BitConverter.GetBytes(step.Index));
+            hash.AppendData(BitConverter.GetBytes(step.StepType));
+            hash.AppendData(BitConverter.GetBytes(step.Status));
+            if (step.Payload is { Length: > 0 })
+                hash.AppendData(step.Payload);
+        }
+
+        return hash.GetHashAndReset();
+    }
+
+    private static void DeleteAntigravitySession(AntigravityPaths paths, string sessionId, string nativePath)
+    {
+        var backupDir = Path.Combine(paths.Home, "backups", sessionId);
+        Directory.CreateDirectory(backupDir);
+
+        var convDb = paths.ConversationDatabasePath(sessionId);
+        if (File.Exists(convDb))
+        {
+            File.Copy(convDb, Path.Combine(backupDir, Path.GetFileName(convDb)), overwrite: true);
+            if (File.Exists(convDb + "-wal"))
+                File.Copy(convDb + "-wal", Path.Combine(backupDir, Path.GetFileName(convDb) + "-wal"), overwrite: true);
+            if (File.Exists(convDb + "-shm"))
+                File.Copy(convDb + "-shm", Path.Combine(backupDir, Path.GetFileName(convDb) + "-shm"), overwrite: true);
+        }
+
+        var annotation = paths.AnnotationPath(sessionId);
+        if (File.Exists(annotation))
+        {
+            File.Copy(annotation, Path.Combine(backupDir, Path.GetFileName(annotation)), overwrite: true);
+        }
+
+        var brainDir = paths.BrainSessionDirectory(sessionId);
+        if (Directory.Exists(brainDir))
+        {
+            var brainBackup = Path.Combine(backupDir, "brain");
+            Directory.CreateDirectory(brainBackup);
+            foreach (var file in Directory.EnumerateFiles(brainDir, "*", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetRelativePath(brainDir, file);
+                var dest = Path.Combine(brainBackup, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                File.Copy(file, dest, overwrite: true);
+            }
+        }
+
+        if (File.Exists(convDb)) File.Delete(convDb);
+        if (File.Exists(convDb + "-wal")) File.Delete(convDb + "-wal");
+        if (File.Exists(convDb + "-shm")) File.Delete(convDb + "-shm");
+        if (File.Exists(annotation)) File.Delete(annotation);
+        if (Directory.Exists(brainDir)) Directory.Delete(brainDir, recursive: true);
+
+        var anchor = paths.AnchorPath(sessionId);
+        if (File.Exists(anchor)) File.Delete(anchor);
+        if (File.Exists(nativePath)) File.Delete(nativePath);
+
+        if (File.Exists(paths.ConversationSummariesDbPath))
+        {
+            try
+            {
+                using var connection = AntigravityDatabase.OpenConnection(paths.ConversationSummariesDbPath, write: true);
+                using var command = connection.CreateCommand();
+                command.CommandText = "DELETE FROM conversation_summaries WHERE conversation_id = @id;";
+                command.Parameters.AddWithValue("@id", sessionId);
+                command.ExecuteNonQuery();
+            }
+            catch (Exception ex) when (ex is IOException or Microsoft.Data.Sqlite.SqliteException)
+            {
+            }
         }
     }
 

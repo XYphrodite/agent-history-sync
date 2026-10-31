@@ -1,6 +1,6 @@
 namespace CodexHistorySync.Core.Management;
 
-public enum ManagedAgent { Codex, Grok, Claude, Continue, Kimi, Muse, Hermes, Mimo }
+public enum ManagedAgent { Codex, Grok, Claude, Continue, Kimi, Muse, Hermes, Mimo, Antigravity }
 
 /// <summary>
 /// Where <see cref="ManagedSession.Title"/> came from. An annotation may stand in for a title the
@@ -42,18 +42,19 @@ public sealed record SessionCatalogSnapshot(
     IReadOnlyList<ManagedSession> Kimi,
     IReadOnlyList<ManagedSession> Muse,
     IReadOnlyList<ManagedSession> Hermes,
-    IReadOnlyList<ManagedSession> Mimo)
+    IReadOnlyList<ManagedSession> Mimo,
+    IReadOnlyList<ManagedSession> Antigravity)
 {
     /// <summary>Kept so the two-agent call sites that predate Claude still compile.</summary>
     public SessionCatalogSnapshot(IReadOnlyList<ManagedSession> codex, IReadOnlyList<ManagedSession> grok)
-        : this(codex, grok, [], [], [], [], [], []) { }
+        : this(codex, grok, [], [], [], [], [], [], []) { }
 
     /// <summary>Kept so the three-agent call sites that predate Continue still compile.</summary>
     public SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> codex,
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude)
-        : this(codex, grok, claude, [], [], [], [], []) { }
+        : this(codex, grok, claude, [], [], [], [], [], []) { }
 
     /// <summary>Kept so the four-agent call sites that predate Kimi still compile.</summary>
     public SessionCatalogSnapshot(
@@ -61,7 +62,7 @@ public sealed record SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> grok,
         IReadOnlyList<ManagedSession> claude,
         IReadOnlyList<ManagedSession> continueSessions)
-        : this(codex, grok, claude, continueSessions, [], [], [], []) { }
+        : this(codex, grok, claude, continueSessions, [], [], [], [], []) { }
 
     /// <summary>Kept so the six-agent call sites that predate Hermes still compile.</summary>
     public SessionCatalogSnapshot(
@@ -71,7 +72,7 @@ public sealed record SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> continueSessions,
         IReadOnlyList<ManagedSession> kimi,
         IReadOnlyList<ManagedSession> muse)
-        : this(codex, grok, claude, continueSessions, kimi, muse, [], []) { }
+        : this(codex, grok, claude, continueSessions, kimi, muse, [], [], []) { }
 
     /// <summary>Kept so the seven-agent call sites that predate Mimo still compile.</summary>
     public SessionCatalogSnapshot(
@@ -82,7 +83,19 @@ public sealed record SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> kimi,
         IReadOnlyList<ManagedSession> muse,
         IReadOnlyList<ManagedSession> hermes)
-        : this(codex, grok, claude, continueSessions, kimi, muse, hermes, []) { }
+        : this(codex, grok, claude, continueSessions, kimi, muse, hermes, [], []) { }
+
+    /// <summary>Kept so the eight-agent call sites that predate Antigravity still compile.</summary>
+    public SessionCatalogSnapshot(
+        IReadOnlyList<ManagedSession> codex,
+        IReadOnlyList<ManagedSession> grok,
+        IReadOnlyList<ManagedSession> claude,
+        IReadOnlyList<ManagedSession> continueSessions,
+        IReadOnlyList<ManagedSession> kimi,
+        IReadOnlyList<ManagedSession> muse,
+        IReadOnlyList<ManagedSession> hermes,
+        IReadOnlyList<ManagedSession> mimo)
+        : this(codex, grok, claude, continueSessions, kimi, muse, hermes, mimo, []) { }
 
     /// <summary>
     /// Agents with a resolvable home, in panel order. An agent that is not installed gets no panel
@@ -90,7 +103,7 @@ public sealed record SessionCatalogSnapshot(
     /// the only thing that can tell "configured but empty" apart from "not configured", which the
     /// fallback below cannot, and which is why hand-built snapshots should set it explicitly.
     /// </summary>
-    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi, Muse, Hermes, Mimo);
+    public IReadOnlyList<ManagedAgent> ConfiguredAgents { get; init; } = DefaultConfigured(Claude, Continue, Kimi, Muse, Hermes, Mimo, Antigravity);
     public IReadOnlyList<ManagedAgent> PendingAgents { get; init; } = [];
     public IReadOnlyList<ManagedAgent> UnavailableAgents { get; init; } = [];
     public IReadOnlyDictionary<ManagedAgent, string> UnavailableReasons { get; init; } = new Dictionary<ManagedAgent, string>();
@@ -112,6 +125,7 @@ public sealed record SessionCatalogSnapshot(
         ManagedAgent.Muse => Muse,
         ManagedAgent.Hermes => Hermes,
         ManagedAgent.Mimo => Mimo,
+        ManagedAgent.Antigravity => Antigravity,
         _ => throw new ArgumentOutOfRangeException(nameof(agent))
     };
 
@@ -121,7 +135,8 @@ public sealed record SessionCatalogSnapshot(
         IReadOnlyList<ManagedSession> kimi,
         IReadOnlyList<ManagedSession> muse,
         IReadOnlyList<ManagedSession> hermes,
-        IReadOnlyList<ManagedSession> mimo)
+        IReadOnlyList<ManagedSession> mimo,
+        IReadOnlyList<ManagedSession> antigravity)
     {
         var agents = new List<ManagedAgent> { ManagedAgent.Codex, ManagedAgent.Grok };
         if (claude.Count != 0) agents.Add(ManagedAgent.Claude);
@@ -130,6 +145,7 @@ public sealed record SessionCatalogSnapshot(
         if (muse.Count != 0) agents.Add(ManagedAgent.Muse);
         if (hermes.Count != 0) agents.Add(ManagedAgent.Hermes);
         if (mimo.Count != 0) agents.Add(ManagedAgent.Mimo);
+        if (antigravity.Count != 0) agents.Add(ManagedAgent.Antigravity);
         return agents;
     }
 
@@ -141,7 +157,7 @@ public sealed record SessionCatalogSnapshot(
 public static class ManagedAgents
 {
     public static IReadOnlyList<ManagedAgent> All { get; } =
-        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude, ManagedAgent.Continue, ManagedAgent.Kimi, ManagedAgent.Muse, ManagedAgent.Hermes, ManagedAgent.Mimo];
+        [ManagedAgent.Codex, ManagedAgent.Grok, ManagedAgent.Claude, ManagedAgent.Continue, ManagedAgent.Kimi, ManagedAgent.Muse, ManagedAgent.Hermes, ManagedAgent.Mimo, ManagedAgent.Antigravity];
 
     /// <summary>A session copied out of <paramref name="source"/> can land on any other agent.</summary>
     public static IReadOnlyList<ManagedAgent> Destinations(ManagedAgent source) =>

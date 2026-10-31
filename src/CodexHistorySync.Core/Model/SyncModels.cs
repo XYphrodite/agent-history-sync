@@ -68,7 +68,15 @@ public enum ObjectKind
     /// <c>mimocode.db</c>). Appended after HermesSession for the same reason that one was appended last, and
     /// carrying the same obligation: upgrade every machine before the first push that includes one.
     /// </summary>
-    MimoSession
+    MimoSession,
+
+    /// <summary>
+    /// Google Antigravity (AGY) session package (conversation_summaries row, conversations/&lt;id&gt;.db steps,
+    /// optional annotations/&lt;id&gt;.pbtxt, and brain/&lt;id&gt;/transcript.jsonl under ~/.gemini/antigravity-cli).
+    /// Appended after MimoSession for the same reason that one was appended last, and
+    /// carrying the same obligation: upgrade every machine before the first push that includes one.
+    /// </summary>
+    AntigravitySession = 14
 }
 
 public readonly record struct LogicalObjectId(string Value);

@@ -86,7 +86,12 @@ public sealed class ReleaseSurfaceTests
                     ["CODEX_HOME"] = Path.Combine(data, "missing-codex"),
                     ["GROK_HOME"] = Path.Combine(data, "missing-grok"),
                     ["CLAUDE_CONFIG_DIR"] = Path.Combine(data, "missing-claude"),
-                    ["CONTINUE_GLOBAL_DIR"] = Path.Combine(data, "missing-continue")
+                    ["CONTINUE_GLOBAL_DIR"] = Path.Combine(data, "missing-continue"),
+                    ["KIMI_CODE_HOME"] = Path.Combine(data, "missing-kimi"),
+                    ["MUSE_HOME"] = Path.Combine(data, "missing-muse"),
+                    ["HERMES_HOME"] = Path.Combine(data, "missing-hermes"),
+                    ["MIMOCODE_HOME"] = Path.Combine(data, "missing-mimo"),
+                    ["ANTIGRAVITY_HOME"] = Path.Combine(data, "missing-antigravity")
                 });
 
             Assert.DoesNotContain("TypeInitializationException", result.Output, StringComparison.Ordinal);

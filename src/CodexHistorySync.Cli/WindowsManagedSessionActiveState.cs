@@ -9,6 +9,7 @@ using CodexHistorySync.Cli.Management;
 using CodexHistorySync.Cli.Search;
 using CodexHistorySync.Cli.Mcp;
 using CodexHistorySync.Core.Annotations;
+using CodexHistorySync.Core.Antigravity;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Continue;
@@ -45,6 +46,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
     private readonly MusePaths? musePaths;
     private readonly HermesPaths? hermesPaths;
     private readonly MimoPaths? mimoPaths;
+    private readonly AntigravityPaths? antigravityPaths;
     private readonly Func<int, string, bool> isNamedProcessRunning;
     private readonly Func<string, bool> isExclusiveLockHeld;
     private readonly Func<string, string, IReadOnlyList<string>> enumerateFiles;
@@ -57,7 +59,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null,
         HermesPaths? hermesPaths = null,
-        MimoPaths? mimoPaths = null)
+        MimoPaths? mimoPaths = null,
+        AntigravityPaths? antigravityPaths = null)
         : this(
             codexPaths,
             grokPaths,
@@ -71,7 +74,9 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
             () => DateTime.UtcNow,
             kimiPaths,
             musePaths,
-            hermesPaths)
+            hermesPaths,
+            mimoPaths,
+            antigravityPaths)
     {
     }
 
@@ -89,7 +94,8 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null,
         HermesPaths? hermesPaths = null,
-        MimoPaths? mimoPaths = null)
+        MimoPaths? mimoPaths = null,
+        AntigravityPaths? antigravityPaths = null)
     {
         this.codexPaths = codexPaths;
         this.grokPaths = grokPaths;
@@ -98,6 +104,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         this.musePaths = musePaths;
         this.hermesPaths = hermesPaths;
         this.mimoPaths = mimoPaths;
+        this.antigravityPaths = antigravityPaths;
         this.isAnyNamedProcessRunning = isAnyNamedProcessRunning ?? IsAnyNamedProcessRunning;
         this.lastWriteTimeUtc = lastWriteTimeUtc ?? (path => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null);
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -137,8 +144,53 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
         ManagedAgent.Muse => ReadMuseActiveIds(),
         ManagedAgent.Hermes => ReadHermesActiveIds(),
         ManagedAgent.Mimo => ReadMimoActiveIds(),
+        ManagedAgent.Antigravity => ReadAntigravityActiveIds(),
         _ => EmptyIds
     };
+
+    private IReadOnlySet<string> ReadAntigravityActiveIds()
+    {
+        if (antigravityPaths is null) return EmptyIds;
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var presenceDir = Path.Combine(antigravityPaths.Home, "presence");
+        if (Directory.Exists(presenceDir))
+        {
+            foreach (var path in enumerateFiles(presenceDir, "*.lock"))
+            {
+                var name = Path.GetFileName(path);
+                if (string.IsNullOrWhiteSpace(name) || name.StartsWith('.')) continue;
+                var sessionId = Path.GetFileNameWithoutExtension(name);
+                if (AntigravityPaths.IsSessionId(sessionId) && isExclusiveLockHeld(path))
+                    ids.Add(sessionId);
+            }
+        }
+
+        var isProcessRunning = isAnyNamedProcessRunning("antigravity") || isAnyNamedProcessRunning("antigravity-cli");
+
+        if (Directory.Exists(antigravityPaths.ConversationsDirectory))
+        {
+            foreach (var path in enumerateFiles(antigravityPaths.ConversationsDirectory, "*.db-wal"))
+            {
+                var fileName = Path.GetFileName(path);
+                var sessionId = fileName[..^7];
+                if (AntigravityPaths.IsSessionId(sessionId) &&
+                    (isExclusiveLockHeld(path) || (isProcessRunning && lastWriteTimeUtc(path) is { } written && written >= utcNow() - TimeSpan.FromMinutes(5))))
+                {
+                    ids.Add(sessionId);
+                }
+            }
+
+            foreach (var path in enumerateFiles(antigravityPaths.ConversationsDirectory, "*.db"))
+            {
+                var sessionId = Path.GetFileNameWithoutExtension(path);
+                if (AntigravityPaths.IsSessionId(sessionId) && isExclusiveLockHeld(path))
+                    ids.Add(sessionId);
+            }
+        }
+
+        return ids;
+    }
 
     /// <summary>
     /// Kimi Code publishes no active-session file, so liveness is a running kimi process plus a

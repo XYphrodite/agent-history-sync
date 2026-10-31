@@ -21,6 +21,7 @@ public sealed class SessionContentReader : ISessionContentReader
     private readonly IConversationReader museReader;
     private readonly IConversationReader hermesReader;
     private readonly IConversationReader mimoReader;
+    private readonly IConversationReader antigravityReader;
 
     public SessionContentReader()
         : this(
@@ -31,7 +32,8 @@ public sealed class SessionContentReader : ISessionContentReader
             new KimiConversationReader(),
             new MuseConversationReader(),
             new HermesConversationReader(),
-            new MimoConversationReader())
+            new MimoConversationReader(),
+            new AntigravityConversationReader())
     {
     }
 
@@ -43,7 +45,8 @@ public sealed class SessionContentReader : ISessionContentReader
         IConversationReader? kimiReader = null,
         IConversationReader? museReader = null,
         IConversationReader? hermesReader = null,
-        IConversationReader? mimoReader = null)
+        IConversationReader? mimoReader = null,
+        IConversationReader? antigravityReader = null)
     {
         this.codexReader = codexReader ?? throw new ArgumentNullException(nameof(codexReader));
         this.grokReader = grokReader ?? throw new ArgumentNullException(nameof(grokReader));
@@ -53,6 +56,7 @@ public sealed class SessionContentReader : ISessionContentReader
         this.museReader = museReader ?? new MuseConversationReader();
         this.hermesReader = hermesReader ?? new HermesConversationReader();
         this.mimoReader = mimoReader ?? new MimoConversationReader();
+        this.antigravityReader = antigravityReader ?? new AntigravityConversationReader();
     }
 
     public Task<PortableConversation> ReadAsync(ManagedSession session, CancellationToken cancellationToken)
@@ -80,6 +84,7 @@ public sealed class SessionContentReader : ISessionContentReader
         ManagedAgent.Muse => museReader,
         ManagedAgent.Hermes => hermesReader,
         ManagedAgent.Mimo => mimoReader,
+        ManagedAgent.Antigravity => antigravityReader,
         _ => throw new InvalidDataException("The selected agent is invalid.")
     };
 }

@@ -32,7 +32,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
     public ObservableCollection<SessionNode> Sessions { get; } = [];
     public ObservableCollection<TraceEntryModel> Entries { get; } = [];
     public ObservableCollection<TraceSearchMatch> Matches { get; } = [];
-    public IReadOnlyList<string> Agents { get; } = ["All agents", "Codex", "Grok", "Claude", "Continue", "Kimi", "Muse", "Hermes", "MiMo"];
+    public IReadOnlyList<string> Agents { get; } = ["All agents", "Codex", "Grok", "Claude", "Continue", "Kimi", "Muse", "Hermes", "MiMo", "Antigravity"];
     public string BuildLabel => services.BuildLabel;
     public string Agent { get => agent; set => Set(ref agent, value); }
     public string Filter { get => filter; set => Set(ref filter, value); }
@@ -53,7 +53,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
     public string Description => selected?.Session.Annotation?.Description ?? string.Empty;
     public bool HasSelection => selected is not null;
     public bool HasTrace => trace is not null;
-    public bool CanShowSubagents => selected?.Session.Agent is ManagedAgent.Codex or ManagedAgent.Muse;
+    public bool CanShowSubagents => selected?.Session.Agent is ManagedAgent.Codex or ManagedAgent.Muse or ManagedAgent.Antigravity;
     public bool CanDelete => selected?.Parent is null && selected is not null && !selected.Session.IsReadOnly && services.Operations is not null;
     public bool CanGenerateTitle => services.TitleSuggester?.IsConfigured == true && selected is not null;
     public bool HasMatches => Matches.Count > 0;
@@ -203,7 +203,7 @@ public sealed class SessionViewerModel(DesktopSessionServices services) : Observ
         try
         {
             Status = "Searching messages and tool input/output…";
-            var sessions = FamilySearch && target.Session.Agent == ManagedAgent.Codex
+            var sessions = FamilySearch && (target.Session.Agent is ManagedAgent.Codex or ManagedAgent.Antigravity)
                 ? (await ReadFamilyAsync(target.Root, token)).DescendantsAndSelf().Select(node => node.Session).ToArray()
                 : [target.Session];
             var found = new List<TraceSearchMatch>();

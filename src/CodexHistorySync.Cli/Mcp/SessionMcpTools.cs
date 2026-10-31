@@ -140,7 +140,9 @@ internal sealed class SessionMcpTools(
         "hermes" => ManagedAgent.Hermes,
         "mimo" => ManagedAgent.Mimo,
         "xiaomi" => ManagedAgent.Mimo,
-        _ => throw new McpException("agent must be codex, grok, claude, continue, kimi, muse, hermes, or mimo.")
+        "antigravity" => ManagedAgent.Antigravity,
+        "agy" => ManagedAgent.Antigravity,
+        _ => throw new McpException("agent must be codex, grok, claude, continue, kimi, muse, hermes, mimo, or antigravity.")
     };
 
     private static string AgentToken(ManagedAgent agent) => agent.ToString().ToLowerInvariant();

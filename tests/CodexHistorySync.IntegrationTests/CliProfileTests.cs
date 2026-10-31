@@ -318,7 +318,7 @@ public sealed class CliProfileTests
                 "--depsfile", Path.ChangeExtension(typeof(Fixture).Assembly.Location, ".deps.json"), typeof(CliApplication).Assembly.Location }.Concat(args))
                 start.ArgumentList.Add(argument);
             start.Environment["LOCALAPPDATA"] = BaseData;
-            foreach (var variable in new[] { "CODEX_HOME", "GROK_HOME", "CLAUDE_CONFIG_DIR", "CONTINUE_GLOBAL_DIR", "KIMI_CODE_HOME", "MUSE_HOME" })
+            foreach (var variable in new[] { "CODEX_HOME", "GROK_HOME", "CLAUDE_CONFIG_DIR", "CONTINUE_GLOBAL_DIR", "KIMI_CODE_HOME", "MUSE_HOME", "HERMES_HOME", "MIMOCODE_HOME", "ANTIGRAVITY_HOME" })
                 start.Environment[variable] = Path.Combine(Root, "missing-" + variable);
             using var process = Process.Start(start) ?? throw new InvalidOperationException("CLI did not start.");
             process.StandardInput.Close();

@@ -55,6 +55,14 @@ public sealed record CliStatusReport(int Local, int Remote, int Pending, int Con
     /// <summary>True when the MiMo scan could not confirm what it did not find.</summary>
     public bool MimoUncertain { get; init; }
 
+    /// <summary>Resolved Antigravity home, or null when no Antigravity home was found.</summary>
+    public string? AntigravityHome { get; init; }
+
+    public int AntigravitySessions { get; init; }
+
+    /// <summary>True when the Antigravity scan could not confirm what it did not find.</summary>
+    public bool AntigravityUncertain { get; init; }
+
     public int ClaudeSessions { get; init; }
 
     public int ClaudeMemory { get; init; }
@@ -391,6 +399,7 @@ public sealed class CliApplication
             ("muse", [ObjectKind.MuseSession]),
             ("hermes", [ObjectKind.HermesSession]),
             ("mimo", [ObjectKind.MimoSession]),
+            ("antigravity", [ObjectKind.AntigravitySession]),
             ("annotations", [ObjectKind.SessionAnnotations]),
         };
         var grouped = groups.Select(group => (group.Name, group.Kinds, Totals: Sum(byKind, group.Kinds))).ToArray();
@@ -460,6 +469,8 @@ public sealed class CliApplication
             $"hermes-sessions={result.HermesSessions} hermes-uncertain={(result.HermesUncertain ? "yes" : "no")}");
         console.WriteLine($"mimo-home={(result.MimoHome is null ? "none" : SafeToken(result.MimoHome))} " +
             $"mimo-sessions={result.MimoSessions} mimo-uncertain={(result.MimoUncertain ? "yes" : "no")}");
+        console.WriteLine($"antigravity-home={(result.AntigravityHome is null ? "none" : SafeToken(result.AntigravityHome))} " +
+            $"antigravity-sessions={result.AntigravitySessions} antigravity-uncertain={(result.AntigravityUncertain ? "yes" : "no")}");
         return result.Conflicts == 0 ? 0 : 4;
     }
 

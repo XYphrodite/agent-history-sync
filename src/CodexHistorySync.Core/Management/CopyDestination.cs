@@ -18,6 +18,7 @@ public sealed record CopyDestination(ManagedAgent Agent, string Label, string? H
         ManagedAgent.Muse => "Muse",
         ManagedAgent.Hermes => "Hermes",
         ManagedAgent.Mimo => "MiMo",
+        ManagedAgent.Antigravity => "Antigravity",
         _ => agent.ToString()
     };
 

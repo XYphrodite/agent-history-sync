@@ -307,6 +307,7 @@ public sealed class SpectreSessionManagerView : ISessionManagerView
         ManagedAgent.Muse => "Muse",
         ManagedAgent.Hermes => "Hermes",
         ManagedAgent.Mimo => "MiMo",
+        ManagedAgent.Antigravity => "Antigravity",
         _ => agent.ToString()
     };
 

@@ -103,6 +103,21 @@ public sealed class SessionManagerTests
     }
 
     [AvaloniaFact]
+    public async Task AgentDropdownMatchesAntigravitySessions()
+    {
+        var agy = new ManagedSession(ManagedAgent.Antigravity, "ses_agy_456", "anchor/ses_agy_456.json", "AGY session",
+            new DateTimeOffset(2026, 9, 14, 18, 0, 0, TimeSpan.Zero), IsActive: false, CanRead: true);
+        using var model = CreateModel(suppliedCatalog: new SingleSessionCatalog(agy) { ConfiguredAgentsOverride = [ManagedAgent.Antigravity] });
+        await model.RefreshAsync();
+        Assert.Single(model.Sessions);
+
+        model.Agent = "Antigravity";
+        await model.FilterAsync(debounce: false);
+        Assert.Single(model.Sessions);
+        Assert.Equal("ses_agy_456", model.Sessions[0].SessionId);
+    }
+
+    [AvaloniaFact]
     public async Task CopyDelegatesToOperationsAndRefreshes()
     {
         var operations = new FakeOperations();
@@ -294,7 +309,8 @@ public sealed class SessionManagerTests
                 source.Agent == ManagedAgent.Kimi ? [source] : [],
                 source.Agent == ManagedAgent.Muse ? [source] : [],
                 source.Agent == ManagedAgent.Hermes ? [source] : [],
-                source.Agent == ManagedAgent.Mimo ? [source] : [])
+                source.Agent == ManagedAgent.Mimo ? [source] : [],
+                source.Agent == ManagedAgent.Antigravity ? [source] : [])
             {
                 ConfiguredAgents = ConfiguredAgentsOverride ?? [source.Agent]
             };

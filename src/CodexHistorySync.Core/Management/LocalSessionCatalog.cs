@@ -1,3 +1,4 @@
+using CodexHistorySync.Core.Antigravity;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Continue;
@@ -21,6 +22,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
     private readonly ILocalSessionCatalogSource? museSource;
     private readonly ILocalSessionCatalogSource? hermesSource;
     private readonly ILocalSessionCatalogSource? mimoSource;
+    private readonly ILocalSessionCatalogSource? antigravitySource;
     private readonly IManagedSessionActiveState activeState;
 
     public LocalSessionCatalog(
@@ -32,7 +34,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         KimiPaths? kimiPaths = null,
         MusePaths? musePaths = null,
         HermesPaths? hermesPaths = null,
-        MimoPaths? mimoPaths = null)
+        MimoPaths? mimoPaths = null,
+        AntigravityPaths? antigravityPaths = null)
         : this(
             codexPaths is null || !Directory.Exists(codexPaths.Home)
                 ? null
@@ -58,7 +61,10 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
                 : new HermesSessionCatalogSource(hermesPaths),
             mimoPaths is null
                 ? null
-                : new MimoSessionCatalogSource(mimoPaths))
+                : new MimoSessionCatalogSource(mimoPaths),
+            antigravityPaths is null
+                ? null
+                : new AntigravitySessionCatalogSource(antigravityPaths))
     {
     }
 
@@ -71,7 +77,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ILocalSessionCatalogSource? kimiSource = null,
         ILocalSessionCatalogSource? museSource = null,
         ILocalSessionCatalogSource? hermesSource = null,
-        ILocalSessionCatalogSource? mimoSource = null)
+        ILocalSessionCatalogSource? mimoSource = null,
+        ILocalSessionCatalogSource? antigravitySource = null)
     {
         this.codexSource = codexSource;
         this.grokSource = grokSource;
@@ -81,6 +88,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         this.museSource = museSource;
         this.hermesSource = hermesSource;
         this.mimoSource = mimoSource;
+        this.antigravitySource = antigravitySource;
         this.activeState = activeState ?? throw new ArgumentNullException(nameof(activeState));
     }
 
@@ -135,7 +143,8 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
             rows.GetValueOrDefault(ManagedAgent.Claude) ?? [], rows.GetValueOrDefault(ManagedAgent.Continue) ?? [],
             rows.GetValueOrDefault(ManagedAgent.Kimi) ?? [], rows.GetValueOrDefault(ManagedAgent.Muse) ?? [],
             rows.GetValueOrDefault(ManagedAgent.Hermes) ?? [],
-            rows.GetValueOrDefault(ManagedAgent.Mimo) ?? [])
+            rows.GetValueOrDefault(ManagedAgent.Mimo) ?? [],
+            rows.GetValueOrDefault(ManagedAgent.Antigravity) ?? [])
         {
             ConfiguredAgents = configured,
             PendingAgents = configured.Where(pending.ContainsKey).ToArray(),
@@ -156,6 +165,7 @@ public sealed class LocalSessionCatalog : ILocalSessionCatalog
         ManagedAgent.Muse => museSource,
         ManagedAgent.Hermes => hermesSource,
         ManagedAgent.Mimo => mimoSource,
+        ManagedAgent.Antigravity => antigravitySource,
         _ => null
     };
 
