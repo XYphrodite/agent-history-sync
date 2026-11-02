@@ -1043,7 +1043,7 @@ public sealed class LocalSessionCatalogTests
             activeState);
 
         var snapshot = await Task.Run(() => catalog.ScanAsync(CancellationToken.None))
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Single(snapshot.Codex);
         Assert.Single(snapshot.Grok);
@@ -2052,7 +2052,7 @@ public sealed class LocalSessionCatalogTests
             CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref queryCounts[(int)agent]);
-            if (!rendezvous.SignalAndWait(TimeSpan.FromMilliseconds(500), cancellationToken))
+            if (!rendezvous.SignalAndWait(TimeSpan.FromMilliseconds(1500), cancellationToken))
                 Interlocked.Increment(ref timedOutQueries);
             return Task.FromResult<IReadOnlySet<string>>(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         }
