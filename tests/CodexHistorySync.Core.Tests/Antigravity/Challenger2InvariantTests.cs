@@ -121,27 +121,25 @@ public sealed class Challenger2InvariantTests : IDisposable
     }
 
     [Fact]
-    public void Database_FileLocking_DefaultPoolingHoldsHandleOnWindows()
+    public void Database_FileLocking_NonPooledConnectionReleasesHandleImmediately()
     {
         var dbPath = Path.Combine(_tempDir, "lock_test.db");
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = AntigravityDatabase.OpenConnection(dbPath, write: true))
         {
-            conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT);";
             cmd.ExecuteNonQuery();
         }
 
-        // Read summaries
+        // Read summaries via AntigravityDatabase (Pooling=false)
         var summaries = AntigravityDatabase.ReadSummaries(dbPath);
         Assert.Empty(summaries);
 
-        // Attempt to delete the file immediately without clearing pools
-        // If Pooling=true (the default in Microsoft.Data.Sqlite), the OS handle remains open on Windows
+        // Attempt to delete the file immediately without clearing pools;
+        // AntigravityDatabase enforces Pooling=false so the OS handle is released immediately on Windows.
         var ex = Record.Exception(() => File.Delete(dbPath));
-        // On Windows with default connection pooling, file delete throws IOException
-        Assert.NotNull(ex);
-        Assert.IsAssignableFrom<IOException>(ex);
+        Assert.Null(ex);
+        Assert.False(File.Exists(dbPath));
     }
 
     [Fact]
@@ -176,7 +174,7 @@ public sealed class Challenger2InvariantTests : IDisposable
     public void Database_ReadSummaries_LegacySchemaWithLastModifiedTime()
     {
         var dbPath = Path.Combine(_tempDir, "legacy_summaries.db");
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = new SqliteConnection($"Data Source={dbPath};Pooling=false"))
         {
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -207,7 +205,7 @@ public sealed class Challenger2InvariantTests : IDisposable
     public void Database_ReadSteps_ChronologicalOrderingEnforced()
     {
         var dbPath = Path.Combine(_tempDir, "out_of_order_steps.db");
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = new SqliteConnection($"Data Source={dbPath};Pooling=false"))
         {
             conn.Open();
             using var cmd = conn.CreateCommand();
