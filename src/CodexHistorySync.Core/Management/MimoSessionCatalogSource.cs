@@ -16,33 +16,39 @@ internal sealed class MimoSessionCatalogSource(MimoPaths paths) : ILocalSessionC
     {
         ArgumentNullException.ThrowIfNull(limiter);
         cancellationToken.ThrowIfCancellationRequested();
-        MimoReadResult read;
+        SessionCatalogCandidate[] rows;
         try
         {
-            read = MimoSessionDatabase.ReadAll(paths);
+            var headers = MimoSessionDatabase.ReadCatalogHeaders(paths);
+            rows = headers
+                .Where(header => !header.IsSubagent && !header.IsLegacyGeneration)
+                .Select(header =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var title = Normalize(CellText(header.Session, "title"));
+                    var official = title is not null;
+                    if (title is null)
+                    {
+                        var snapshot = MimoSessionDatabase.ReadOne(paths, header.SessionId);
+                        if (snapshot is not null)
+                            title = Preview(ExtractFirstUserText(snapshot));
+                    }
+
+                    return new SessionCatalogCandidate(
+                        header.SessionId,
+                        paths.AnchorPath(header.SessionId),
+                        title ?? header.SessionId,
+                        Timestamp(header.LastActiveUnix),
+                        true,
+                        official ? ManagedTitleSource.Official
+                            : title is null ? ManagedTitleSource.SessionId : ManagedTitleSource.Fallback);
+                }).ToArray();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or
                                           Microsoft.Data.Sqlite.SqliteException)
         {
             throw new IOException("MiMo sessions could not be read.", exception);
         }
-
-        var rows = read.Snapshots
-            .Where(snapshot => !snapshot.IsSubagent && !snapshot.IsLegacyGeneration)
-            .Select(snapshot =>
-        {
-            var title = Normalize(CellText(snapshot.Session, "title"));
-            var official = title is not null;
-            title ??= Preview(ExtractFirstUserText(snapshot));
-            return new SessionCatalogCandidate(
-                snapshot.SessionId,
-                paths.AnchorPath(snapshot.SessionId),
-                title ?? snapshot.SessionId,
-                Timestamp(snapshot.LastActiveUnix),
-                true,
-                official ? ManagedTitleSource.Official
-                    : title is null ? ManagedTitleSource.SessionId : ManagedTitleSource.Fallback);
-        }).ToArray();
 
         var duplicates = rows.GroupBy(row => row.SessionId, StringComparer.Ordinal)
             .Where(group => group.Count() > 1)

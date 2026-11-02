@@ -269,4 +269,57 @@ public sealed class AntigravityPackagingChallengeTests : IDisposable
 
         Assert.Equal(expectedV2Hash, actualTargetHash);
     }
+
+    [Fact]
+    public void Stress_StreamingPackageAndHasher_MatchDtoByteForByteAcrossAllFeatures()
+    {
+        var sessionId = Guid.NewGuid().ToString("D").ToLowerInvariant();
+        var summaryRow = new AntigravitySummaryRow(
+            sessionId,
+            "parent-conv-123",
+            2,
+            "research-agent",
+            "Streaming Equivalence <>&+\"' Привет 🚀",
+            "COMPLETED",
+            new[] { "file:///C:/Repos/b", "file:///C:/Repos/a" },
+            DateTimeOffset.FromUnixTimeSeconds(1700000100),
+            DateTimeOffset.FromUnixTimeSeconds(1700000200));
+        AntigravityDatabase.WriteSummary(fixture.Paths.ConversationSummariesDbPath, summaryRow);
+
+        var allBytes = new byte[256];
+        for (var i = 0; i < 256; i++) allBytes[i] = (byte)i;
+        var largeBlob = new byte[150_000];
+        for (var i = 0; i < largeBlob.Length; i++) largeBlob[i] = (byte)((i * 31 + 7) & 0xFF);
+
+        var steps = new[]
+        {
+            new AntigravityStepRow(0, AntigravityProtobuf.StepTypeUserInput, 1, allBytes),
+            new AntigravityStepRow(1, AntigravityProtobuf.StepTypePlannerResponse, 2, Array.Empty<byte>()),
+            new AntigravityStepRow(2, AntigravityProtobuf.StepTypePlannerResponse, 3, largeBlob)
+        };
+        AntigravityDatabase.WriteSteps(
+            fixture.Paths.ConversationDatabasePath(sessionId),
+            "traj_" + sessionId,
+            sessionId,
+            steps);
+
+        File.WriteAllText(fixture.Paths.AnnotationPath(sessionId), "note: \"streaming\"\r\nsecond: 2\r\n");
+        var brainDir = fixture.Paths.BrainSessionDirectory(sessionId);
+        Directory.CreateDirectory(Path.Combine(brainDir, "nested"));
+        File.WriteAllText(fixture.Paths.TranscriptPath(sessionId), "{\"step\":0}\r\n{\"step\":1}\r\n");
+        File.WriteAllBytes(Path.Combine(brainDir, "empty.txt"), Array.Empty<byte>());
+        File.WriteAllText(Path.Combine(brainDir, "nested", "notes.md"), "Привет <>&+\"'\r\nLine 2\r\n");
+        File.WriteAllBytes(Path.Combine(brainDir, "nested", "raw.bin"), allBytes);
+
+        var dtoBytes = AntigravitySessionPackage.BuildFromLocalViaDtoForTest(fixture.Paths, sessionId);
+        var streamedBytes = AntigravitySessionPackage.BuildFromLocal(fixture.Paths, sessionId);
+        var preloadedSummary = AntigravityDatabase.ReadSummary(fixture.Paths.ConversationSummariesDbPath, sessionId);
+        var measured = AntigravitySessionPackage.TryHashAndMeasure(
+            fixture.Paths, sessionId, usePreloadedSummary: true, preloadedSummary: preloadedSummary);
+
+        Assert.Equal(dtoBytes, streamedBytes);
+        Assert.NotNull(measured);
+        Assert.Equal(dtoBytes.LongLength, measured!.Value.Length);
+        Assert.Equal(AntigravitySessionPackage.HashPackage(dtoBytes), measured.Value.Hash);
+    }
 }

@@ -87,7 +87,7 @@ public sealed class HermesSessionScanner
         Dictionary<string, string>? first;
         try
         {
-            first = Fingerprints(paths);
+            first = MeasurePass(paths).Fingerprints;
         }
         catch (Exception exception) when (IsReadFailure(exception))
         {
@@ -98,10 +98,10 @@ public sealed class HermesSessionScanner
         if (first.Count != 0)
             await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        Dictionary<string, string> second;
+        ScanPass secondPass;
         try
         {
-            second = Fingerprints(paths);
+            secondPass = MeasurePass(paths);
         }
         catch (Exception exception) when (IsReadFailure(exception))
         {
@@ -109,26 +109,16 @@ public sealed class HermesSessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
+        var second = secondPass.Fingerprints;
         var running = isHermesRunning();
         var cutoff = now().ToUnixTimeMilliseconds() / 1000d - activityWindow.TotalSeconds;
         var complete = true;
-        HermesReadResult read;
-        try
-        {
-            read = HermesSessionDatabase.ReadProfiles(paths);
-        }
-        catch (Exception exception) when (IsReadFailure(exception))
-        {
-            uncertain.Add(ObjectKind.HermesSession);
-            return new SessionScanResult(objects, uncertain, duplicates);
-        }
-
-        if (!read.Complete) complete = false;
         var byId = new Dictionary<LogicalObjectId, LocalObject>();
-        foreach (var snapshot in read.Snapshots)
+        foreach (var row in secondPass.Rows)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var logical = HermesSessionPackage.ToLogicalId(snapshot.Profile, snapshot.SessionId);
+            var snapshot = row.Snapshot;
+            var logical = row.LogicalId;
             if (!first.TryGetValue(logical, out var before) ||
                 !second.TryGetValue(logical, out var after) ||
                 !string.Equals(before, after, StringComparison.Ordinal))
@@ -143,19 +133,7 @@ public sealed class HermesSessionScanner
                 continue;
             }
 
-            byte[] package;
-            try
-            {
-                package = HermesSessionPackage.TryBuild(paths, snapshot.Profile, snapshot.SessionId)
-                    ?? throw new InvalidDataException("Hermes session disappeared while it was being read.");
-            }
-            catch (Exception exception) when (IsReadFailure(exception))
-            {
-                complete = false;
-                continue;
-            }
-
-            if (!string.Equals(HermesSessionPackage.HashPackage(package).Hex, after, StringComparison.Ordinal))
+            if (!string.Equals(row.Hash.Hex, after, StringComparison.Ordinal))
             {
                 complete = false;
                 continue;
@@ -165,8 +143,8 @@ public sealed class HermesSessionScanner
                 new LogicalObjectId(logical),
                 ObjectKind.HermesSession,
                 paths.AnchorPath(snapshot.Profile, snapshot.SessionId),
-                HermesSessionPackage.HashPackage(package),
-                package.LongLength,
+                row.Hash,
+                row.Length,
                 Timestamp(snapshot.LastActiveUnix));
             if (byId.TryAdd(item.Id, item)) objects.Add(item);
             else
@@ -182,21 +160,26 @@ public sealed class HermesSessionScanner
         return new SessionScanResult(objects, uncertain, duplicates);
     }
 
-    private static Dictionary<string, string> Fingerprints(HermesPaths paths)
+    private static ScanPass MeasurePass(HermesPaths paths)
     {
         var read = HermesSessionDatabase.ReadProfiles(paths);
         if (!read.Complete) throw new InvalidDataException("Hermes state database could not be read completely.");
-        var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
+        var rows = new List<MeasuredRow>(read.Snapshots.Count);
+        var fingerprints = new Dictionary<string, string>(read.Snapshots.Count, StringComparer.Ordinal);
         foreach (var snapshot in read.Snapshots)
         {
-            var package = HermesSessionPackage.TryBuild(paths, snapshot.Profile, snapshot.SessionId)
-                ?? throw new InvalidDataException("Hermes session disappeared while it was being read.");
-            fingerprints[HermesSessionPackage.ToLogicalId(snapshot.Profile, snapshot.SessionId)] =
-                HermesSessionPackage.HashPackage(package).Hex;
+            var logical = HermesSessionPackage.ToLogicalId(snapshot.Profile, snapshot.SessionId);
+            var package = HermesSessionPackage.Serialize(snapshot);
+            var hash = HermesSessionPackage.HashPackage(package);
+            rows.Add(new MeasuredRow(snapshot, logical, hash, package.LongLength));
+            fingerprints[logical] = hash.Hex;
         }
 
-        return fingerprints;
+        return new ScanPass(rows, fingerprints);
     }
+
+    private sealed record MeasuredRow(HermesSnapshot Snapshot, string LogicalId, ContentHash Hash, long Length);
+    private sealed record ScanPass(List<MeasuredRow> Rows, Dictionary<string, string> Fingerprints);
 
     private static DateTimeOffset Timestamp(double unixSeconds)
     {

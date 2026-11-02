@@ -4,6 +4,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using Microsoft.Data.Sqlite;
 
@@ -22,6 +23,12 @@ public static class MimoSessionPackage
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    private static readonly JsonWriterOptions WriterOptions = new()
+    {
+        Indented = false,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
@@ -52,9 +59,7 @@ public static class MimoSessionPackage
     }
 
     public static IReadOnlyList<(string SessionId, double LastActiveUnix)> ReadActivity(MimoPaths paths) =>
-        MimoSessionDatabase.ReadAll(paths).Snapshots
-            .Select(snapshot => (snapshot.SessionId, snapshot.LastActiveUnix))
-            .ToArray();
+        MimoSessionDatabase.ReadActivity(paths);
 
     public static byte[]? TryBuild(MimoPaths paths, string sessionId)
     {
@@ -128,14 +133,28 @@ public static class MimoSessionPackage
         MimoSessionDatabase.Delete(new MimoPaths(home), sessionId);
     }
 
-    private static byte[]? BuildFromAnchor(string anchorPath)
+    internal static byte[]? BuildFromAnchor(string anchorPath)
     {
         if (!MimoPaths.TryParseAnchor(anchorPath, out var home, out var sessionId))
             return null;
         return TryBuild(new MimoPaths(home), sessionId);
     }
 
-    private static byte[] Serialize(MimoSnapshot snapshot)
+    internal static (ContentHash Hash, long Length) HashAndMeasure(MimoSnapshot snapshot)
+    {
+        using var sink = new HashingCountingStream();
+        WriteSnapshotJson(sink, snapshot);
+        return sink.Complete();
+    }
+
+    internal static byte[] Serialize(MimoSnapshot snapshot)
+    {
+        using var memory = new MemoryStream();
+        WriteSnapshotJson(memory, snapshot);
+        return memory.ToArray();
+    }
+
+    internal static byte[] SerializeViaDtoForTest(MimoSnapshot snapshot)
     {
         var document = new PackageDto(
             SchemaVersion,
@@ -144,6 +163,109 @@ public static class MimoSessionPackage
             snapshot.Messages.Select(message => message.Select(CellDto.From).ToArray()).ToArray(),
             snapshot.Parts.Select(msgParts => msgParts.Select(part => part.Cells.Select(CellDto.From).ToArray()).ToArray()).ToArray());
         return JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
+    }
+
+    private static void WriteSnapshotJson(Stream destination, MimoSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+        using var writer = new Utf8JsonWriter(destination, WriterOptions);
+        writer.WriteStartObject();
+        writer.WriteNumber("v", SchemaVersion);
+        writer.WriteString("id", snapshot.SessionId);
+
+        writer.WriteStartArray("session");
+        foreach (var cell in snapshot.Session)
+        {
+            WriteCell(writer, cell);
+        }
+        writer.WriteEndArray();
+
+        writer.WriteStartArray("messages");
+        foreach (var message in snapshot.Messages)
+        {
+            writer.WriteStartArray();
+            foreach (var cell in message)
+            {
+                WriteCell(writer, cell);
+            }
+            writer.WriteEndArray();
+            if (writer.BytesPending >= 65_536)
+            {
+                writer.Flush();
+            }
+        }
+        writer.WriteEndArray();
+
+        writer.WriteStartArray("parts");
+        foreach (var msgParts in snapshot.Parts)
+        {
+            writer.WriteStartArray();
+            foreach (var part in msgParts)
+            {
+                writer.WriteStartArray();
+                foreach (var cell in part.Cells)
+                {
+                    WriteCell(writer, cell);
+                }
+                writer.WriteEndArray();
+                if (writer.BytesPending >= 65_536)
+                {
+                    writer.Flush();
+                }
+            }
+            writer.WriteEndArray();
+        }
+        writer.WriteEndArray();
+
+        writer.WriteEndObject();
+        writer.Flush();
+    }
+
+    private static void WriteCell(Utf8JsonWriter writer, MimoCell cell)
+    {
+        writer.WriteStartObject();
+        if (cell.Name is not null)
+        {
+            writer.WriteString("n", cell.Name);
+        }
+
+        switch (cell.Type)
+        {
+            case "integer":
+                writer.WriteString("t", "integer");
+                if (cell.Integer is { } integerValue)
+                {
+                    writer.WriteNumber("i", integerValue);
+                }
+                break;
+            case "real":
+                writer.WriteString("t", "real");
+                if (cell.Text is not null)
+                {
+                    writer.WriteString("s", cell.Text);
+                }
+                break;
+            case "text":
+                writer.WriteString("t", "text");
+                if (cell.Text is not null)
+                {
+                    writer.WriteString("s", cell.Text);
+                }
+                break;
+            case "blob":
+                writer.WriteString("t", "blob");
+                if (cell.BlobBase64 is not null)
+                {
+                    writer.WriteString("b", cell.BlobBase64);
+                }
+                break;
+            default:
+                throw new InvalidDataException("MiMo value type is unsupported.");
+        }
+
+        writer.WriteEndObject();
     }
 
     private static MimoSnapshot Parse(byte[] package)

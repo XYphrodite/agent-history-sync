@@ -246,8 +246,7 @@ internal sealed class WindowsManagedSessionActiveState : IManagedSessionActiveSt
 
     private IReadOnlySet<string> ReadMimoActiveIds()
     {
-        if (mimoPaths is null || !isAnyNamedProcessRunning("mimo")) return EmptyIds;
-        // Also check mimocode process name
+        if (mimoPaths is null) return EmptyIds;
         if (!isAnyNamedProcessRunning("mimo") && !isAnyNamedProcessRunning("mimocode")) return EmptyIds;
         var clock = DateTime.SpecifyKind(utcNow(), DateTimeKind.Utc);
         var cutoff = new DateTimeOffset(clock).ToUnixTimeMilliseconds() / 1000d -

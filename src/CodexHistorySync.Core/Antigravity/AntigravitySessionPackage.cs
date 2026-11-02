@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodexHistorySync.Core.IO;
 using CodexHistorySync.Core.Model;
 using Microsoft.Data.Sqlite;
 
@@ -26,6 +27,12 @@ public static class AntigravitySessionPackage
         WriteIndented = false,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         PropertyNameCaseInsensitive = true
+    };
+
+    private static readonly JsonWriterOptions WriterOptions = new()
+    {
+        Indented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     public static bool IsAntigravityLogicalId(string value) => TrySplitLogicalId(value, out _, out _);
@@ -62,6 +69,202 @@ public static class AntigravitySessionPackage
     }
 
     public static byte[] BuildFromLocal(AntigravityPaths paths, string sessionId)
+    {
+        using var memory = new MemoryStream();
+        WriteFromLocal(memory, paths, sessionId);
+        return memory.ToArray();
+    }
+
+    internal static (ContentHash Hash, long Length)? TryHashAndMeasure(
+        AntigravityPaths paths,
+        string sessionId,
+        bool usePreloadedSummary = false,
+        AntigravitySummaryRow? preloadedSummary = null)
+    {
+        try
+        {
+            using var sink = new HashingCountingStream();
+            WriteFromLocal(sink, paths, sessionId, usePreloadedSummary, preloadedSummary);
+            return sink.Complete();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException
+                                              or SqliteException or ArgumentException or DecoderFallbackException)
+        {
+            return null;
+        }
+    }
+
+    internal static void WriteFromLocal(
+        Stream destination,
+        AntigravityPaths paths,
+        string sessionId,
+        bool usePreloadedSummary = false,
+        AntigravitySummaryRow? preloadedSummary = null)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentNullException.ThrowIfNull(paths);
+        if (!AntigravityPaths.IsSessionId(sessionId))
+            throw new ArgumentException("Antigravity session id is invalid.", nameof(sessionId));
+
+        var normalizedId = sessionId.ToLowerInvariant();
+        AntigravitySummaryRow? summary = null;
+        if (usePreloadedSummary)
+        {
+            summary = preloadedSummary;
+        }
+        else if (File.Exists(paths.ConversationSummariesDbPath))
+        {
+            var summaries = AntigravityDatabase.ReadSummaries(paths.ConversationSummariesDbPath);
+            summary = summaries.FirstOrDefault(s => string.Equals(s.ConversationId, normalizedId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var convDb = paths.ConversationDatabasePath(normalizedId);
+        var convDbExists = File.Exists(convDb);
+
+        if (summary is null && !convDbExists)
+            throw new InvalidDataException($"Antigravity session '{normalizedId}' was not found.");
+
+        var trajectoryMeta = convDbExists
+            ? AntigravityDatabase.ReadTrajectoryMeta(convDb)
+            : null;
+
+        using var writer = new Utf8JsonWriter(destination, WriterOptions);
+        writer.WriteStartObject();
+        writer.WriteNumber("v", SchemaVersion);
+        writer.WriteString("id", normalizedId);
+
+        if (summary is not null)
+        {
+            var uris = (summary.WorkspaceUris ?? Array.Empty<string>())
+                .OrderBy(u => u, StringComparer.Ordinal)
+                .ToArray();
+
+            writer.WriteStartObject("summary");
+            writer.WriteString("ConversationId", normalizedId);
+            if (summary.ParentConversationId is not null)
+                writer.WriteString("ParentConversationId", summary.ParentConversationId);
+            writer.WriteNumber("NestingDepth", summary.NestingDepth);
+            if (summary.AgentName is not null)
+                writer.WriteString("AgentName", summary.AgentName);
+            if (summary.Title is not null)
+                writer.WriteString("Title", summary.Title);
+            if (summary.Status is not null)
+                writer.WriteString("Status", summary.Status);
+            writer.WriteStartArray("WorkspaceUris");
+            foreach (var uri in uris)
+            {
+                if (uri is null) writer.WriteNullValue();
+                else writer.WriteStringValue(uri);
+            }
+            writer.WriteEndArray();
+            writer.WriteNumber("CreatedAtUnix", summary.CreatedAt.ToUnixTimeSeconds());
+            writer.WriteNumber("UpdatedAtUnix", summary.UpdatedAt.ToUnixTimeSeconds());
+            writer.WriteEndObject();
+        }
+
+        if (trajectoryMeta is not null)
+        {
+            writer.WriteStartObject("trajectory");
+            writer.WriteString("ConversationId", normalizedId);
+            if (trajectoryMeta.TrajectoryId is not null)
+                writer.WriteString("TrajectoryId", trajectoryMeta.TrajectoryId);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteStartArray("steps");
+        if (convDbExists)
+        {
+            AntigravityDatabase.StreamSteps(convDb, (idx, stepType, status, payload) =>
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("Index", idx);
+                writer.WriteNumber("StepType", stepType);
+                writer.WriteNumber("Status", status);
+                if (payload is { Length: > 0 })
+                {
+                    writer.WriteBase64String("PayloadBase64", payload);
+                }
+                writer.WriteEndObject();
+                if (writer.BytesPending >= 65_536)
+                {
+                    writer.Flush();
+                }
+            });
+        }
+        writer.WriteEndArray();
+
+        var annotationPath = paths.AnnotationPath(normalizedId);
+        if (File.Exists(annotationPath))
+        {
+            var annotation = File.ReadAllText(annotationPath).Replace("\r\n", "\n");
+            writer.WriteString("annotation", annotation);
+            if (writer.BytesPending >= 65_536)
+            {
+                writer.Flush();
+            }
+        }
+
+        var brainDir = paths.BrainSessionDirectory(normalizedId);
+        var brainDirExists = Directory.Exists(brainDir);
+        string? canonicalTranscriptPath = null;
+        if (brainDirExists)
+        {
+            var transcriptPath = paths.TranscriptPath(normalizedId);
+            canonicalTranscriptPath = Path.GetFullPath(transcriptPath);
+            if (File.Exists(transcriptPath))
+            {
+                var transcript = File.ReadAllText(transcriptPath).Replace("\r\n", "\n");
+                writer.WriteString("transcript", transcript);
+                if (writer.BytesPending >= 65_536)
+                {
+                    writer.Flush();
+                }
+            }
+        }
+
+        writer.WriteStartArray("artifacts");
+        if (brainDirExists)
+        {
+            var artifactFiles = new List<(string RelativePath, string FullPath)>();
+            foreach (var file in Directory.EnumerateFiles(brainDir, "*", SearchOption.AllDirectories))
+            {
+                if (string.Equals(Path.GetFullPath(file), canonicalTranscriptPath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var relPath = Path.GetRelativePath(brainDir, file).Replace('\\', '/');
+                artifactFiles.Add((relPath, file));
+            }
+
+            artifactFiles.Sort((a, b) => string.CompareOrdinal(a.RelativePath, b.RelativePath));
+
+            foreach (var (relPath, fullPath) in artifactFiles)
+            {
+                var bytes = File.ReadAllBytes(fullPath);
+                writer.WriteStartObject();
+                writer.WriteString("RelativePath", relPath);
+                if (IsTextFile(bytes))
+                {
+                    var text = Encoding.UTF8.GetString(bytes).Replace("\r\n", "\n");
+                    writer.WriteString("ContentText", text);
+                }
+                else
+                {
+                    writer.WriteBase64String("ContentBase64", bytes);
+                }
+                writer.WriteEndObject();
+                if (writer.BytesPending >= 65_536)
+                {
+                    writer.Flush();
+                }
+            }
+        }
+        writer.WriteEndArray();
+
+        writer.WriteEndObject();
+        writer.Flush();
+    }
+
+    internal static byte[] BuildFromLocalViaDtoForTest(AntigravityPaths paths, string sessionId)
     {
         ArgumentNullException.ThrowIfNull(paths);
         if (!AntigravityPaths.IsSessionId(sessionId))

@@ -133,14 +133,14 @@ public static class HermesSessionPackage
         HermesSessionDatabase.Delete(new HermesPaths(home), profile, sessionId);
     }
 
-    private static byte[]? BuildFromAnchor(string anchorPath)
+    internal static byte[]? BuildFromAnchor(string anchorPath)
     {
         if (!HermesPaths.TryParseAnchor(anchorPath, out var home, out var profile, out var sessionId))
             return null;
         return TryBuild(new HermesPaths(home), profile, sessionId);
     }
 
-    private static byte[] Serialize(HermesSnapshot snapshot)
+    internal static byte[] Serialize(HermesSnapshot snapshot)
     {
         var document = new PackageDto(
             SchemaVersion,

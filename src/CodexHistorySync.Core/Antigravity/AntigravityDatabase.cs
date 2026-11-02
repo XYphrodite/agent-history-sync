@@ -381,6 +381,46 @@ public static class AntigravityDatabase
         }
     }
 
+    public static void StreamSteps(string dbPath, Action<int, int, int, byte[]?> onStep)
+    {
+        ArgumentNullException.ThrowIfNull(onStep);
+        if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var fileInfo = new FileInfo(dbPath);
+            if (fileInfo.Length == 0)
+            {
+                return;
+            }
+
+            using var connection = OpenConnection(dbPath, write: false);
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT idx, step_type, status, step_payload
+                FROM steps
+                ORDER BY idx ASC;
+                """;
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var idx = reader.GetInt32(0);
+                var stepType = reader.GetInt32(1);
+                var status = reader.GetInt32(2);
+                var payload = reader.IsDBNull(3) ? null : (byte[])reader[3];
+                onStep(idx, stepType, status, payload);
+            }
+        }
+        catch (SqliteException)
+        {
+        }
+    }
+
     public static void WriteSteps(string dbPath, string trajectoryId, string conversationId, IReadOnlyList<AntigravityStepRow> steps)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);

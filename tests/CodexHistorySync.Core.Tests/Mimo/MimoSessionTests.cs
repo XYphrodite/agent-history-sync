@@ -260,6 +260,124 @@ public sealed class MimoSessionTests : IDisposable
         Assert.False(MimoPaths.IsMimoDatabaseFile("other.db"));
     }
 
+    [Fact]
+    public void Package_StreamingSerializerAndHasher_MatchDtoByteForByteAcrossAllCellTypes()
+    {
+        var allBytes = new byte[256];
+        for (var i = 0; i < 256; i++) allBytes[i] = (byte)i;
+        var blobB64 = Convert.ToBase64String(allBytes);
+        var largeText = new string('Ж', 40_000) + " 🚀 <>&+\"'\\ \n\t\u0001";
+
+        var sessionCells = new MimoCell[]
+        {
+            new("blob_col", "blob", null, null, blobB64),
+            new("empty_text", "text", "", null, null),
+            new("id", "text", SessionId, null, null),
+            new("max_int", "integer", null, long.MaxValue, null),
+            new("min_int", "integer", null, long.MinValue, null),
+            new("project_id", "text", "prj_123", null, null),
+            new("real_sci", "real", "-1.25e-12", null, null),
+            new("time_created", "integer", null, 0, null),
+            new("unicode_title", "text", largeText, null, null)
+        };
+
+        var msg1 = new MimoCell[]
+        {
+            new("data", "text", "{\"role\":\"user\"}", null, null),
+            new("id", "text", "msg_0001", null, null),
+            new("score", "real", "3.141592653589793", null, null),
+            new("session_id", "text", SessionId, null, null),
+            new("time_created", "integer", null, 1741166123000, null)
+        };
+
+        var msg2 = new MimoCell[]
+        {
+            new("id", "text", "msg_0002", null, null),
+            new("session_id", "text", SessionId, null, null),
+            new("time_created", "integer", null, 1741166124000, null)
+        };
+
+        var part1 = new MimoPart(
+        [
+            new("data", "text", largeText, null, null),
+            new("id", "text", "prt_0001", null, null),
+            new("message_id", "text", "msg_0001", null, null),
+            new("raw", "blob", null, null, blobB64),
+            new("session_id", "text", SessionId, null, null),
+            new("time_created", "integer", null, 1741166123000, null)
+        ]);
+
+        var snapshot = new MimoSnapshot(
+            SessionId,
+            sessionCells,
+            [msg1, msg2],
+            [[part1], []],
+            1741166124.0);
+
+        var expectedBytes = MimoSessionPackage.SerializeViaDtoForTest(snapshot);
+        var streamedBytes = MimoSessionPackage.Serialize(snapshot);
+        var (streamedHash, streamedLength) = MimoSessionPackage.HashAndMeasure(snapshot);
+
+        Assert.Equal(expectedBytes, streamedBytes);
+        Assert.Equal(expectedBytes.LongLength, streamedLength);
+        Assert.Equal(MimoSessionPackage.HashPackage(expectedBytes), streamedHash);
+    }
+
+    [Fact]
+    public async Task Scanner_DefersOnlyMutatedSession_WhenDatabaseChangesDuringStabilityWindow()
+    {
+        var home = Home("scan-concurrent-mutation");
+        const string stableId = "ses_stable000000000000001";
+        const string mutatingId = "ses_mutating0000000000001";
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_s1"], extraNullColumn: false, sessionId: stableId, title: "Stable");
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_m1"], extraNullColumn: false, sessionId: mutatingId, title: "Initial");
+
+        var scanner = new MimoSessionScanner(
+            async _ =>
+            {
+                using var connection = Open(home.PrimaryDatabasePath);
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = "UPDATE session SET title = 'Mutated mid-scan' WHERE id = @id";
+                cmd.Parameters.AddWithValue("@id", mutatingId);
+                cmd.ExecuteNonQuery();
+                await Task.Yield();
+            },
+            () => false,
+            TimeSpan.Zero);
+
+        var result = await scanner.ScanDetailedAsync(home, CancellationToken.None);
+
+        var kept = Assert.Single(result.Objects);
+        Assert.Equal("mi-" + stableId, kept.Id.Value);
+        Assert.False(result.IsAbsenceConfirmed(ObjectKind.MimoSession));
+        Assert.Contains(ObjectKind.MimoSession, result.UncertainKinds);
+    }
+
+    [Fact]
+    public async Task Catalog_ExtractsFallbackTitleOnlyForUntitledSessionsAndReadsFastActivity()
+    {
+        var home = Home("catalog-fallback");
+        const string titledId = "ses_titled000000000000001";
+        const string untitledId = "ses_untitled0000000000001";
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_t1"], extraNullColumn: false, sessionId: titledId, title: "Explicit Title");
+        WriteSession(home.PrimaryDatabasePath, messageIds: ["msg_u1"], extraNullColumn: false, sessionId: untitledId, title: "   ");
+
+        using var limiter = new SessionCatalogReadLimiter(2);
+        var rows = (await new MimoSessionCatalogSource(home).ScanAsync(limiter, CancellationToken.None))
+            .ToDictionary(r => r.SessionId, StringComparer.Ordinal);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("Explicit Title", rows[titledId].Title);
+        Assert.Equal(ManagedTitleSource.Official, rows[titledId].TitleSource);
+        Assert.Equal("hello mimo", rows[untitledId].Title);
+        Assert.Equal(ManagedTitleSource.Fallback, rows[untitledId].TitleSource);
+
+        var activity = MimoSessionPackage.ReadActivity(home)
+            .ToDictionary(a => a.SessionId, a => a.LastActiveUnix, StringComparer.Ordinal);
+        Assert.Equal(1741166123.0, activity[titledId]);
+        Assert.Equal(1741166123.0, activity[untitledId]);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);

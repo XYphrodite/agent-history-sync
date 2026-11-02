@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Core.Codex;
@@ -66,53 +67,51 @@ public sealed class MimoSessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
-        Dictionary<string, string>? first;
+        var stamp0 = CaptureDbStamp(paths);
+        ScanPass pass1;
         try
         {
-            first = Fingerprints(paths);
+            pass1 = RunScanPass(paths, cancellationToken);
         }
         catch (Exception exception) when (IsReadFailure(exception))
         {
             uncertain.Add(ObjectKind.MimoSession);
             return new SessionScanResult(objects, uncertain, duplicates);
         }
+        var stamp1 = CaptureDbStamp(paths);
 
-        if (first.Count != 0)
+        if (pass1.Fingerprints.Count != 0)
             await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        Dictionary<string, string> second;
-        try
+        var stamp2 = CaptureDbStamp(paths);
+        ScanPass pass2;
+        if (stamp0.CanShortCircuit && stamp0.Equals(stamp1) && stamp1.Equals(stamp2))
         {
-            second = Fingerprints(paths);
+            pass2 = pass1;
         }
-        catch (Exception exception) when (IsReadFailure(exception))
+        else
         {
-            uncertain.Add(ObjectKind.MimoSession);
-            return new SessionScanResult(objects, uncertain, duplicates);
+            try
+            {
+                pass2 = RunScanPass(paths, cancellationToken);
+            }
+            catch (Exception exception) when (IsReadFailure(exception))
+            {
+                uncertain.Add(ObjectKind.MimoSession);
+                return new SessionScanResult(objects, uncertain, duplicates);
+            }
         }
 
         var running = isMimoRunning();
         var cutoff = now().ToUnixTimeMilliseconds() / 1000d - activityWindow.TotalSeconds;
         var complete = true;
         var ignored = new HashSet<LogicalObjectId>();
-        MimoReadResult read;
-        try
-        {
-            read = MimoSessionDatabase.ReadAll(paths);
-        }
-        catch (Exception exception) when (IsReadFailure(exception))
-        {
-            uncertain.Add(ObjectKind.MimoSession);
-            return new SessionScanResult(objects, uncertain, duplicates);
-        }
-
-        if (!read.Complete) complete = false;
         var byId = new Dictionary<LogicalObjectId, LocalObject>();
-        foreach (var snapshot in read.Snapshots)
+        foreach (var row in pass2.Rows)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var logical = MimoSessionPackage.ToLogicalId(snapshot.SessionId);
-            if (snapshot.IsSubagent)
+            var logical = MimoSessionPackage.ToLogicalId(row.SessionId);
+            if (row.IsSubagent)
             {
                 // A child session for an internal agent run is machine-local noise the manager
                 // already hides. Ignore it rather than drop it so its absence never reads as a
@@ -121,33 +120,21 @@ public sealed class MimoSessionScanner
                 continue;
             }
 
-            if (!first.TryGetValue(logical, out var before) ||
-                !second.TryGetValue(logical, out var after) ||
+            if (!pass1.Fingerprints.TryGetValue(logical, out var before) ||
+                !pass2.Fingerprints.TryGetValue(logical, out var after) ||
                 !string.Equals(before, after, StringComparison.Ordinal))
             {
                 complete = false;
                 continue;
             }
 
-            if (running && snapshot.LastActiveUnix >= cutoff)
+            if (running && row.LastActiveUnix >= cutoff)
             {
                 complete = false;
                 continue;
             }
 
-            byte[] package;
-            try
-            {
-                package = MimoSessionPackage.TryBuild(paths, snapshot.SessionId)
-                    ?? throw new InvalidDataException("MiMo session disappeared while it was being read.");
-            }
-            catch (Exception exception) when (IsReadFailure(exception))
-            {
-                complete = false;
-                continue;
-            }
-
-            if (!string.Equals(MimoSessionPackage.HashPackage(package).Hex, after, StringComparison.Ordinal))
+            if (!string.Equals(row.Hash.Hex, after, StringComparison.Ordinal))
             {
                 complete = false;
                 continue;
@@ -156,10 +143,10 @@ public sealed class MimoSessionScanner
             var item = new LocalObject(
                 new LogicalObjectId(logical),
                 ObjectKind.MimoSession,
-                paths.AnchorPath(snapshot.SessionId),
-                MimoSessionPackage.HashPackage(package),
-                package.LongLength,
-                Timestamp(snapshot.LastActiveUnix));
+                paths.AnchorPath(row.SessionId),
+                row.Hash,
+                row.Length,
+                Timestamp(row.LastActiveUnix));
             if (byId.TryAdd(item.Id, item)) objects.Add(item);
             else
             {
@@ -169,26 +156,120 @@ public sealed class MimoSessionScanner
             }
         }
 
-        if (first.Count != second.Count || first.Keys.Any(id => !second.ContainsKey(id))) complete = false;
+        if (pass1.Fingerprints.Count != pass2.Fingerprints.Count ||
+            pass1.Fingerprints.Keys.Any(id => !pass2.Fingerprints.ContainsKey(id)))
+        {
+            complete = false;
+        }
         if (!complete) uncertain.Add(ObjectKind.MimoSession);
         return new SessionScanResult(objects, uncertain, duplicates) { IgnoredIds = ignored };
     }
 
-    private static Dictionary<string, string> Fingerprints(MimoPaths paths)
+    private static ScanPass RunScanPass(MimoPaths paths, CancellationToken cancellationToken)
     {
-        var read = MimoSessionDatabase.ReadAll(paths);
-        if (!read.Complete) throw new InvalidDataException("MiMo state database could not be read completely.");
+        var rows = new List<MimoScannedSession>();
         var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var snapshot in read.Snapshots)
+        var complete = MimoSessionDatabase.ScanSessions(paths, row =>
         {
-            if (snapshot.IsSubagent) continue;
-            var package = MimoSessionPackage.TryBuild(paths, snapshot.SessionId)
-                ?? throw new InvalidDataException("MiMo session disappeared while it was being read.");
-            fingerprints[MimoSessionPackage.ToLogicalId(snapshot.SessionId)] =
-                MimoSessionPackage.HashPackage(package).Hex;
+            rows.Add(row);
+            if (!row.IsSubagent)
+            {
+                fingerprints[MimoSessionPackage.ToLogicalId(row.SessionId)] = row.Hash.Hex;
+            }
+        }, cancellationToken);
+
+        if (!complete)
+            throw new InvalidDataException("MiMo state database could not be read completely.");
+
+        return new ScanPass(rows, fingerprints);
+    }
+
+    private static DbStamp CaptureDbStamp(MimoPaths paths)
+    {
+        const long maxWalBytesForShortCircuit = 64L * 1024 * 1024;
+        try
+        {
+            var dbs = paths.ListDatabasePaths();
+            if (dbs.Count == 0 && File.Exists(paths.PrimaryDatabasePath))
+                dbs = [paths.PrimaryDatabasePath];
+
+            var entries = new DbFileStamp[dbs.Count];
+            Span<byte> header = stackalloc byte[100];
+            for (var i = 0; i < dbs.Count; i++)
+            {
+                var db = dbs[i];
+                if (!File.Exists(db))
+                    return DbStamp.Fallback;
+                if (File.Exists(db + "-journal"))
+                    return DbStamp.Fallback;
+
+                var dbInfo = new FileInfo(db);
+                string headerHash;
+                using (var dbStream = new FileStream(db, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    var read = dbStream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false);
+                    headerHash = Convert.ToHexStringLower(SHA256.HashData(header[..read]));
+                }
+
+                var walPath = db + "-wal";
+                var walExists = File.Exists(walPath);
+                long walLength = 0;
+                var walHash = string.Empty;
+                if (walExists)
+                {
+                    var walInfo = new FileInfo(walPath);
+                    walLength = walInfo.Length;
+                    if (walLength > maxWalBytesForShortCircuit)
+                        return DbStamp.Fallback;
+                    using var walStream = new FileStream(walPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    walHash = Convert.ToHexStringLower(SHA256.HashData(walStream));
+                }
+
+                entries[i] = new DbFileStamp(
+                    db,
+                    dbInfo.Length,
+                    dbInfo.LastWriteTimeUtc.Ticks,
+                    headerHash,
+                    walExists,
+                    walLength,
+                    walHash);
+            }
+
+            return new DbStamp(true, entries);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return DbStamp.Fallback;
+        }
+    }
+
+    private sealed record ScanPass(
+        List<MimoScannedSession> Rows,
+        Dictionary<string, string> Fingerprints);
+
+    private readonly record struct DbFileStamp(
+        string Path,
+        long Length,
+        long LastWriteTicks,
+        string HeaderHash,
+        bool WalExists,
+        long WalLength,
+        string WalHash);
+
+    private readonly struct DbStamp(bool canShortCircuit, DbFileStamp[] entries) : IEquatable<DbStamp>
+    {
+        public static DbStamp Fallback => new(false, []);
+        public bool CanShortCircuit { get; } = canShortCircuit;
+        private DbFileStamp[] Entries { get; } = entries;
+
+        public bool Equals(DbStamp other)
+        {
+            if (!CanShortCircuit || !other.CanShortCircuit) return false;
+            return Entries.AsSpan().SequenceEqual(other.Entries);
         }
 
-        return fingerprints;
+        public override bool Equals(object? obj) => obj is DbStamp other && Equals(other);
+        public override int GetHashCode() => HashCode.Combine(CanShortCircuit, Entries?.Length ?? 0);
     }
 
     private static DateTimeOffset Timestamp(double unixSeconds)

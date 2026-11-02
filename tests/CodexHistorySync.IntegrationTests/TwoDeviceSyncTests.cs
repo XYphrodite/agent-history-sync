@@ -6,12 +6,15 @@ using CodexHistorySync.Core.Annotations;
 using CodexHistorySync.Core.Claude;
 using CodexHistorySync.Core.Codex;
 using CodexHistorySync.Core.Crypto;
+using CodexHistorySync.Core.Hermes;
 using CodexHistorySync.Core.Kimi;
 using CodexHistorySync.Core.Management;
+using CodexHistorySync.Core.Mimo;
 using CodexHistorySync.Core.Model;
 using CodexHistorySync.Core.State;
 using CodexHistorySync.Core.Sync;
 using CodexHistorySync.Git;
+using Microsoft.Data.Sqlite;
 
 namespace CodexHistorySync.IntegrationTests;
 
@@ -263,7 +266,8 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var device = CreateDevice("without-agents", remote, key, withClaudeHome: false, withKimiHome: false);
         var preview = await device.Engine.PreviewAsync(SyncMode.Bidirectional, CancellationToken.None);
         foreach (var kind in new[] { ObjectKind.GrokSession, ObjectKind.ClaudeSession, ObjectKind.ContinueSession,
-            ObjectKind.KimiSession, ObjectKind.MuseSession, ObjectKind.HermesSession })
+            ObjectKind.KimiSession, ObjectKind.MuseSession, ObjectKind.HermesSession, ObjectKind.MimoSession,
+            ObjectKind.AntigravitySession })
             Assert.Contains(kind, preview.UncertainKinds);
         Assert.DoesNotContain(ObjectKind.ActiveSession, preview.UncertainKinds);
     }
@@ -437,13 +441,85 @@ public sealed class TwoDeviceSyncTests : IDisposable
                 StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task MimoSessions_SynchronizeAndTombstoneAcrossTwoDevicesWithoutRemotePlaintext()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key, withMimoHome: true);
+        var second = CreateDevice("second", remote, key, withMimoHome: true);
+        const string sessionId = "ses_ffe5ec4f464d2ffebPXcnc02Za";
+        const string secretMarker = "mimo turn never stored remotely in plaintext";
+
+        WriteMimoSession(first.MimoPaths.PrimaryDatabasePath, sessionId, secretMarker);
+        var firstUpload = await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, firstUpload.Uploaded);
+
+        var secondDownload = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, secondDownload.Downloaded);
+        Assert.DoesNotContain(secretMarker, ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
+
+        var sourcePkg = MimoSessionPackage.TryBuild(first.MimoPaths, sessionId);
+        var targetPkg = MimoSessionPackage.TryBuild(second.MimoPaths, sessionId);
+        Assert.NotNull(sourcePkg);
+        Assert.NotNull(targetPkg);
+        Assert.Equal(MimoSessionPackage.HashPackage(sourcePkg!), MimoSessionPackage.HashPackage(targetPkg!));
+
+        // Delete on first device and verify tombstone removes it on second device
+        MimoSessionPackage.DeleteAnchor(first.MimoPaths.AnchorPath(sessionId));
+        var tombstoneUpload = await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, tombstoneUpload.Uploaded);
+
+        var tombstoneApply = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, tombstoneApply.Deleted);
+        Assert.Null(MimoSessionPackage.TryBuild(second.MimoPaths, sessionId));
+    }
+
+    [Fact]
+    public async Task HermesSessions_SynchronizeAndTombstoneAcrossTwoDevicesWithoutRemotePlaintext()
+    {
+        Directory.CreateDirectory(_root);
+        var remote = Path.Combine(_root, "remote.git");
+        await GitAsync(_root, "init", "--bare", "--initial-branch=main", remote);
+        var key = RandomNumberGenerator.GetBytes(RepositoryCrypto.MasterKeySize);
+        var first = CreateDevice("first", remote, key, withHermesHome: true);
+        var second = CreateDevice("second", remote, key, withHermesHome: true);
+        const string sessionId = "20261102_221500_a1b2c3d4";
+        const string secretMarker = "hermes turn never stored remotely in plaintext";
+
+        WriteHermesSession(first.HermesPaths.DatabasePath(HermesPaths.DefaultProfileName), sessionId, secretMarker);
+        var firstUpload = await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, firstUpload.Uploaded);
+
+        var secondDownload = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, secondDownload.Downloaded);
+        Assert.DoesNotContain(secretMarker, ReadAllRemoteBytesAsText(remote), StringComparison.Ordinal);
+
+        var sourcePkg = HermesSessionPackage.TryBuild(first.HermesPaths, HermesPaths.DefaultProfileName, sessionId);
+        var targetPkg = HermesSessionPackage.TryBuild(second.HermesPaths, HermesPaths.DefaultProfileName, sessionId);
+        Assert.NotNull(sourcePkg);
+        Assert.NotNull(targetPkg);
+        Assert.Equal(HermesSessionPackage.HashPackage(sourcePkg!), HermesSessionPackage.HashPackage(targetPkg!));
+
+        // Delete on first device and verify tombstone removes it on second device
+        HermesSessionPackage.DeleteAnchor(first.HermesPaths.AnchorPath(HermesPaths.DefaultProfileName, sessionId));
+        var tombstoneUpload = await first.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, tombstoneUpload.Uploaded);
+
+        var tombstoneApply = await second.Engine.SynchronizeAsync(SyncMode.Bidirectional, CancellationToken.None);
+        Assert.Equal(1, tombstoneApply.Deleted);
+        Assert.Null(HermesSessionPackage.TryBuild(second.HermesPaths, HermesPaths.DefaultProfileName, sessionId));
+    }
+
     /// <param name="withClaudeHome">
     /// False models a machine where Claude Code was never installed: the resolver finds no
     /// <c>projects</c> directory, so the engine is handed no Claude paths at all. The device
     /// still carries the paths it would have had, so a test can assert nothing was written there.
     /// </param>
     private Device CreateDevice(string name, string remote, byte[] key, bool withClaudeHome = true,
-        bool withKimiHome = true)
+        bool withKimiHome = true, bool withHermesHome = false, bool withMimoHome = false)
     {
         var home = Path.Combine(_root, name, "codex");
         Directory.CreateDirectory(home);
@@ -459,15 +535,25 @@ public sealed class TwoDeviceSyncTests : IDisposable
         var kimiPaths = new KimiPaths(kimiHome, Path.Combine(kimiHome, "sessions"));
         var configuredKimiPaths = withKimiHome ? kimiPaths : null;
         if (withKimiHome) Directory.CreateDirectory(kimiPaths.Sessions);
+        var hermesHome = Path.Combine(_root, name, "hermes");
+        var hermesPaths = new HermesPaths(hermesHome);
+        var configuredHermesPaths = withHermesHome ? hermesPaths : null;
+        if (withHermesHome) Directory.CreateDirectory(hermesHome);
+        var mimoHome = Path.Combine(_root, name, "mimocode");
+        var mimoPaths = new MimoPaths(mimoHome);
+        var configuredMimoPaths = withMimoHome ? mimoPaths : null;
+        if (withMimoHome) Directory.CreateDirectory(mimoHome);
         var annotations = new SessionAnnotationStore(local);
         var conflicts = new ConflictStore("repository", local, paths);
         var backups = new BackupStore("repository", local, paths, claudePaths: configuredClaudePaths,
-            annotationsDirectory: annotations.Directory, kimiPaths: configuredKimiPaths);
+            annotationsDirectory: annotations.Directory, kimiPaths: configuredKimiPaths,
+            hermesPaths: configuredHermesPaths, mimoPaths: configuredMimoPaths);
         var engine = new SyncEngine(
             "repository", name, paths, key,
             new SessionScanner(TimeSpan.Zero), new RepositoryCrypto(), new LocalStateStore(local),
             new CodexHistoryWriter(paths, backups, new StoppedCodexDetector(), claudePaths: configuredClaudePaths,
-                annotationsDirectory: annotations.Directory, kimiPaths: configuredKimiPaths),
+                annotationsDirectory: annotations.Directory, kimiPaths: configuredKimiPaths,
+                hermesPaths: configuredHermesPaths, mimoPaths: configuredMimoPaths),
             conflicts,
             new GitStorageProvider("repository", remote, GitRemoteKind.Local, providerRoot),
             Path.Combine(local, "staging"),
@@ -480,8 +566,16 @@ public sealed class TwoDeviceSyncTests : IDisposable
             kimiPaths: configuredKimiPaths,
             kimiScanner: withKimiHome
                 ? new KimiSessionScanner(_ => Task.CompletedTask, isKimiRunning: () => false)
+                : null,
+            hermesPaths: configuredHermesPaths,
+            hermesScanner: withHermesHome
+                ? new HermesSessionScanner(_ => Task.CompletedTask, isHermesRunning: () => false, activityWindow: TimeSpan.Zero)
+                : null,
+            mimoPaths: configuredMimoPaths,
+            mimoScanner: withMimoHome
+                ? new MimoSessionScanner(_ => Task.CompletedTask, isMimoRunning: () => false, activityWindow: TimeSpan.Zero)
                 : null);
-        return new Device(paths, claudePaths, kimiPaths, providerRoot, engine, annotations, conflicts);
+        return new Device(paths, claudePaths, kimiPaths, hermesPaths, mimoPaths, providerRoot, engine, annotations, conflicts);
     }
 
     private static async Task WriteSessionAsync(string directory, string id, string text)
@@ -538,6 +632,88 @@ public sealed class TwoDeviceSyncTests : IDisposable
         return Path.Combine(directory, KimiSessionPackage.StateFileName);
     }
 
+    private static void WriteMimoSession(string database, string sessionId, string text)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = database,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                title TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT
+            );
+            CREATE TABLE IF NOT EXISTS part (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT
+            );
+            INSERT OR REPLACE INTO session (id, project_id, directory, title, time_created, time_updated)
+            VALUES (@sid, 'global', '/work/mimo', 'MiMo Sync Test', 1741166123000, 1741166124000);
+            INSERT OR REPLACE INTO message (id, session_id, time_created, data)
+            VALUES ('msg_sync_1', @sid, 1741166123000, @mdata);
+            INSERT OR REPLACE INTO part (id, session_id, message_id, time_created, data)
+            VALUES ('prt_sync_1', @sid, 'msg_sync_1', 1741166123000, @pdata);
+            """;
+        command.Parameters.AddWithValue("@sid", sessionId);
+        command.Parameters.AddWithValue("@mdata", JsonSerializer.Serialize(new { role = "user", content = text }));
+        command.Parameters.AddWithValue("@pdata", JsonSerializer.Serialize(new { type = "text", text }));
+        command.ExecuteNonQuery();
+    }
+
+    private static void WriteHermesSession(string database, string sessionId, string text)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = database,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                title TEXT,
+                cwd TEXT,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+            INSERT OR REPLACE INTO sessions (id, source, title, cwd, started_at)
+            VALUES (@sid, 'cli', 'Hermes Sync Test', 'C:/work/hermes', 1741166123.5);
+            INSERT INTO messages (session_id, role, content, timestamp)
+            VALUES (@sid, 'user', @text, 1741166124.5);
+            """;
+        command.Parameters.AddWithValue("@sid", sessionId);
+        command.Parameters.AddWithValue("@text", text);
+        command.ExecuteNonQuery();
+    }
+
     private static string ReadAllRemoteBytesAsText(string remote) =>
         Encoding.UTF8.GetString(Directory.EnumerateFiles(remote, "*", SearchOption.AllDirectories).SelectMany(File.ReadAllBytes).ToArray());
 
@@ -554,6 +730,7 @@ public sealed class TwoDeviceSyncTests : IDisposable
 
     public void Dispose()
     {
+        SqliteConnection.ClearAllPools();
         if (!Directory.Exists(_root)) return;
         foreach (var file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
         Directory.Delete(_root, recursive: true);
@@ -563,6 +740,8 @@ public sealed class TwoDeviceSyncTests : IDisposable
         CodexPaths Paths,
         ClaudePaths ClaudePaths,
         KimiPaths KimiPaths,
+        HermesPaths HermesPaths,
+        MimoPaths MimoPaths,
         string ProviderRoot,
         SyncEngine Engine,
         SessionAnnotationStore Annotations,

@@ -395,6 +395,58 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Manage_active_state_detects_mimocode_process_for_recently_active_mimo_session()
+    {
+        var mimoDir = Path.Combine(Path.GetTempPath(), $"agent-sync-mimo-active-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(mimoDir);
+        try
+        {
+            var mimoPaths = new CodexHistorySync.Core.Mimo.MimoPaths(mimoDir);
+            const string recentId = "ses_recent000000000000001";
+            const string staleId = "ses_stale0000000000000001";
+            var now = new DateTime(2026, 11, 2, 19, 30, 0, DateTimeKind.Utc);
+            var nowMs = new DateTimeOffset(now).ToUnixTimeMilliseconds();
+            var staleMs = nowMs - 120_000;
+
+            using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={mimoPaths.PrimaryDatabasePath};Pooling=false"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"""
+                    CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+                    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL);
+                    INSERT INTO session VALUES ('{recentId}', 'global', {nowMs}, {nowMs});
+                    INSERT INTO session VALUES ('{staleId}', 'global', {staleMs}, {staleMs});
+                    INSERT INTO message VALUES ('msg_r1', '{recentId}', {nowMs});
+                    INSERT INTO message VALUES ('msg_s1', '{staleId}', {staleMs});
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+
+            var activeState = new WindowsManagedSessionActiveState(
+                codexPaths: null,
+                grokPaths: null,
+                isNamedProcessRunning: (_, _) => false,
+                isExclusiveLockHeld: _ => false,
+                enumerateFiles: Directory.GetFiles,
+                readAllText: _ => null,
+                isAnyNamedProcessRunning: name => string.Equals(name, "mimocode", StringComparison.OrdinalIgnoreCase),
+                utcNow: () => now,
+                mimoPaths: mimoPaths);
+
+            var activeIds = await activeState.GetActiveSessionIdsAsync(ManagedAgent.Mimo, CancellationToken.None);
+            Assert.Equal([recentId], activeIds.OrderBy(id => id, StringComparer.Ordinal));
+            Assert.True(await activeState.IsActiveAsync(ManagedAgent.Mimo, recentId, "unused", CancellationToken.None));
+            Assert.False(await activeState.IsActiveAsync(ManagedAgent.Mimo, staleId, "unused", CancellationToken.None));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(mimoDir)) Directory.Delete(mimoDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Manage_maps_windows_locator_source_to_core_writer_availability()
     {
         var option = CliComposition.ToCodexExecutableOption(

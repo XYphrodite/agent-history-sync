@@ -211,17 +211,26 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
 
     private async Task<SessionScanResult> ScanLocalAsync(CancellationToken ct)
     {
-        var codexTask = _scanner.ScanDetailedAsync(_paths, ct);
-        var extraTasks = new List<Task<SessionScanResult>>(6);
-        if (_grokPaths is not null && _grokScanner is not null) extraTasks.Add(_grokScanner.ScanDetailedAsync(_grokPaths, ct));
-        if (_claudePaths is not null && _claudeScanner is not null) extraTasks.Add(_claudeScanner.ScanDetailedAsync(_claudePaths, ct));
-        if (_claudePaths is not null && _claudeMemoryScanner is not null) extraTasks.Add(_claudeMemoryScanner.ScanDetailedAsync(_claudePaths, ct));
-        if (_continuePaths is not null && _continueScanner is not null) extraTasks.Add(_continueScanner.ScanDetailedAsync(_continuePaths, ct));
-        if (_kimiPaths is not null && _kimiScanner is not null) extraTasks.Add(_kimiScanner.ScanDetailedAsync(_kimiPaths, ct));
-        if (_hermesPaths is not null && _hermesScanner is not null) extraTasks.Add(_hermesScanner.ScanDetailedAsync(_hermesPaths, ct));
-        if (_mimoPaths is not null && _mimoScanner is not null) extraTasks.Add(_mimoScanner.ScanDetailedAsync(_mimoPaths, ct));
-        if (_antigravityPaths is not null && _antigravityScanner is not null) extraTasks.Add(_antigravityScanner.ScanDetailedAsync(_antigravityPaths, ct));
-        if (_annotationsDirectory is not null && _annotationScanner is not null) extraTasks.Add(_annotationScanner.ScanDetailedAsync(_annotationsDirectory, ct));
+        var codexTask = Task.Run(() => _scanner.ScanDetailedAsync(_paths, ct), ct);
+        var extraTasks = new List<Task<SessionScanResult>>(9);
+        if (_grokPaths is { } grokPaths && _grokScanner is { } grokScanner)
+            extraTasks.Add(Task.Run(() => grokScanner.ScanDetailedAsync(grokPaths, ct), ct));
+        if (_claudePaths is { } claudePaths && _claudeScanner is { } claudeScanner)
+            extraTasks.Add(Task.Run(() => claudeScanner.ScanDetailedAsync(claudePaths, ct), ct));
+        if (_claudePaths is { } claudeMemPaths && _claudeMemoryScanner is { } claudeMemoryScanner)
+            extraTasks.Add(Task.Run(() => claudeMemoryScanner.ScanDetailedAsync(claudeMemPaths, ct), ct));
+        if (_continuePaths is { } continuePaths && _continueScanner is { } continueScanner)
+            extraTasks.Add(Task.Run(() => continueScanner.ScanDetailedAsync(continuePaths, ct), ct));
+        if (_kimiPaths is { } kimiPaths && _kimiScanner is { } kimiScanner)
+            extraTasks.Add(Task.Run(() => kimiScanner.ScanDetailedAsync(kimiPaths, ct), ct));
+        if (_hermesPaths is { } hermesPaths && _hermesScanner is { } hermesScanner)
+            extraTasks.Add(Task.Run(() => hermesScanner.ScanDetailedAsync(hermesPaths, ct), ct));
+        if (_mimoPaths is { } mimoPaths && _mimoScanner is { } mimoScanner)
+            extraTasks.Add(Task.Run(() => mimoScanner.ScanDetailedAsync(mimoPaths, ct), ct));
+        if (_antigravityPaths is { } antigravityPaths && _antigravityScanner is { } antigravityScanner)
+            extraTasks.Add(Task.Run(() => antigravityScanner.ScanDetailedAsync(antigravityPaths, ct), ct));
+        if (_annotationsDirectory is { } annotationsDirectory && _annotationScanner is { } annotationScanner)
+            extraTasks.Add(Task.Run(() => annotationScanner.ScanDetailedAsync(annotationsDirectory, ct), ct));
         var unscanned = UnscannedKinds();
         if (extraTasks.Count == 0)
         {
@@ -428,7 +437,10 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                                     exception.Message.Contains("Grok session", StringComparison.OrdinalIgnoreCase) ||
                                     exception.Message.Contains("Claude session", StringComparison.OrdinalIgnoreCase) ||
                                     exception.Message.Contains("Continue session", StringComparison.OrdinalIgnoreCase) ||
-                                    exception.Message.Contains("Kimi session", StringComparison.OrdinalIgnoreCase))
+                                    exception.Message.Contains("Kimi session", StringComparison.OrdinalIgnoreCase) ||
+                                    exception.Message.Contains("Hermes session", StringComparison.OrdinalIgnoreCase) ||
+                                    exception.Message.Contains("MiMo session", StringComparison.OrdinalIgnoreCase) ||
+                                    exception.Message.Contains("Antigravity session", StringComparison.OrdinalIgnoreCase))
                                 {
                                     // A live session of any agent can mutate between scan and stage; defer it.
                                     deferred.Add(action.ObjectId);
@@ -1710,6 +1722,20 @@ public sealed class SyncEngine : IDisposable, IAsyncDisposable
                 Path.GetDirectoryName(sessionDirectory)
                 ?? throw new InvalidDataException("Kimi session path has no workDir bucket.")));
             return KimiSessionPackage.BuildFromDirectory(sessionDirectory, workDirKey);
+        }
+
+        if (kind == ObjectKind.HermesSession)
+        {
+            return Hermes.HermesSessionPackage.BuildFromAnchor(sourcePath)
+                ?? (File.Exists(sourcePath) ? await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false) : null)
+                ?? throw new InvalidDataException("Hermes session is not in the state database.");
+        }
+
+        if (kind == ObjectKind.MimoSession)
+        {
+            return MimoSessionPackage.BuildFromAnchor(sourcePath)
+                ?? (File.Exists(sourcePath) ? await File.ReadAllBytesAsync(sourcePath, ct).ConfigureAwait(false) : null)
+                ?? throw new InvalidDataException("MiMo session is not in the state database.");
         }
 
         if (kind == ObjectKind.AntigravitySession)

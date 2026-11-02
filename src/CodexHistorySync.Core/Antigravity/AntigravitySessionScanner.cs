@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CodexHistorySync.Core.Codex;
@@ -76,14 +77,10 @@ public sealed class AntigravitySessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
-        Dictionary<string, AntigravitySummaryRow> summariesById;
+        Dictionary<string, AntigravitySummaryRow> summariesPhase1;
         try
         {
-            summariesById = summariesDbExists
-                ? AntigravityDatabase.ReadSummaries(paths.ConversationSummariesDbPath)
-                    .Where(s => AntigravityPaths.IsSessionId(s.ConversationId))
-                    .ToDictionary(s => s.ConversationId.ToLowerInvariant(), StringComparer.Ordinal)
-                : new Dictionary<string, AntigravitySummaryRow>(StringComparer.Ordinal);
+            summariesPhase1 = ReadSummariesById(paths);
         }
         catch (Exception exception) when (IsReadFailure(exception))
         {
@@ -91,17 +88,37 @@ public sealed class AntigravitySessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
-        var allSessionIds = DiscoverSessionIds(paths, summariesById);
-        if (allSessionIds.Count == 0 && summariesDbExists)
+        var idsPhase1 = DiscoverSessionIds(paths, summariesPhase1);
+        if (idsPhase1.Count == 0 && summariesDbExists)
         {
             // Empty database with 0 rows confirmed: clean absence
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
-        Dictionary<string, string>? first;
+        var first = new Dictionary<string, (ContentHash Hash, long Length, SessionStamp Stamp0, SessionStamp Stamp1, AntigravitySummaryRow? Summary)>(StringComparer.Ordinal);
+        var lockedPhase1 = false;
         try
         {
-            first = Fingerprints(paths, allSessionIds);
+            foreach (var sessionId in idsPhase1)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (IsSessionLocked(paths, sessionId))
+                {
+                    lockedPhase1 = true;
+                    continue;
+                }
+
+                summariesPhase1.TryGetValue(sessionId, out var summaryPhase1);
+                var stamp0 = CaptureSessionStamp(paths, sessionId);
+                var measured = AntigravitySessionPackage.TryHashAndMeasure(
+                    paths, sessionId, usePreloadedSummary: true, preloadedSummary: summaryPhase1);
+                if (measured is not null)
+                {
+                    var stamp1 = CaptureSessionStamp(paths, sessionId);
+                    first[AntigravitySessionPackage.ToLogicalId(sessionId)] =
+                        (measured.Value.Hash, measured.Value.Length, stamp0, stamp1, summaryPhase1);
+                }
+            }
         }
         catch (Exception exception) when (IsReadFailure(exception))
         {
@@ -109,13 +126,13 @@ public sealed class AntigravitySessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
-        if (first.Count != 0)
+        if (first.Count != 0 || lockedPhase1)
             await waitForStability(cancellationToken).ConfigureAwait(false);
 
-        Dictionary<string, string> second;
+        Dictionary<string, AntigravitySummaryRow> summariesPhase2;
         try
         {
-            second = Fingerprints(paths, allSessionIds);
+            summariesPhase2 = ReadSummariesById(paths);
         }
         catch (Exception exception) when (IsReadFailure(exception))
         {
@@ -123,13 +140,15 @@ public sealed class AntigravitySessionScanner
             return new SessionScanResult(objects, uncertain, duplicates);
         }
 
+        var idsPhase2 = DiscoverSessionIds(paths, summariesPhase2);
         var running = isAntigravityRunning();
         var cutoff = now().ToUnixTimeMilliseconds() / 1000d - activityWindow.TotalSeconds;
-        var complete = true;
+        var complete = !lockedPhase1;
 
         var byId = new Dictionary<LogicalObjectId, LocalObject>();
+        var stableLogicalIds = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var sessionId in allSessionIds)
+        foreach (var sessionId in idsPhase2)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var logical = AntigravitySessionPackage.ToLogicalId(sessionId);
@@ -140,11 +159,13 @@ public sealed class AntigravitySessionScanner
                 continue;
             }
 
-            summariesById.TryGetValue(sessionId, out var summary);
+            summariesPhase2.TryGetValue(sessionId, out var summary);
+            var convDbPath = paths.ConversationDatabasePath(sessionId);
+            var convDbExists = File.Exists(convDbPath);
             var lastActiveUnix = summary is not null
                 ? summary.UpdatedAt.ToUnixTimeSeconds()
-                : (File.Exists(paths.ConversationDatabasePath(sessionId))
-                    ? new DateTimeOffset(File.GetLastWriteTimeUtc(paths.ConversationDatabasePath(sessionId))).ToUnixTimeSeconds()
+                : (convDbExists
+                    ? new DateTimeOffset(File.GetLastWriteTimeUtc(convDbPath)).ToUnixTimeSeconds()
                     : 0);
 
             if (running && lastActiveUnix >= cutoff)
@@ -153,44 +174,47 @@ public sealed class AntigravitySessionScanner
                 continue;
             }
 
-            if (!first.TryGetValue(logical, out var before) ||
-                !second.TryGetValue(logical, out var after) ||
-                !string.Equals(before, after, StringComparison.Ordinal))
+            if (!first.TryGetValue(logical, out var before))
             {
                 complete = false;
                 continue;
             }
 
-            byte[] package;
-            try
+            (ContentHash Hash, long Length)? after;
+            var stamp2 = CaptureSessionStamp(paths, sessionId);
+            if (before.Stamp0.CanShortCircuit &&
+                before.Stamp0.Equals(before.Stamp1) &&
+                before.Stamp1.Equals(stamp2) &&
+                SummariesEqual(before.Summary, summary))
             {
-                package = AntigravitySessionPackage.TryBuild(paths, sessionId)
-                    ?? throw new InvalidDataException("Antigravity session disappeared while it was being read.");
+                after = (before.Hash, before.Length);
             }
-            catch (Exception exception) when (IsReadFailure(exception))
+            else
+            {
+                after = AntigravitySessionPackage.TryHashAndMeasure(
+                    paths, sessionId, usePreloadedSummary: true, preloadedSummary: summary);
+            }
+
+            if (after is null ||
+                !string.Equals(before.Hash.Hex, after.Value.Hash.Hex, StringComparison.Ordinal) ||
+                before.Length != after.Value.Length)
             {
                 complete = false;
                 continue;
             }
 
-            var pkgHash = AntigravitySessionPackage.HashPackage(package);
-            if (!string.Equals(pkgHash.Hex, after, StringComparison.Ordinal))
-            {
-                complete = false;
-                continue;
-            }
-
+            stableLogicalIds.Add(logical);
             var timestamp = summary?.UpdatedAt
-                ?? (File.Exists(paths.ConversationDatabasePath(sessionId))
-                    ? new DateTimeOffset(File.GetLastWriteTimeUtc(paths.ConversationDatabasePath(sessionId)))
+                ?? (convDbExists
+                    ? new DateTimeOffset(File.GetLastWriteTimeUtc(convDbPath))
                     : DateTimeOffset.UtcNow);
 
             var item = new LocalObject(
                 new LogicalObjectId(logical),
                 ObjectKind.AntigravitySession,
                 paths.AnchorPath(sessionId),
-                pkgHash,
-                package.LongLength,
+                after.Value.Hash,
+                after.Value.Length,
                 timestamp);
 
             if (byId.TryAdd(item.Id, item)) objects.Add(item);
@@ -202,9 +226,120 @@ public sealed class AntigravitySessionScanner
             }
         }
 
-        if (first.Count != second.Count || first.Keys.Any(id => !second.ContainsKey(id))) complete = false;
+        if (first.Keys.Any(id => !stableLogicalIds.Contains(id))) complete = false;
         if (!complete) uncertain.Add(ObjectKind.AntigravitySession);
         return new SessionScanResult(objects, uncertain, duplicates);
+    }
+
+    private static bool SummariesEqual(AntigravitySummaryRow? a, AntigravitySummaryRow? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+        return string.Equals(a.ConversationId, b.ConversationId, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(a.ParentConversationId, b.ParentConversationId, StringComparison.Ordinal) &&
+               a.NestingDepth == b.NestingDepth &&
+               string.Equals(a.AgentName, b.AgentName, StringComparison.Ordinal) &&
+               string.Equals(a.Title, b.Title, StringComparison.Ordinal) &&
+               string.Equals(a.Status, b.Status, StringComparison.Ordinal) &&
+               a.CreatedAt.ToUnixTimeSeconds() == b.CreatedAt.ToUnixTimeSeconds() &&
+               a.UpdatedAt.ToUnixTimeSeconds() == b.UpdatedAt.ToUnixTimeSeconds() &&
+               (a.WorkspaceUris ?? Array.Empty<string>()).SequenceEqual(b.WorkspaceUris ?? Array.Empty<string>(), StringComparer.Ordinal);
+    }
+
+    private static SessionStamp CaptureSessionStamp(AntigravityPaths paths, string sessionId)
+    {
+        try
+        {
+            var convDb = paths.ConversationDatabasePath(sessionId);
+            if (File.Exists(convDb + "-wal") || File.Exists(convDb + "-journal"))
+                return SessionStamp.Fallback;
+
+            using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            Span<byte> scratch = stackalloc byte[100];
+
+            void AppendInt64(long v)
+            {
+                Span<byte> buf = stackalloc byte[8];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(buf, v);
+                hasher.AppendData(buf);
+            }
+
+            if (File.Exists(convDb))
+            {
+                var info = new FileInfo(convDb);
+                AppendInt64(1);
+                AppendInt64(info.Length);
+                AppendInt64(info.LastWriteTimeUtc.Ticks);
+                using var stream = new FileStream(convDb, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var read = stream.ReadAtLeast(scratch, scratch.Length, throwOnEndOfStream: false);
+                hasher.AppendData(scratch[..read]);
+            }
+            else
+            {
+                AppendInt64(0);
+            }
+
+            var annotPath = paths.AnnotationPath(sessionId);
+            if (File.Exists(annotPath))
+            {
+                var info = new FileInfo(annotPath);
+                AppendInt64(1);
+                AppendInt64(info.Length);
+                AppendInt64(info.LastWriteTimeUtc.Ticks);
+            }
+            else
+            {
+                AppendInt64(0);
+            }
+
+            var brainDir = paths.BrainSessionDirectory(sessionId);
+            if (Directory.Exists(brainDir))
+            {
+                var files = Directory.GetFiles(brainDir, "*", SearchOption.AllDirectories);
+                Array.Sort(files, StringComparer.Ordinal);
+                AppendInt64(files.Length);
+                foreach (var file in files)
+                {
+                    hasher.AppendData(Encoding.UTF8.GetBytes(file));
+                    var info = new FileInfo(file);
+                    AppendInt64(info.Length);
+                    AppendInt64(info.LastWriteTimeUtc.Ticks);
+                }
+            }
+            else
+            {
+                AppendInt64(-1);
+            }
+
+            Span<byte> digest = stackalloc byte[SHA256.HashSizeInBytes];
+            hasher.GetHashAndReset(digest);
+            return new SessionStamp(true, Convert.ToHexStringLower(digest));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return SessionStamp.Fallback;
+        }
+    }
+
+    private readonly record struct SessionStamp(bool CanShortCircuit, string Digest)
+    {
+        public static SessionStamp Fallback => new(false, string.Empty);
+    }
+
+    private static Dictionary<string, AntigravitySummaryRow> ReadSummariesById(AntigravityPaths paths)
+    {
+        if (!File.Exists(paths.ConversationSummariesDbPath))
+            return new Dictionary<string, AntigravitySummaryRow>(StringComparer.Ordinal);
+
+        var dict = new Dictionary<string, AntigravitySummaryRow>(StringComparer.Ordinal);
+        foreach (var row in AntigravityDatabase.ReadSummaries(paths.ConversationSummariesDbPath))
+        {
+            if (AntigravityPaths.IsSessionId(row.ConversationId))
+            {
+                dict[row.ConversationId.ToLowerInvariant()] = row;
+            }
+        }
+        return dict;
     }
 
     private static HashSet<string> DiscoverSessionIds(AntigravityPaths paths, Dictionary<string, AntigravitySummaryRow> summaries)
@@ -227,22 +362,6 @@ public sealed class AntigravitySessionScanner
         }
 
         return ids;
-    }
-
-    private static Dictionary<string, string> Fingerprints(AntigravityPaths paths, HashSet<string> sessionIds)
-    {
-        var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var sessionId in sessionIds)
-        {
-            var package = AntigravitySessionPackage.TryBuild(paths, sessionId);
-            if (package is not null)
-            {
-                fingerprints[AntigravitySessionPackage.ToLogicalId(sessionId)] =
-                    AntigravitySessionPackage.HashPackage(package).Hex;
-            }
-        }
-
-        return fingerprints;
     }
 
     private bool IsSessionLocked(AntigravityPaths paths, string sessionId)

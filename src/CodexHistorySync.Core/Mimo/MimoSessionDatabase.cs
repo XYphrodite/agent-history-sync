@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using CodexHistorySync.Core.Model;
 using Microsoft.Data.Sqlite;
 
 namespace CodexHistorySync.Core.Mimo;
@@ -15,14 +16,7 @@ internal static class MimoSessionDatabase
         ArgumentNullException.ThrowIfNull(paths);
         var snapshots = new List<MimoSnapshot>();
         var complete = true;
-        var databases = paths.ListDatabasePaths();
-        if (databases.Count == 0)
-        {
-            // Check if default expected DB file exists but scan found none due to filter?
-            var primary = paths.PrimaryDatabasePath;
-            if (File.Exists(primary))
-                databases = [primary];
-        }
+        var databases = ResolveDatabasePaths(paths);
         foreach (var db in databases)
         {
             var read = ReadDatabase(db);
@@ -37,6 +31,54 @@ internal static class MimoSessionDatabase
         }
 
         return new MimoReadResult(snapshots, complete);
+    }
+
+    public static bool ScanSessions(
+        MimoPaths paths,
+        Action<MimoScannedSession> onSession,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(onSession);
+        var complete = true;
+        foreach (var db in ResolveDatabasePaths(paths))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!ScanDatabaseSessions(db, onSession, cancellationToken))
+                complete = false;
+        }
+
+        return complete;
+    }
+
+    public static IReadOnlyList<MimoSessionHeader> ReadCatalogHeaders(MimoPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var headers = new List<MimoSessionHeader>();
+        foreach (var db in ResolveDatabasePaths(paths))
+        {
+            headers.AddRange(ReadDatabaseHeaders(db));
+        }
+
+        return headers;
+    }
+
+    public static IReadOnlyList<(string SessionId, double LastActiveUnix)> ReadActivity(MimoPaths paths) =>
+        ReadCatalogHeaders(paths)
+            .Select(header => (header.SessionId, header.LastActiveUnix))
+            .ToArray();
+
+    private static IReadOnlyList<string> ResolveDatabasePaths(MimoPaths paths)
+    {
+        var databases = paths.ListDatabasePaths();
+        if (databases.Count == 0)
+        {
+            var primary = paths.PrimaryDatabasePath;
+            if (File.Exists(primary))
+                databases = [primary];
+        }
+
+        return databases;
     }
 
     public static MimoSnapshot? ReadOne(MimoPaths paths, string sessionId)
@@ -221,54 +263,211 @@ internal static class MimoSessionDatabase
 
         foreach (var (id, cells) in sessions)
         {
-            var messages = new List<IReadOnlyList<MimoCell>>();
-            var partsPerMessage = new List<IReadOnlyList<MimoPart>>();
-
-            if (messageColumns.Count != 0)
-            {
-                using var messagesCommand = connection.CreateCommand();
-                messagesCommand.CommandText = "SELECT " + SelectList(messageColumns) +
-                    " FROM \"message\" WHERE \"session_id\" = @id ORDER BY \"time_created\", \"id\"";
-                messagesCommand.Parameters.AddWithValue("@id", id);
-                using var messageReader = messagesCommand.ExecuteReader();
-                var messageRows = new List<IReadOnlyList<MimoCell>>();
-                while (messageReader.Read()) messageRows.Add(ReadCells(messageReader, messageColumns, dropId: false));
-                messageReader.Dispose();
-
-                foreach (var msgCells in messageRows)
-                {
-                    messages.Add(msgCells);
-                    var msgId = Text(msgCells, "id");
-                    var msgParts = new List<MimoPart>();
-                    if (msgId is not null && partColumns.Count != 0)
-                    {
-                        using var partCommand = connection.CreateCommand();
-                        partCommand.CommandText = "SELECT " + SelectList(partColumns) +
-                            " FROM \"part\" WHERE \"message_id\" = @mid AND \"session_id\" = @sid ORDER BY \"time_created\", \"id\"";
-                        partCommand.Parameters.AddWithValue("@mid", msgId);
-                        partCommand.Parameters.AddWithValue("@sid", id);
-                        using var partReader = partCommand.ExecuteReader();
-                        while (partReader.Read())
-                        {
-                            var partCells = ReadCells(partReader, partColumns, dropId: false);
-                            msgParts.Add(new MimoPart(partCells));
-                        }
-                    }
-                    partsPerMessage.Add(msgParts);
-                }
-            }
-            else
-            {
-                // No message table, still produce snapshot with just session
-            }
-
-            // Ensure partsPerMessage aligns with messages count (fill missing with empty)
-            while (partsPerMessage.Count < messages.Count) partsPerMessage.Add([]);
-
+            var (messages, partsPerMessage) = ReadSessionMessagesAndParts(connection, id, messageColumns, partColumns);
             snapshots.Add(new MimoSnapshot(id, cells, messages, partsPerMessage, LastActive(cells, messages)));
         }
 
         return new MimoReadResult(snapshots, complete);
+    }
+
+    private static bool ScanDatabaseSessions(
+        string databasePath,
+        Action<MimoScannedSession> onSession,
+        CancellationToken cancellationToken)
+    {
+        using var connection = Open(databasePath, write: false);
+        if (!TableExists(connection, "session"))
+            throw new InvalidDataException("MiMo state database has no session table.");
+
+        var sessionColumns = Columns(connection, "session");
+        if (!sessionColumns.Contains("id"))
+            throw new InvalidDataException("MiMo sessions table has no id column.");
+        var messageColumns = TableExists(connection, "message")
+            ? Columns(connection, "message")
+            : new List<string>();
+        var partColumns = TableExists(connection, "part")
+            ? Columns(connection, "part")
+            : new List<string>();
+
+        var complete = true;
+        var sessions = new List<(string Id, IReadOnlyList<MimoCell> Cells)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT " + SelectList(sessionColumns) + " FROM \"session\" ORDER BY \"id\"";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var cells = ReadCells(reader, sessionColumns, dropId: false);
+                var id = Text(cells, "id");
+                if (id is null || !MimoPaths.IsSessionId(id))
+                {
+                    complete = false;
+                    continue;
+                }
+                sessions.Add((id, cells));
+            }
+        }
+
+        foreach (var (id, cells) in sessions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (MimoSnapshot.IsSubagentSession(cells))
+            {
+                onSession(new MimoScannedSession(id, IsSubagent: true, default, 0, 0));
+                continue;
+            }
+
+            var (messages, partsPerMessage) = ReadSessionMessagesAndParts(connection, id, messageColumns, partColumns);
+            var lastActive = LastActive(cells, messages);
+            var snapshot = new MimoSnapshot(id, cells, messages, partsPerMessage, lastActive);
+            var (hash, length) = MimoSessionPackage.HashAndMeasure(snapshot);
+            onSession(new MimoScannedSession(id, IsSubagent: false, hash, length, lastActive));
+        }
+
+        return complete;
+    }
+
+    private static List<MimoSessionHeader> ReadDatabaseHeaders(string databasePath)
+    {
+        using var connection = Open(databasePath, write: false);
+        if (!TableExists(connection, "session"))
+            throw new InvalidDataException("MiMo state database has no session table.");
+
+        var sessionColumns = Columns(connection, "session");
+        if (!sessionColumns.Contains("id"))
+            throw new InvalidDataException("MiMo sessions table has no id column.");
+
+        var sessions = new List<(string Id, IReadOnlyList<MimoCell> Cells)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT " + SelectList(sessionColumns) + " FROM \"session\" ORDER BY \"id\"";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var cells = ReadCells(reader, sessionColumns, dropId: false);
+                var id = Text(cells, "id");
+                if (id is null || !MimoPaths.IsSessionId(id))
+                    continue;
+                sessions.Add((id, cells));
+            }
+        }
+
+        var latestBySession = new Dictionary<string, double>(StringComparer.Ordinal);
+        if (sessions.Count != 0 && TableExists(connection, "message"))
+        {
+            var messageColumns = Columns(connection, "message");
+            if (messageColumns.Contains("session_id"))
+            {
+                var timeColumns = messageColumns
+                    .Where(c => c is "session_id" or "time_created" or "time_updated")
+                    .ToList();
+                if (timeColumns.Count > 1)
+                {
+                    using var msgCommand = connection.CreateCommand();
+                    msgCommand.CommandText = "SELECT " + SelectList(timeColumns) + " FROM \"message\"";
+                    using var msgReader = msgCommand.ExecuteReader();
+                    while (msgReader.Read())
+                    {
+                        var msgCells = ReadCells(msgReader, timeColumns, dropId: false);
+                        var sid = Text(msgCells, "session_id");
+                        if (sid is null) continue;
+                        double rowStamp;
+                        if (Text(msgCells, "time_created") is { } stamp &&
+                            double.TryParse(stamp, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+                        {
+                            rowStamp = value;
+                        }
+                        else if (Text(msgCells, "time_updated") is { } stamp2 &&
+                                 double.TryParse(stamp2, NumberStyles.Float, CultureInfo.InvariantCulture, out var v2))
+                        {
+                            rowStamp = v2;
+                        }
+                        else
+                        {
+                            continue;
+                        }
+
+                        if (!latestBySession.TryGetValue(sid, out var prior) || rowStamp > prior)
+                            latestBySession[sid] = rowStamp;
+                    }
+                }
+            }
+        }
+
+        var headers = new List<MimoSessionHeader>(sessions.Count);
+        foreach (var (id, cells) in sessions)
+        {
+            var lastActive = latestBySession.TryGetValue(id, out var latest)
+                ? NormalizeTime(latest)
+                : SessionFallbackTime(cells);
+            headers.Add(new MimoSessionHeader(id, cells, lastActive));
+        }
+
+        return headers;
+    }
+
+    private static (List<IReadOnlyList<MimoCell>> Messages, List<IReadOnlyList<MimoPart>> PartsPerMessage) ReadSessionMessagesAndParts(
+        SqliteConnection connection,
+        string sessionId,
+        List<string> messageColumns,
+        List<string> partColumns)
+    {
+        var messages = new List<IReadOnlyList<MimoCell>>();
+        var partsPerMessage = new List<IReadOnlyList<MimoPart>>();
+
+        if (messageColumns.Count != 0)
+        {
+            var messageRows = new List<IReadOnlyList<MimoCell>>();
+            using (var messagesCommand = connection.CreateCommand())
+            {
+                messagesCommand.CommandText = "SELECT " + SelectList(messageColumns) +
+                    " FROM \"message\" WHERE \"session_id\" = @id ORDER BY \"time_created\", \"id\"";
+                messagesCommand.Parameters.AddWithValue("@id", sessionId);
+                using var messageReader = messagesCommand.ExecuteReader();
+                while (messageReader.Read()) messageRows.Add(ReadCells(messageReader, messageColumns, dropId: false));
+            }
+
+            Dictionary<string, List<MimoPart>>? partsByMessage = null;
+            if (messageRows.Count != 0 && partColumns.Count != 0)
+            {
+                partsByMessage = new Dictionary<string, List<MimoPart>>(messageRows.Count, StringComparer.Ordinal);
+                using var partCommand = connection.CreateCommand();
+                partCommand.CommandText = "SELECT " + SelectList(partColumns) +
+                    " FROM \"part\" WHERE \"session_id\" = @sid ORDER BY \"time_created\", \"id\"";
+                partCommand.Parameters.AddWithValue("@sid", sessionId);
+                using var partReader = partCommand.ExecuteReader();
+                while (partReader.Read())
+                {
+                    var partCells = ReadCells(partReader, partColumns, dropId: false);
+                    var partMsgId = Text(partCells, "message_id");
+                    if (partMsgId is null) continue;
+                    if (!partsByMessage.TryGetValue(partMsgId, out var bucket))
+                    {
+                        bucket = new List<MimoPart>();
+                        partsByMessage[partMsgId] = bucket;
+                    }
+                    bucket.Add(new MimoPart(partCells));
+                }
+            }
+
+            foreach (var msgCells in messageRows)
+            {
+                messages.Add(msgCells);
+                var msgId = Text(msgCells, "id");
+                if (msgId is not null && partsByMessage is not null && partsByMessage.TryGetValue(msgId, out var msgParts))
+                {
+                    partsPerMessage.Add(msgParts);
+                }
+                else
+                {
+                    partsPerMessage.Add([]);
+                }
+            }
+        }
+
+        // Ensure partsPerMessage aligns with messages count (fill missing with empty)
+        while (partsPerMessage.Count < messages.Count) partsPerMessage.Add([]);
+        return (messages, partsPerMessage);
     }
 
     private static string SelectList(IReadOnlyList<string> columns) =>
@@ -297,7 +496,8 @@ internal static class MimoSessionDatabase
             });
         }
 
-        return cells.OrderBy(cell => cell.Name, StringComparer.Ordinal).ToList();
+        // Columns() sorts column names by StringComparer.Ordinal, so cells are already in canonical ordinal order.
+        return cells;
     }
 
     private static double LastActive(IReadOnlyList<MimoCell> session, IReadOnlyList<IReadOnlyList<MimoCell>> messages)
@@ -313,6 +513,11 @@ internal static class MimoSessionDatabase
                 latest = Math.Max(latest, v2);
         }
         if (!double.IsNegativeInfinity(latest)) return NormalizeTime(latest);
+        return SessionFallbackTime(session);
+    }
+
+    private static double SessionFallbackTime(IReadOnlyList<MimoCell> session)
+    {
         if (Text(session, "time_updated") is { } updated &&
             double.TryParse(updated, NumberStyles.Float, CultureInfo.InvariantCulture, out var uv))
             return NormalizeTime(uv);
@@ -541,19 +746,23 @@ internal sealed record MimoSnapshot(
     /// A child session created for an internal agent run (checkpoint-writer and similar). The
     /// manager hides it and the scanner ignores it, matching how Codex treats subagent threads.
     /// </summary>
-    public bool IsSubagent =>
-        Session.Any(cell =>
-            string.Equals(cell.Name, "parent_id", StringComparison.Ordinal) &&
-            cell.Type == "text" &&
-            !string.IsNullOrEmpty(cell.Text));
+    public bool IsSubagent => IsSubagentSession(Session);
 
     /// <summary>
     /// A session left behind by the previous MiMo generation (schema <c>version</c> 2.1.x).
     /// MiMoCode does not list those as chats, so the manager hides them; the scanner still
     /// keeps them so an older machine's history is never treated as deleted.
     /// </summary>
-    public bool IsLegacyGeneration =>
-        Session.Any(cell =>
+    public bool IsLegacyGeneration => IsLegacyGenerationSession(Session);
+
+    internal static bool IsSubagentSession(IReadOnlyList<MimoCell> session) =>
+        session.Any(cell =>
+            string.Equals(cell.Name, "parent_id", StringComparison.Ordinal) &&
+            cell.Type == "text" &&
+            !string.IsNullOrEmpty(cell.Text));
+
+    internal static bool IsLegacyGenerationSession(IReadOnlyList<MimoCell> session) =>
+        session.Any(cell =>
             string.Equals(cell.Name, "version", StringComparison.Ordinal) &&
             cell.Type == "text" &&
             cell.Text is { Length: > 0 } text &&
@@ -561,3 +770,19 @@ internal sealed record MimoSnapshot(
 }
 
 internal sealed record MimoReadResult(IReadOnlyList<MimoSnapshot> Snapshots, bool Complete);
+
+internal readonly record struct MimoScannedSession(
+    string SessionId,
+    bool IsSubagent,
+    ContentHash Hash,
+    long Length,
+    double LastActiveUnix);
+
+internal sealed record MimoSessionHeader(
+    string SessionId,
+    IReadOnlyList<MimoCell> Session,
+    double LastActiveUnix)
+{
+    public bool IsSubagent => MimoSnapshot.IsSubagentSession(Session);
+    public bool IsLegacyGeneration => MimoSnapshot.IsLegacyGenerationSession(Session);
+}
