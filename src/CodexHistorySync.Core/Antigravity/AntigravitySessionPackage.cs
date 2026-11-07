@@ -395,23 +395,9 @@ public static class AntigravitySessionPackage
         var dto = Parse(packageBytes);
         var sessionId = dto.Id.ToLowerInvariant();
 
-        if (dto.Summary is not null)
-        {
-            var summaryRow = new AntigravitySummaryRow(
-                sessionId,
-                dto.Summary.ParentConversationId,
-                dto.Summary.NestingDepth,
-                dto.Summary.AgentName,
-                dto.Summary.Title ?? string.Empty,
-                dto.Summary.Status,
-                dto.Summary.WorkspaceUris ?? Array.Empty<string>(),
-                DateTimeOffset.FromUnixTimeSeconds(dto.Summary.CreatedAtUnix),
-                DateTimeOffset.FromUnixTimeSeconds(dto.Summary.UpdatedAtUnix));
-
-            AntigravityDatabase.WriteSummary(paths.ConversationSummariesDbPath, summaryRow);
-        }
-
-        var trajId = dto.Trajectory?.TrajectoryId ?? ("traj_" + sessionId);
+        var trajId = !string.IsNullOrWhiteSpace(dto.Trajectory?.TrajectoryId)
+            ? dto.Trajectory.TrajectoryId
+            : Guid.NewGuid().ToString("D").ToLowerInvariant();
         var stepRows = (dto.Steps ?? Array.Empty<StepDto>())
             .OrderBy(s => s.Index)
             .Select(s => new AntigravityStepRow(
@@ -420,8 +406,53 @@ public static class AntigravitySessionPackage
                 s.Status,
                 string.IsNullOrEmpty(s.PayloadBase64) ? Array.Empty<byte>() : Convert.FromBase64String(s.PayloadBase64)))
             .ToArray();
+        var lastUserStepIndex = -1;
+        for (var i = stepRows.Length - 1; i >= 0; i--)
+        {
+            if (stepRows[i].StepType == AntigravityProtobuf.StepTypeUserInput)
+            {
+                lastUserStepIndex = stepRows[i].Index;
+                break;
+            }
+        }
 
-        AntigravityDatabase.WriteSteps(paths.ConversationDatabasePath(sessionId), trajId, sessionId, stepRows);
+        string? primaryWorkspaceUri = null;
+        DateTimeOffset? createdAt = null;
+        if (dto.Summary is not null)
+        {
+            var uris = dto.Summary.WorkspaceUris ?? Array.Empty<string>();
+            if (uris.Length > 0 && !string.IsNullOrWhiteSpace(uris[0]))
+            {
+                primaryWorkspaceUri = uris[0];
+            }
+            createdAt = DateTimeOffset.FromUnixTimeSeconds(dto.Summary.CreatedAtUnix);
+
+            var summaryRow = new AntigravitySummaryRow(
+                sessionId,
+                dto.Summary.ParentConversationId,
+                dto.Summary.NestingDepth,
+                dto.Summary.AgentName,
+                dto.Summary.Title ?? string.Empty,
+                dto.Summary.Status,
+                uris,
+                createdAt.Value,
+                DateTimeOffset.FromUnixTimeSeconds(dto.Summary.UpdatedAtUnix));
+
+            AntigravityDatabase.WriteSummary(
+                paths.ConversationSummariesDbPath,
+                summaryRow,
+                stepCount: stepRows.Length,
+                lastUserStepIndex: lastUserStepIndex,
+                trajectoryId: trajId);
+        }
+
+        AntigravityDatabase.WriteSteps(
+            paths.ConversationDatabasePath(sessionId),
+            trajId,
+            sessionId,
+            stepRows,
+            workspaceUri: primaryWorkspaceUri,
+            createdAt: createdAt);
 
         var annotationPath = paths.AnnotationPath(sessionId);
         if (dto.Annotation is not null)

@@ -101,30 +101,42 @@ public sealed class AntigravityConversationWriter : IConversationWriter
 
                 // 1. Write conversations/<id>.db
                 var steps = new List<AntigravityStepRow>(conversation.Turns.Count);
-                var cascadeId = "cas-" + sessionId;
-                var spanHex = Guid.NewGuid().ToString("N")[..16];
+                var trajectoryId = Guid.NewGuid().ToString("D").ToLowerInvariant();
+                var cascadeId = sessionId;
+                var currentTurnId = Guid.NewGuid().ToString("D").ToLowerInvariant();
+                var lastUserStepIndex = -1;
 
                 for (var i = 0; i < conversation.Turns.Count; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var turn = conversation.Turns[i];
+                    var spanHex = Guid.NewGuid().ToString("N");
                     if (turn.Role == ConversationRole.User)
                     {
-                        var (_, payload) = AntigravityProtobuf.EncodeUserStep(
+                        currentTurnId = Guid.NewGuid().ToString("D").ToLowerInvariant();
+                        lastUserStepIndex = i;
+                        var (metadata, payload) = AntigravityProtobuf.EncodeUserStep(
                             stepIndex: i,
                             text: turn.Text,
                             timestamp: createdSeconds,
-                            sessionId: sessionId,
+                            sessionId: trajectoryId,
                             cascadeId: cascadeId,
-                            turnId: "turn-" + i,
+                            turnId: currentTurnId,
                             workspaceUri: workspaceUri,
                             spanHex: spanHex);
-                        steps.Add(new AntigravityStepRow(i, AntigravityProtobuf.StepTypeUserInput, 2, payload));
+                        steps.Add(new AntigravityStepRow(i, AntigravityProtobuf.StepTypeUserInput, AntigravityProtobuf.StepStatusDone, payload, metadata));
                     }
                     else if (turn.Role == ConversationRole.Assistant)
                     {
-                        var payload = AntigravityProtobuf.EncodePlannerResponse(turn.Text);
-                        steps.Add(new AntigravityStepRow(i, AntigravityProtobuf.StepTypePlannerResponse, 2, payload));
+                        var (metadata, payload) = AntigravityProtobuf.EncodeAssistantStep(
+                            stepIndex: i,
+                            text: turn.Text,
+                            timestamp: modifiedSeconds,
+                            sessionId: trajectoryId,
+                            cascadeId: cascadeId,
+                            turnId: currentTurnId,
+                            spanHex: spanHex);
+                        steps.Add(new AntigravityStepRow(i, AntigravityProtobuf.StepTypePlannerResponse, AntigravityProtobuf.StepStatusDone, payload, metadata));
                     }
                     else
                     {
@@ -132,44 +144,65 @@ public sealed class AntigravityConversationWriter : IConversationWriter
                     }
                 }
 
-                AntigravityDatabase.WriteSteps(convDb, "traj-" + sessionId, sessionId, steps);
+                AntigravityDatabase.WriteSteps(convDb, trajectoryId, sessionId, steps, workspaceUri, createdSeconds);
 
                 // 2. Write conversation_summaries.db
                 var summaryRow = new AntigravitySummaryRow(
                     ConversationId: sessionId,
-                    ParentConversationId: "",
+                    ParentConversationId: string.Empty,
                     NestingDepth: 0,
-                    AgentName: "antigravity",
+                    AgentName: string.Empty,
                     Title: title,
-                    Status: "COMPLETED",
+                    Status: "CASCADE_RUN_STATUS_IDLE",
                     WorkspaceUris: workspaceUris,
                     CreatedAt: createdSeconds,
                     UpdatedAt: modifiedSeconds);
-                AntigravityDatabase.WriteSummary(paths.ConversationSummariesDbPath, summaryRow);
+                AntigravityDatabase.WriteSummary(
+                    paths.ConversationSummariesDbPath,
+                    summaryRow,
+                    stepCount: steps.Count,
+                    lastUserStepIndex: lastUserStepIndex,
+                    trajectoryId: trajectoryId,
+                    preview: title);
 
-                // 3. Write brain/<id>/transcript.jsonl
+                // 3. Write brain/<id>/transcript.jsonl and native .system_generated/logs/transcript.jsonl
                 Directory.CreateDirectory(brainDir);
+                var nativeLogsDir = Path.Combine(brainDir, ".system_generated", "logs");
+                Directory.CreateDirectory(nativeLogsDir);
+                var nativeTranscriptPath = Path.Combine(nativeLogsDir, "transcript.jsonl");
+                var utf8NoBom = new UTF8Encoding(false);
+                var createdIso = createdSeconds.ToUniversalTime().ToString("O");
+                var modifiedIso = modifiedSeconds.ToUniversalTime().ToString("O");
+
                 await using (var stream = new FileStream(transcriptPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true))
-                await using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                await using (var writer = new StreamWriter(stream, utf8NoBom))
+                await using (var nativeStream = new FileStream(nativeTranscriptPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true))
+                await using (var nativeWriter = new StreamWriter(nativeStream, utf8NoBom))
                 {
                     for (var i = 0; i < conversation.Turns.Count; i++)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         var turn = conversation.Turns[i];
-                        var role = turn.Role == ConversationRole.User ? "user" : "model";
+                        var isUser = turn.Role == ConversationRole.User;
                         using var memory = new MemoryStream();
                         using (var json = new Utf8JsonWriter(memory))
                         {
                             json.WriteStartObject();
                             json.WriteNumber("step_index", i);
-                            json.WriteString("role", role);
-                            json.WriteString("text", turn.Text);
+                            json.WriteString("source", isUser ? "USER_EXPLICIT" : "MODEL");
+                            json.WriteString("type", isUser ? "USER_INPUT" : "PLANNER_RESPONSE");
+                            json.WriteString("status", "DONE");
+                            json.WriteString("created_at", isUser ? createdIso : modifiedIso);
+                            json.WriteString("content", turn.Text);
                             json.WriteEndObject();
                             json.Flush();
                         }
-                        await writer.WriteLineAsync(Encoding.UTF8.GetString(memory.ToArray()).AsMemory(), cancellationToken).ConfigureAwait(false);
+                        var line = Encoding.UTF8.GetString(memory.ToArray());
+                        await writer.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
+                        await nativeWriter.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
                     }
                     await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    await nativeWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
 
                 // 4. Write anchor snapshot

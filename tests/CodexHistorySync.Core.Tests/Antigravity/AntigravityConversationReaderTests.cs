@@ -113,4 +113,51 @@ public sealed class AntigravityConversationReaderTests : IDisposable
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             reader.ReadAsync(convDb, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task ReadAsync_DropsIntermediateThinkingStepsWhenVisibleAssistantResponseExists()
+    {
+        var sessionId = Guid.NewGuid().ToString();
+        var convDb = _paths.ConversationDatabasePath(sessionId);
+
+        using var toolStepBody = new MemoryStream();
+        // field 3 = thinking, field 7 = tool_call
+        var thinkingBytes = System.Text.Encoding.UTF8.GetBytes("Internal reasoning before calling read_file...");
+        toolStepBody.WriteByte((3 << 3) | 2);
+        toolStepBody.WriteByte((byte)thinkingBytes.Length);
+        toolStepBody.Write(thinkingBytes);
+        var toolBytes = new byte[] { 0x0A, 0x09, (byte)'r', (byte)'e', (byte)'a', (byte)'d', (byte)'_', (byte)'f', (byte)'i', (byte)'l', (byte)'e' };
+        toolStepBody.WriteByte((7 << 3) | 2);
+        toolStepBody.WriteByte((byte)toolBytes.Length);
+        toolStepBody.Write(toolBytes);
+
+        using var toolStepPayload = new MemoryStream();
+        var bodyArray = toolStepBody.ToArray();
+        toolStepPayload.WriteByte((20 << 3) | 2);
+        toolStepPayload.WriteByte((byte)bodyArray.Length);
+        toolStepPayload.Write(bodyArray);
+
+        var steps = new List<AntigravityStepRow>
+        {
+            new(0, AntigravityProtobuf.StepTypeUserInput, AntigravityProtobuf.StepStatusDone,
+                AntigravityProtobuf.EncodeUserInput("Check the configuration file.")),
+            new(1, AntigravityProtobuf.StepTypePlannerResponse, AntigravityProtobuf.StepStatusDone,
+                toolStepPayload.ToArray()),
+            new(2, AntigravityProtobuf.StepTypePlannerResponse, AntigravityProtobuf.StepStatusDone,
+                AntigravityProtobuf.EncodePlannerResponse(string.Empty, "Intermediate retry thought without visible reply")),
+            new(3, AntigravityProtobuf.StepTypePlannerResponse, AntigravityProtobuf.StepStatusDone,
+                AntigravityProtobuf.EncodePlannerResponse("The configuration file is valid.", "Final check complete."))
+        };
+
+        AntigravityDatabase.WriteSteps(convDb, "traj-1", sessionId, steps);
+
+        var reader = new AntigravityConversationReader();
+        var conversation = await reader.ReadAsync(convDb, CancellationToken.None);
+
+        Assert.Equal(2, conversation.Turns.Count);
+        Assert.Equal(ConversationRole.User, conversation.Turns[0].Role);
+        Assert.Equal("Check the configuration file.", conversation.Turns[0].Text);
+        Assert.Equal(ConversationRole.Assistant, conversation.Turns[1].Role);
+        Assert.Equal("The configuration file is valid.", conversation.Turns[1].Text);
+    }
 }

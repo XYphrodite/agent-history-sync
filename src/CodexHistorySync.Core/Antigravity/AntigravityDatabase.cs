@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
@@ -18,7 +19,8 @@ public sealed record AntigravityStepRow(
     int Index,
     int StepType,
     int Status,
-    byte[] Payload);
+    byte[] Payload,
+    byte[]? Metadata = null);
 
 public sealed record AntigravityTrajectoryMeta(
     string TrajectoryId,
@@ -66,6 +68,8 @@ public static class AntigravityDatabase
         return connection;
     }
 
+    private const string DefaultInstallId = "00000000-0000-0000-0000-000000000000";
+
     public static void EnsureSummariesTable(SqliteConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -73,19 +77,31 @@ public static class AntigravityDatabase
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            CREATE TABLE IF NOT EXISTS conversation_summaries (
-                conversation_id TEXT PRIMARY KEY,
-                parent_conversation_id TEXT,
-                nesting_depth INTEGER,
-                agent_name TEXT,
-                title TEXT,
-                status TEXT,
-                workspace_uris TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
+            CREATE TABLE IF NOT EXISTS `conversation_summaries` (
+                `conversation_id` text PRIMARY KEY,
+                `title` text NOT NULL DEFAULT "",
+                `preview` text NOT NULL DEFAULT "",
+                `step_count` integer NOT NULL DEFAULT 0,
+                `last_modified_time` datetime NOT NULL DEFAULT "",
+                `workspace_uris` text NOT NULL DEFAULT "[]",
+                `status` text NOT NULL DEFAULT "",
+                `source` text NOT NULL DEFAULT "",
+                `project_id` text NOT NULL DEFAULT "",
+                `agent_name` text NOT NULL DEFAULT "",
+                `parent_conversation_id` text NOT NULL DEFAULT "",
+                `nesting_depth` integer NOT NULL DEFAULT 0,
+                `battle_id` text NOT NULL DEFAULT "",
+                `winning_conversation_id` text NOT NULL DEFAULT "",
+                `not_fully_idle` numeric NOT NULL DEFAULT false,
+                `killed` numeric NOT NULL DEFAULT false,
+                `last_user_input_time` datetime NOT NULL DEFAULT "",
+                `last_user_input_step_index` integer NOT NULL DEFAULT -1,
+                `app_data_dir` text NOT NULL DEFAULT "",
+                `raw_summary` blob,
+                `group_id` text NOT NULL DEFAULT ""
             );
-            CREATE INDEX IF NOT EXISTS idx_parent_conv_id ON conversation_summaries(parent_conversation_id);
-            CREATE INDEX IF NOT EXISTS idx_agent_name ON conversation_summaries(agent_name);
+            CREATE INDEX IF NOT EXISTS `idx_conversation_summaries_last_user_input_time` ON `conversation_summaries`(`last_user_input_time`);
+            CREATE INDEX IF NOT EXISTS `idx_conversation_summaries_last_modified_time` ON `conversation_summaries`(`last_modified_time`);
             """;
         command.ExecuteNonQuery();
     }
@@ -182,7 +198,13 @@ public static class AntigravityDatabase
         return ReadSummaries(dbPath).FirstOrDefault(s => string.Equals(s.ConversationId, conversationId, StringComparison.OrdinalIgnoreCase));
     }
 
-    public static void WriteSummary(string dbPath, AntigravitySummaryRow summary)
+    public static void WriteSummary(
+        string dbPath,
+        AntigravitySummaryRow summary,
+        int stepCount = 0,
+        int lastUserStepIndex = -1,
+        string? trajectoryId = null,
+        string? preview = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
         ArgumentNullException.ThrowIfNull(summary);
@@ -207,23 +229,50 @@ public static class AntigravityDatabase
             }
         }
 
+        var normalizedTitle = summary.Title ?? string.Empty;
+        var normalizedPreview = preview ?? normalizedTitle;
+        var primaryWorkspaceUri = summary.WorkspaceUris is { Count: > 0 } && !string.IsNullOrWhiteSpace(summary.WorkspaceUris[0])
+            ? summary.WorkspaceUris[0]
+            : null;
+        var effectiveTrajectoryId = string.IsNullOrWhiteSpace(trajectoryId) ? summary.ConversationId : trajectoryId;
+        var rawSummaryBytes = AntigravityProtobuf.EncodeRawSummary(
+            sessionId: effectiveTrajectoryId,
+            cascadeId: summary.ConversationId,
+            title: normalizedTitle,
+            preview: normalizedPreview,
+            stepCount: Math.Max(0, stepCount),
+            createdAt: summary.CreatedAt,
+            updatedAt: summary.UpdatedAt,
+            lastUserInputAt: summary.CreatedAt,
+            lastUserStepIndex: lastUserStepIndex,
+            workspaceUri: primaryWorkspaceUri,
+            installId: DefaultInstallId);
+
         TryAddColumn("conversation_id", summary.ConversationId);
-        TryAddColumn("parent_conversation_id", string.IsNullOrEmpty(summary.ParentConversationId) ? DBNull.Value : summary.ParentConversationId);
+        TryAddColumn("parent_conversation_id", summary.ParentConversationId ?? string.Empty);
         TryAddColumn("nesting_depth", summary.NestingDepth);
-        TryAddColumn("agent_name", string.IsNullOrEmpty(summary.AgentName) ? DBNull.Value : summary.AgentName);
-        TryAddColumn("title", summary.Title ?? string.Empty);
-        TryAddColumn("status", string.IsNullOrEmpty(summary.Status) ? DBNull.Value : summary.Status);
+        TryAddColumn("agent_name", summary.AgentName ?? string.Empty);
+        TryAddColumn("title", normalizedTitle);
+        TryAddColumn("status", summary.Status ?? string.Empty);
         TryAddColumn("workspace_uris", summary.WorkspaceUris is not null && summary.WorkspaceUris.Count > 0
             ? JsonSerializer.Serialize(summary.WorkspaceUris)
             : "[]");
         TryAddColumn("created_at", summary.CreatedAt.ToUnixTimeSeconds());
         TryAddColumn("updated_at", summary.UpdatedAt.ToUnixTimeSeconds());
-        TryAddColumn("last_modified_time", summary.UpdatedAt.ToString("o"));
-        TryAddColumn("last_user_input_time", summary.CreatedAt.ToString("o"));
-        TryAddColumn("preview", summary.Title ?? string.Empty);
-        TryAddColumn("step_count", 0);
+        TryAddColumn("last_modified_time", FormatSqlDateTime(summary.UpdatedAt));
+        TryAddColumn("last_user_input_time", FormatSqlDateTime(summary.CreatedAt));
+        TryAddColumn("last_user_input_step_index", lastUserStepIndex);
+        TryAddColumn("preview", normalizedPreview);
+        TryAddColumn("step_count", Math.Max(0, stepCount));
+        TryAddColumn("source", string.Empty);
+        TryAddColumn("battle_id", string.Empty);
+        TryAddColumn("winning_conversation_id", string.Empty);
+        TryAddColumn("not_fully_idle", 0);
+        TryAddColumn("killed", 0);
         TryAddColumn("app_data_dir", "antigravity-cli");
         TryAddColumn("project_id", "default-cli-project");
+        TryAddColumn("raw_summary", rawSummaryBytes);
+        TryAddColumn("group_id", string.Empty);
 
         using var command = connection.CreateCommand();
         command.CommandText =
@@ -246,10 +295,23 @@ public static class AntigravityDatabase
         try
         {
             using var connection = OpenConnection(dbPath, write: true);
-            using var command = connection.CreateCommand();
-            command.CommandText = "DELETE FROM conversation_summaries WHERE conversation_id = @id;";
-            command.Parameters.AddWithValue("@id", conversationId);
-            command.ExecuteNonQuery();
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = "DELETE FROM conversation_summaries WHERE conversation_id = @id;";
+                command.Parameters.AddWithValue("@id", conversationId);
+                command.ExecuteNonQuery();
+            }
+
+            try
+            {
+                using var ftsCommand = connection.CreateCommand();
+                ftsCommand.CommandText = "DELETE FROM conversations_fts WHERE conversation_id = @id;";
+                ftsCommand.Parameters.AddWithValue("@id", conversationId);
+                ftsCommand.ExecuteNonQuery();
+            }
+            catch (SqliteException)
+            {
+            }
         }
         catch (SqliteException)
         {
@@ -263,17 +325,47 @@ public static class AntigravityDatabase
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            CREATE TABLE IF NOT EXISTS trajectory_meta (
-                trajectory_id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL,
-                trajectory_type INTEGER,
-                total_steps INTEGER
+            CREATE TABLE IF NOT EXISTS `trajectory_meta` (
+                `trajectory_id` text PRIMARY KEY,
+                `cascade_id` text,
+                `trajectory_type` integer,
+                `source` integer
             );
-            CREATE TABLE IF NOT EXISTS steps (
-                idx INTEGER PRIMARY KEY,
-                step_type INTEGER NOT NULL,
-                status INTEGER NOT NULL,
-                step_payload BLOB NOT NULL
+            CREATE TABLE IF NOT EXISTS `steps` (
+                `idx` integer PRIMARY KEY,
+                `step_type` integer NOT NULL DEFAULT 0,
+                `status` integer NOT NULL DEFAULT 0,
+                `has_subtrajectory` numeric NOT NULL DEFAULT false,
+                `metadata` blob,
+                `error_details` blob,
+                `permissions` blob,
+                `task_details` blob,
+                `render_info` blob,
+                `step_payload` blob,
+                `step_format` integer NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS `idx_steps_status` ON `steps`(`status`);
+            CREATE INDEX IF NOT EXISTS `idx_steps_step_type` ON `steps`(`step_type`);
+            CREATE TABLE IF NOT EXISTS `gen_metadata` (
+                `idx` integer PRIMARY KEY,
+                `data` blob,
+                `size` integer NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS `executor_metadata` (
+                `idx` integer PRIMARY KEY,
+                `data` blob
+            );
+            CREATE TABLE IF NOT EXISTS `parent_references` (
+                `idx` integer PRIMARY KEY,
+                `data` blob
+            );
+            CREATE TABLE IF NOT EXISTS `trajectory_metadata_blob` (
+                `id` text DEFAULT "main" PRIMARY KEY,
+                `data` blob
+            );
+            CREATE TABLE IF NOT EXISTS `battle_mode_infos` (
+                `idx` integer PRIMARY KEY,
+                `data` blob
             );
             """;
         command.ExecuteNonQuery();
@@ -421,7 +513,13 @@ public static class AntigravityDatabase
         }
     }
 
-    public static void WriteSteps(string dbPath, string trajectoryId, string conversationId, IReadOnlyList<AntigravityStepRow> steps)
+    public static void WriteSteps(
+        string dbPath,
+        string trajectoryId,
+        string conversationId,
+        IReadOnlyList<AntigravityStepRow> steps,
+        string? workspaceUri = null,
+        DateTimeOffset? createdAt = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(trajectoryId);
@@ -432,6 +530,8 @@ public static class AntigravityDatabase
         EnsureConversationTables(connection);
 
         var existingColumns = GetTableColumns(connection, "trajectory_meta");
+        var stepColumns = GetTableColumns(connection, "steps");
+        var metadataBlobColumns = GetTableColumns(connection, "trajectory_metadata_blob");
 
         using var transaction = connection.BeginTransaction();
 
@@ -454,6 +554,7 @@ public static class AntigravityDatabase
         TryAddMetaColumn("conversation_id", conversationId);
         TryAddMetaColumn("cascade_id", conversationId);
         TryAddMetaColumn("trajectory_type", 4);
+        TryAddMetaColumn("source", 17);
         TryAddMetaColumn("total_steps", steps.Count);
 
         using (var metaCommand = connection.CreateCommand())
@@ -471,6 +572,20 @@ public static class AntigravityDatabase
             metaCommand.ExecuteNonQuery();
         }
 
+        if (metadataBlobColumns.Contains("id") && metadataBlobColumns.Contains("data"))
+        {
+            var blobBytes = AntigravityProtobuf.EncodeTrajectoryMetadata(
+                workspaceUri: workspaceUri,
+                createdAt: createdAt ?? DateTimeOffset.UtcNow,
+                cascadeId: conversationId,
+                installId: DefaultInstallId);
+            using var blobCommand = connection.CreateCommand();
+            blobCommand.Transaction = transaction;
+            blobCommand.CommandText = "INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', @data);";
+            blobCommand.Parameters.Add("@data", SqliteType.Blob).Value = blobBytes;
+            blobCommand.ExecuteNonQuery();
+        }
+
         using (var cleanCommand = connection.CreateCommand())
         {
             cleanCommand.Transaction = transaction;
@@ -478,32 +593,48 @@ public static class AntigravityDatabase
             cleanCommand.ExecuteNonQuery();
         }
 
+        var includeStepMetadata = stepColumns.Contains("metadata");
         using (var stepCommand = connection.CreateCommand())
         {
             stepCommand.Transaction = transaction;
-            stepCommand.CommandText =
-                """
-                INSERT OR REPLACE INTO steps (idx, step_type, status, step_payload)
-                VALUES (@idx, @type, @status, @payload);
-                """;
+            stepCommand.CommandText = includeStepMetadata
+                ? """
+                  INSERT OR REPLACE INTO steps (idx, step_type, status, metadata, step_payload)
+                  VALUES (@idx, @type, @status, @metadata, @payload);
+                  """
+                : """
+                  INSERT OR REPLACE INTO steps (idx, step_type, status, step_payload)
+                  VALUES (@idx, @type, @status, @payload);
+                  """;
 
             var idxParam = stepCommand.Parameters.Add("@idx", SqliteType.Integer);
             var typeParam = stepCommand.Parameters.Add("@type", SqliteType.Integer);
             var statusParam = stepCommand.Parameters.Add("@status", SqliteType.Integer);
+            var metadataParam = includeStepMetadata ? stepCommand.Parameters.Add("@metadata", SqliteType.Blob) : null;
             var payloadParam = stepCommand.Parameters.Add("@payload", SqliteType.Blob);
 
             foreach (var step in steps)
             {
+                var payloadBytes = step.Payload ?? Array.Empty<byte>();
                 idxParam.Value = step.Index;
                 typeParam.Value = step.StepType;
                 statusParam.Value = step.Status;
-                payloadParam.Value = step.Payload ?? Array.Empty<byte>();
+                if (metadataParam is not null)
+                {
+                    metadataParam.Value = step.Metadata
+                        ?? AntigravityProtobuf.TryExtractStepMetadata(payloadBytes)
+                        ?? Array.Empty<byte>();
+                }
+                payloadParam.Value = payloadBytes;
                 stepCommand.ExecuteNonQuery();
             }
         }
 
         transaction.Commit();
     }
+
+    private static string FormatSqlDateTime(DateTimeOffset timestamp) =>
+        timestamp.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss.fffffff+00:00", CultureInfo.InvariantCulture);
 
     private static HashSet<string> GetTableColumns(SqliteConnection connection, string tableName)
     {

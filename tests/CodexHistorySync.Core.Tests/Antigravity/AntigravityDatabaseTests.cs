@@ -201,7 +201,9 @@ public sealed class AntigravityDatabaseTests : IDisposable
         Assert.NotNull(conv);
         Assert.Equal(ConversationAgent.Antigravity, conv.SourceAgent);
         Assert.Equal("5cd2c358-74bf-45cd-908c-a86726b982bb", conv.SourceSessionId);
-        Assert.True(conv.Turns.Count >= 239);
+        Assert.Equal(50, conv.Turns.Count);
+        Assert.Equal(49, conv.Turns.Count(t => t.Role == ConversationRole.User));
+        Assert.Equal(1, conv.Turns.Count(t => t.Role == ConversationRole.Assistant));
         Assert.Equal("Antigravity Sessions Project Review", conv.Title);
     }
 

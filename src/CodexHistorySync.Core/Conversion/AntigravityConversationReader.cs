@@ -68,6 +68,26 @@ public sealed class AntigravityConversationReader : IConversationReader
         try
         {
             var steps = AntigravityDatabase.ReadSteps(convDbPath);
+            var hasVisibleAssistantResponse = false;
+            var hasNonToolThinking = false;
+            foreach (var step in steps)
+            {
+                if (step.StepType != AntigravityProtobuf.StepTypePlannerResponse)
+                    continue;
+
+                var (response, thinking) = AntigravityProtobuf.ExtractPlannerResponse(step.Payload);
+                if (!string.IsNullOrWhiteSpace(response))
+                {
+                    hasVisibleAssistantResponse = true;
+                    break;
+                }
+
+                if (!string.IsNullOrWhiteSpace(thinking) && !AntigravityProtobuf.HasPlannerToolCalls(step.Payload))
+                {
+                    hasNonToolThinking = true;
+                }
+            }
+
             var turns = new List<PortableTurn>();
 
             foreach (var step in steps)
@@ -85,7 +105,23 @@ public sealed class AntigravityConversationReader : IConversationReader
                 else if (step.StepType == AntigravityProtobuf.StepTypePlannerResponse)
                 {
                     var (response, thinking) = AntigravityProtobuf.ExtractPlannerResponse(step.Payload);
-                    var text = !string.IsNullOrWhiteSpace(response) ? response : thinking;
+                    string? text;
+                    if (hasVisibleAssistantResponse)
+                    {
+                        // Real Antigravity sessions emit intermediate PLANNER_RESPONSE steps carrying
+                        // only internal chain-of-thought (thinking) + tool_calls before the final visible
+                        // reply. Exclude thinking when the conversation carries real assistant responses.
+                        text = response;
+                    }
+                    else if (hasNonToolThinking && AntigravityProtobuf.HasPlannerToolCalls(step.Payload))
+                    {
+                        text = null;
+                    }
+                    else
+                    {
+                        text = !string.IsNullOrWhiteSpace(response) ? response : thinking;
+                    }
+
                     if (!string.IsNullOrWhiteSpace(text))
                     {
                         turns.Add(new PortableTurn(ConversationRole.Assistant, text));
@@ -108,7 +144,7 @@ public sealed class AntigravityConversationReader : IConversationReader
                 try
                 {
                     var summaries = AntigravityDatabase.ReadSummaries(summariesDbPath);
-                    var summary = summaries.FirstOrDefault(s => string.Equals(s.ConversationId, sessionId, StringComparison.Ordinal));
+                    var summary = summaries.FirstOrDefault(s => string.Equals(s.ConversationId, sessionId, StringComparison.OrdinalIgnoreCase));
                     if (summary is not null)
                     {
                         if (!string.IsNullOrWhiteSpace(summary.Title))

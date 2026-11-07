@@ -129,7 +129,7 @@ public sealed class AntigravitySessionCatalogSourceTests : IDisposable
                     title TEXT
                 );
                 INSERT INTO conversation_summaries (conversation_id, parent_conversation_id, nesting_depth, title)
-                VALUES (@id, NULL, 0, 'Title 1');
+                VALUES (@id, '', 0, 'Title 1');
                 """;
             cmd.Parameters.AddWithValue("@id", id);
             cmd.ExecuteNonQuery();

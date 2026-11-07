@@ -260,6 +260,28 @@ public static class AntigravityProtobuf
         return (response, thinking);
     }
 
+    public static byte[]? TryExtractStepMetadata(ReadOnlySpan<byte> stepPayload)
+    {
+        if (stepPayload.IsEmpty)
+            return null;
+
+        return TryGetLengthDelimitedField(stepPayload, 5, out var metadata) && !metadata.IsEmpty
+            ? metadata.ToArray()
+            : null;
+    }
+
+    public static bool HasPlannerToolCalls(ReadOnlySpan<byte> stepPayload)
+    {
+        if (stepPayload.IsEmpty)
+            return false;
+
+        ReadOnlySpan<byte> body = TryGetLengthDelimitedField(stepPayload, 20, out var plannerBody)
+            ? plannerBody
+            : stepPayload;
+
+        return TryGetLengthDelimitedField(body, 7, out var toolCall) && !toolCall.IsEmpty;
+    }
+
     public static byte[] EncodeUserInput(string text)
     {
         var now = DateTimeOffset.UtcNow;
